@@ -32,6 +32,8 @@ from monai.transforms.transform import Transform
 from monai.config import KeysCollection, DtypeLike
 from monai.utils.enums import TransformBackends
 
+from src.prompt import generate_prompt
+
 
 def _load_nifti_memmap(filename: str | Path) -> np.ndarray:
     """Load a NIfTI file using nibabel with memory mapping enabled.
@@ -123,9 +125,11 @@ class AddChannelD(MapTransform):
 class BrainTumourDataset(Dataset):
     """Dataset for loading brain tumour volumes and labels.
 
-    Each item is expected to be a dict containing ``image`` and ``label`` paths
-    along with a ``text`` description. Images are loaded using nibabel with
-    memory mapping and then passed through the provided transform pipeline.
+    Each item is expected to provide ``image`` and ``label`` file paths. A
+    textual description is optional; when absent it is generated on the fly
+    from the ``label`` volume via :func:`src.prompt.generate_prompt`. Images are
+    loaded using nibabel with memory mapping and then passed through the
+    provided transform pipeline.
     """
 
     def __init__(self, data: Sequence[Dict[str, Any]], transform: Transform | None = None) -> None:
@@ -137,9 +141,14 @@ class BrainTumourDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         item = dict(self.data[index])
+
+        label_path = item.get("label")
+        if "text" not in item and label_path is not None:
+            item["text"] = generate_prompt(label_path)
+
         item["image"] = _load_nifti_memmap(item["image"])
-        if "label" in item:
-            item["label"] = _load_nifti_memmap(item["label"])
+        if label_path is not None:
+            item["label"] = _load_nifti_memmap(label_path)
         if self.transform is not None:
             item = self.transform(item)
         return item

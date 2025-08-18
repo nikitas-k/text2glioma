@@ -5,6 +5,7 @@ from .functions import (
     estimate_midline_shift_mm,
     tumour_lobe_hemisphere,
 )
+from .prompt import generate_prompt
 
 __all__ = [
     "voxel_volume_ml",
@@ -12,4 +13,5 @@ __all__ = [
     "edema_severity_from_labels",
     "estimate_midline_shift_mm",
     "tumour_lobe_hemisphere",
+    "generate_prompt",
 ]
