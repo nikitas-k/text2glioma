@@ -1,0 +1,17 @@
+{
+  "spatial_dims": 3,
+  "in_channels": 8,
+  "out_channels": 8,
+  "num_channels": [256, 512, 768],
+  "num_res_blocks": 2,
+  "attention_levels": [false, true, true],
+  "norm_num_groups": 32,
+  "norm_eps": 1e-6,
+  "resblock_updown": true,
+  "num_head_channels": [0, 64, 64],
+  "with_conditioning": true,
+  "transformer_num_layers": 1,
+  "cross_attention_dim": 1024,
+  "upcast_attention": true,
+  "use_flash_attention": false
+}
