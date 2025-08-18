@@ -51,14 +51,18 @@ def generate_images(
     config_path:
         Path to a YAML configuration file.  At minimum it must contain a
         ``guidance_scale`` entry.  Additional optional keys are ``num_steps``,
-        ``depth``, ``height``, ``width`` and ``scale_factor``.
+        ``depth``, ``height``, ``width`` and ``scale_factor``.  Further
+        ``healthy_prompt`` may specify a baseline prompt to compare against,
+        ``difference_threshold`` sets the cutoff for the difference map and
+        ``save_difference`` enables storing that map to ``difference.pt``.
     device:
         Device on which to run the computation.
 
     Returns
     -------
-    torch.Tensor
-        Tensor of shape ``(1, 3, D, H, W)`` representing the generated volume.
+    torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+        Generated image.  If a ``healthy_prompt`` is provided the second
+        element of the tuple contains the difference map.
     """
 
     cfg = load_config(config_path)
@@ -69,28 +73,45 @@ def generate_images(
     width = int(cfg.get("width", 128))
     scale_factor = float(cfg.get("scale_factor", 1.0))
 
-    cond, uncond = prepare_conditioning([prompt], text_encoder, device)
-    context = torch.cat([uncond, cond])
+    healthy_prompt = cfg.get("healthy_prompt")
+    difference_threshold = float(cfg.get("difference_threshold", 0.0))
+    save_difference = bool(cfg.get("save_difference", False))
 
-    scheduler.set_timesteps(num_steps, device=device)
-    latents = torch.randn(
-        1,
-        model.in_channels,
-        depth // 8,
-        height // 8,
-        width // 8,
-        device=device,
-    )
+    def _sample(prompt_text: str) -> torch.Tensor:
+        cond, uncond = prepare_conditioning([prompt_text], text_encoder, device)
+        context = torch.cat([uncond, cond])
 
-    for t in scheduler.timesteps:
-        latent_model_input = torch.cat([latents, latents])
-        latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-        noise_pred = model(latent_model_input, t, context)
-        noise_uncond, noise_cond = noise_pred.chunk(2)
-        noise_pred = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
-        latents = scheduler.step(noise_pred, t, latents).prev_sample
+        scheduler.set_timesteps(num_steps, device=device)
+        latents = torch.randn(
+            1,
+            model.in_channels,
+            depth // 8,
+            height // 8,
+            width // 8,
+            device=device,
+        )
 
-    latents = latents / scale_factor
-    with torch.no_grad():
-        images = stage1.decode(latents).clamp(0, 1)
+        for t in scheduler.timesteps:
+            latent_model_input = torch.cat([latents, latents])
+            latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+            noise_pred = model(latent_model_input, t, context)
+            noise_uncond, noise_cond = noise_pred.chunk(2)
+            noise_pred = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+            latents = scheduler.step(noise_pred, t, latents).prev_sample
+
+        latents = latents / scale_factor
+        with torch.no_grad():
+            return stage1.decode(latents).clamp(0, 1)
+
+    images = _sample(prompt)
+
+    if healthy_prompt:
+        healthy = _sample(healthy_prompt)
+        difference = (images - healthy).abs()
+        if difference_threshold:
+            difference = (difference > difference_threshold).float()
+        if save_difference:
+            torch.save(difference, "difference.pt")
+        return images, difference
+
     return images
