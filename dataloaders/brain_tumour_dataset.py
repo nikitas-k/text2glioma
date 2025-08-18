@@ -33,6 +33,7 @@ from monai.config import KeysCollection, DtypeLike
 from monai.utils.enums import TransformBackends
 
 from src.prompt import generate_prompt
+from .metadata import extract_brats_id, load_brats_metadata
 
 
 def _load_nifti_memmap(filename: str | Path) -> np.ndarray:
@@ -144,9 +145,15 @@ class BrainTumourDataset(Dataset):
     provided transform pipeline.
     """
 
-    def __init__(self, data: Sequence[Dict[str, Any]], transform: Transform | None = None) -> None:
+    def __init__(
+        self,
+        data: Sequence[Dict[str, Any]],
+        transform: Transform | None = None,
+        metadata: Mapping[str, Dict[str, str]] | None = None,
+    ) -> None:
         self.data = list(data)
         self.transform = transform
+        self.metadata = metadata
 
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self.data)
@@ -156,7 +163,16 @@ class BrainTumourDataset(Dataset):
 
         label_path = item.get("label")
         if "text" not in item and label_path is not None:
-            item["text"] = generate_prompt(label_path)
+            mgmt_status = idh_status = None
+            if self.metadata is not None:
+                brats_id = extract_brats_id(label_path)
+                meta = self.metadata.get(brats_id)
+                if meta is not None:
+                    mgmt_status = meta.get("mgmt_status")
+                    idh_status = meta.get("idh_status")
+            item["text"] = generate_prompt(
+                label_path, mgmt_status=mgmt_status, idh_status=idh_status
+            )
 
         item["image"] = _load_nifti_memmap(item["image"])
         if label_path is not None:
@@ -175,7 +191,9 @@ class LoaderConfig:
 
     ``train_transforms`` and ``val_transforms`` allow injection of additional
     MONAI transforms that will be prepended to the standard pipeline for the
-    training and validation datasets respectively.
+    training and validation datasets respectively. ``metadata_csv`` can be used
+    to supply a BraTS metadata table whose ``DataID`` entries are matched to
+    filenames to enrich generated prompts.
     """
 
     train_files: Sequence[Dict[str, Any]]
@@ -185,6 +203,7 @@ class LoaderConfig:
     prefetch_factor: int = 2
     train_transforms: Sequence[Transform] | None = None
     val_transforms: Sequence[Transform] | None = None
+    metadata_csv: str | Path | None = None
 
 
 def _build_transforms(extra_transforms: Sequence[Transform] | None = None) -> Transform:
@@ -226,11 +245,20 @@ def create_dataloaders(config: LoaderConfig) -> Dict[str, DataLoader]:
         Dictionary with ``"train"`` and ``"val"`` ``DataLoader`` instances.
     """
 
+    metadata = (
+        load_brats_metadata(config.metadata_csv)
+        if config.metadata_csv is not None
+        else None
+    )
     train_ds = BrainTumourDataset(
-        config.train_files, transform=_build_transforms(config.train_transforms)
+        config.train_files,
+        transform=_build_transforms(config.train_transforms),
+        metadata=metadata,
     )
     val_ds = BrainTumourDataset(
-        config.val_files, transform=_build_transforms(config.val_transforms)
+        config.val_files,
+        transform=_build_transforms(config.val_transforms),
+        metadata=metadata,
     )
 
     loader_args = dict(

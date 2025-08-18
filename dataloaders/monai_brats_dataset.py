@@ -29,6 +29,7 @@ from src.prompt import generate_prompt
 from .brain_tumour_dataset import (
     ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d,
 )
+from .metadata import extract_brats_id, load_brats_metadata
 
 
 class PromptFromLabeld(MapTransform):
@@ -36,13 +37,19 @@ class PromptFromLabeld(MapTransform):
 
     The transform looks up the ``filename_or_obj`` entry produced by
     :class:`LoadImaged` for ``label`` and uses :func:`~src.prompt.generate_prompt`
-    to derive a textual description.  The resulting string is stored under the
-    ``text`` key so that downstream training functions can consume it.
+    to derive a textual description.  Optional metadata can be supplied to
+    enrich the prompt with MGMT or IDH status information.
     """
 
-    def __init__(self, keys: KeysCollection = ("label",), text_key: str = "text") -> None:
+    def __init__(
+        self,
+        keys: KeysCollection = ("label",),
+        text_key: str = "text",
+        metadata: Mapping[str, Dict[str, str]] | None = None,
+    ) -> None:
         super().__init__(keys)
         self.text_key = text_key
+        self.metadata = metadata
 
     def __call__(self, data: Mapping[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
         d = dict(data)
@@ -50,13 +57,26 @@ class PromptFromLabeld(MapTransform):
             meta = d.get(f"{key}_meta_dict", {})
             filename = meta.get("filename_or_obj")
             if filename is not None:
-                d[self.text_key] = generate_prompt(filename)
+                mgmt_status = idh_status = None
+                if self.metadata is not None:
+                    brats_id = extract_brats_id(filename)
+                    record = self.metadata.get(brats_id)
+                    if record is not None:
+                        mgmt_status = record.get("mgmt_status")
+                        idh_status = record.get("idh_status")
+                d[self.text_key] = generate_prompt(
+                    filename, mgmt_status=mgmt_status, idh_status=idh_status
+                )
         return d
 
 
 @dataclass
 class BratsLoaderConfig:
-    """Configuration for :func:`create_brats_dataloaders`."""
+    """Configuration for :func:`create_brats_dataloaders`.
+
+    ``metadata_csv`` may point to a BraTS metadata table used to augment text
+    prompts with molecular information.
+    """
 
     root: str | Path
     batch_size: int = 1
@@ -66,6 +86,7 @@ class BratsLoaderConfig:
     val_transforms: Sequence[Transform] | None = None
     train_section: str = "training"
     val_section: str = "validation"
+    metadata_csv: str | Path | None = None
 
 
 def _import_brats_dataset() -> Any:
@@ -84,7 +105,10 @@ def _import_brats_dataset() -> Any:
     raise RuntimeError("BratsDataset is unavailable. Please install MONAI with BraTS extras.")
 
 
-def _build_transforms(extra: Sequence[Transform] | None = None) -> Transform:
+def _build_transforms(
+    extra: Sequence[Transform] | None = None,
+    metadata: Mapping[str, Dict[str, str]] | None = None,
+) -> Transform:
     """Compose preprocessing transforms for BraTS items."""
 
     transforms: list[Transform] = []
@@ -97,7 +121,7 @@ def _build_transforms(extra: Sequence[Transform] | None = None) -> Transform:
             ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d(
                 keys="label", allow_missing_keys=True
             ),
-            PromptFromLabeld(keys="label", text_key="text"),
+            PromptFromLabeld(keys="label", text_key="text", metadata=metadata),
             EnsureTyped(keys=["image", "label"], dtype=np.float32),
         ]
     )
@@ -117,15 +141,20 @@ def _create_dataset(root: str | Path, section: str, transform: Transform) -> Any
 def create_brats_dataloaders(config: BratsLoaderConfig) -> Dict[str, DataLoader]:
     """Factory returning training and validation ``DataLoader`` instances."""
 
+    metadata = (
+        load_brats_metadata(config.metadata_csv)
+        if config.metadata_csv is not None
+        else None
+    )
     train_ds = _create_dataset(
         root=config.root,
         section=config.train_section,
-        transform=_build_transforms(config.train_transforms),
+        transform=_build_transforms(config.train_transforms, metadata),
     )
     val_ds = _create_dataset(
         root=config.root,
         section=config.val_section,
-        transform=_build_transforms(config.val_transforms),
+        transform=_build_transforms(config.val_transforms, metadata),
     )
 
     loader_args = dict(
