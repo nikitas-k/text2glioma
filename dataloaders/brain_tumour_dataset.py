@@ -6,7 +6,9 @@ It also provides a :func:`create_dataloaders` factory returning PyTorch
 ``DataLoader`` instances for training and validation splits.
 
 The transform pipeline integrates the custom ``ConvertToMultiChannel...``
-transform and ``ConvertTextd`` defined below.
+transform and ``ConvertTextd`` defined below. Additional MONAI transforms can
+be injected via the :class:`LoaderConfig` to tailor preprocessing or
+augmentation.
 """
 
 from __future__ import annotations
@@ -145,27 +147,44 @@ class BrainTumourDataset(Dataset):
 
 @dataclass
 class LoaderConfig:
-    """Configuration options for :func:`create_dataloaders`."""
+    """Configuration options for :func:`create_dataloaders`.
+
+    ``train_transforms`` and ``val_transforms`` allow injection of additional
+    MONAI transforms that will be prepended to the standard pipeline for the
+    training and validation datasets respectively.
+    """
 
     train_files: Sequence[Dict[str, Any]]
     val_files: Sequence[Dict[str, Any]]
     batch_size: int = 1
     num_workers: int = 0
     prefetch_factor: int = 2
-    augment: bool = False
+    train_transforms: Sequence[Transform] | None = None
+    val_transforms: Sequence[Transform] | None = None
 
 
-def _build_transforms(train: bool, augment: bool = False) -> Transform:
-    """Create the transform pipeline for dataset items."""
+def _build_transforms(extra_transforms: Sequence[Transform] | None = None) -> Transform:
+    """Create the transform pipeline for dataset items.
 
-    transforms: List[Transform] = [
-        AddChannelD(keys=["image", "label"]),
-        ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d(keys="label"),
-        ConvertTextd(keys="image", text_key="text"),
-        EnsureTyped(keys=["image", "label"], dtype=np.float32),
-    ]
-    if train and augment:
-        transforms.insert(0, RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0))
+    Parameters
+    ----------
+    extra_transforms: sequence of :class:`~monai.transforms.Transform`, optional
+        Additional transforms to prepend to the standard pipeline. This can be
+        used to inject augmentation transforms from the configuration.
+    """
+
+    transforms: List[Transform] = []
+    if extra_transforms is not None:
+        transforms.extend(extra_transforms)
+
+    transforms.extend(
+        [
+            AddChannelD(keys=["image", "label"]),
+            ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d(keys="label"),
+            ConvertTextd(keys="image", text_key="text"),
+            EnsureTyped(keys=["image", "label"], dtype=np.float32),
+        ]
+    )
     return Compose(transforms)
 
 
@@ -184,10 +203,10 @@ def create_dataloaders(config: LoaderConfig) -> Dict[str, DataLoader]:
     """
 
     train_ds = BrainTumourDataset(
-        config.train_files, transform=_build_transforms(train=True, augment=config.augment)
+        config.train_files, transform=_build_transforms(config.train_transforms)
     )
     val_ds = BrainTumourDataset(
-        config.val_files, transform=_build_transforms(train=False, augment=False)
+        config.val_files, transform=_build_transforms(config.val_transforms)
     )
 
     loader_args = dict(
