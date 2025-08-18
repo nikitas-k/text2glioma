@@ -12,6 +12,13 @@ dependencies = [
     "numpy",
     "scipy",
     "nibabel",
+    "torch",
+    "torchvision",
+    "torchmetrics",
+    "bert-score",
+    "open-clip-torch",
+    "pillow",
+    "PyYAML",
 ]
 
 [project.scripts]

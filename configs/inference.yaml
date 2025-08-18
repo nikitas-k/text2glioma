@@ -1,0 +1,7 @@
+guidance_scale: 7.5
+num_steps: 50
+# Dimensions for 3D generation (depth, height, width)
+depth: 80
+height: 112
+width: 128
+scale_factor: 0.18215
