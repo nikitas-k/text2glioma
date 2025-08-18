@@ -17,6 +17,8 @@ import torch
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 import torch.nn.functional as F
+from monai.losses import DiceLoss
+from monai.networks.nets import UNet
 
 try:  # prepare_conditioning comes from the ldm library
     from ldm.util import prepare_conditioning
@@ -298,3 +300,81 @@ def run_training(cfg: TrainConfig) -> float:
         best_model_path=cfg.best_model_path,
         final_model_path=cfg.final_model_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# Simple segmentation utilities
+# ---------------------------------------------------------------------------
+
+
+class SimpleUNet(nn.Module):
+    """A minimal 3D UNet based on MONAI's implementation."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        channels: tuple[int, ...] = (32, 64, 128, 256),
+        strides: tuple[int, ...] = (2, 2, 2),
+    ) -> None:
+        super().__init__()
+        self.unet = UNet(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            channels=channels,
+            strides=strides,
+            num_res_units=2,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - simple wrapper
+        return self.unet(x)
+
+
+def train_segmentation(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> float:
+    """Train ``model`` for a single epoch using Dice loss.
+
+    The ``loader`` is expected to return batches containing ``diff_mask`` and
+    ``label`` tensors. ``diff_mask`` provides the network input while ``label``
+    contains the ground truth segmentation. The mean training loss is
+    returned.
+    """
+
+    model.train()
+    criterion = DiceLoss(to_onehot_y=False, sigmoid=True)
+    epoch_loss = 0.0
+    for batch in loader:
+        diff = batch["diff_mask"].to(device)
+        target = batch["label"].to(device)
+        optimizer.zero_grad(set_to_none=True)
+        output = model(diff)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+    return epoch_loss / max(len(loader), 1)
+
+
+@torch.no_grad()
+def eval_segmentation(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> float:
+    """Evaluate ``model`` on ``loader`` returning the average Dice loss."""
+
+    model.eval()
+    criterion = DiceLoss(to_onehot_y=False, sigmoid=True)
+    total_loss = 0.0
+    for batch in loader:
+        diff = batch["diff_mask"].to(device)
+        target = batch["label"].to(device)
+        output = model(diff)
+        loss = criterion(output, target)
+        total_loss += loss.item()
+    return total_loss / max(len(loader), 1)

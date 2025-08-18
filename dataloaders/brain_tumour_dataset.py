@@ -110,8 +110,20 @@ class ConvertTextd(MapTransform):
 class AddChannelD(MapTransform):
     """Add a channel dimension to specified keys if missing."""
 
-    def __init__(self, keys: KeysCollection) -> None:
-        super().__init__(keys)
+    def __init__(self, keys: KeysCollection, allow_missing_keys: bool = False) -> None:
+        """Create transform.
+
+        Parameters
+        ----------
+        keys: KeysCollection
+            Dictionary keys to which the transform should be applied.
+        allow_missing_keys: bool, optional
+            If ``True``, keys missing from the input dictionary are ignored
+            instead of raising an error. This is handy for optional entries
+            such as ``diff_mask``.
+        """
+
+        super().__init__(keys, allow_missing_keys=allow_missing_keys)
 
     def __call__(self, data: Mapping[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
         d = dict(data)
@@ -149,6 +161,9 @@ class BrainTumourDataset(Dataset):
         item["image"] = _load_nifti_memmap(item["image"])
         if label_path is not None:
             item["label"] = _load_nifti_memmap(label_path)
+        diff_path = item.get("diff_mask")
+        if diff_path is not None:
+            item["diff_mask"] = _load_nifti_memmap(diff_path)
         if self.transform is not None:
             item = self.transform(item)
         return item
@@ -188,10 +203,10 @@ def _build_transforms(extra_transforms: Sequence[Transform] | None = None) -> Tr
 
     transforms.extend(
         [
-            AddChannelD(keys=["image", "label"]),
-            ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d(keys="label"),
+            AddChannelD(keys=["image", "label", "diff_mask"], allow_missing_keys=True),
+            ConvertToMultiChannelBasedOnBratsGliomaPosTreatClasses2024d(keys="label", allow_missing_keys=True),
             ConvertTextd(keys="image", text_key="text"),
-            EnsureTyped(keys=["image", "label"], dtype=np.float32),
+            EnsureTyped(keys=["image", "label", "diff_mask"], dtype=np.float32),
         ]
     )
     return Compose(transforms)
