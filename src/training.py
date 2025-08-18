@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 from torch import nn
@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from monai.losses import DiceLoss
 from monai.networks.nets import UNet
 
+from .prompt import generate_prompt
 try:  # prepare_conditioning comes from the ldm library
     from ldm.util import prepare_conditioning
 except Exception:  # pragma: no cover - placeholder for external dependency
@@ -41,6 +42,26 @@ def _prepare_context(tokenizer: Any, text: list[str], device: torch.device) -> t
         raise RuntimeError("prepare_conditioning is unavailable")
     context, _ = prepare_conditioning(tokenizer, text, device, dropout_p=0.2, uncond_cache=None)
     return context
+
+
+def _extract_prompts(batch: Mapping[str, Any]) -> list[str]:
+    """Return text prompts for ``batch``.
+
+    When the dataloader already provides a ``"text"`` entry the function simply
+    returns it.  Otherwise it looks for ``label_meta_dict`` populated by MONAI's
+    :class:`~monai.transforms.LoadImaged` and derives prompts from the stored
+    file names via :func:`~src.prompt.generate_prompt`.
+    """
+
+    if "text" in batch:
+        return batch["text"]
+    meta = batch.get("label_meta_dict")
+    if isinstance(meta, Mapping) and "filename_or_obj" in meta:
+        filenames = meta["filename_or_obj"]
+        if isinstance(filenames, (list, tuple)):
+            return [generate_prompt(f) for f in filenames]
+        return [generate_prompt(filenames)]
+    raise KeyError("text prompts missing from batch")
 
 def _ldm_forward(
     model: nn.Module,
@@ -105,7 +126,8 @@ def train_epoch_ldm(
     model.train()
     pbar = enumerate(loader)
     for step, batch in pbar:
-        context = _prepare_context(tokenizer, batch["text"], device)
+        texts = _extract_prompts(batch)
+        context = _prepare_context(tokenizer, texts, device)
         images = batch["image"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
@@ -135,7 +157,8 @@ def eval_ldm(
 
     for batch in loader:
         images = batch["image"].to(device)
-        context = _prepare_context(tokenizer, batch["text"], device)
+        texts = _extract_prompts(batch)
+        context = _prepare_context(tokenizer, texts, device)
         with torch.no_grad():
             with autocast():
                 noise_pred, target = _ldm_forward(
