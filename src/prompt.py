@@ -1,12 +1,14 @@
-"""Prompt generation utilities for glioma labels.
+"""Prompt generation utilities for glioma labels and healthy scans.
 
 This module combines morphology and location analysis functions to produce
-simple textual prompts describing a tumour based on its segmentation labels.
+simple textual prompts describing a tumour based on its segmentation labels
+or returns a generic description for healthy MRI volumes.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import random
 
 import nibabel as nib
 import numpy as np
@@ -18,13 +20,37 @@ from .functions import (
 )
 
 
-def generate_prompt(label_file: str | Path) -> str:
+__all__ = ["generate_prompt", "generate_healthy_prompt"]
+
+
+def generate_healthy_prompt() -> str:
+    """Return a generic healthy brain MRI description.
+
+    The function randomly chooses between two fixed phrases describing a
+    normal scan with no abnormalities.
+
+    Returns
+    -------
+    str
+        Either ``"A MRI with nil finding"`` or
+        ``"A MRI with no intracranial abnormalities"``.
+    """
+
+    return random.choice(
+        ["A MRI with nil finding", "A MRI with no intracranial abnormalities"]
+    )
+
+
+def generate_prompt(label_file: str | Path, healthy: bool = False) -> str:
     """Generate a text prompt from a NIfTI label file.
 
     Parameters
     ----------
     label_file:
         Path to the tumour label volume in NIfTI format.
+    healthy:
+        When ``True``, bypass label parsing and return a healthy scan prompt
+        via :func:`generate_healthy_prompt`.
 
     Returns
     -------
@@ -33,6 +59,9 @@ def generate_prompt(label_file: str | Path) -> str:
         functions. ``"no tumour features detected"`` is returned when no
         information can be extracted.
     """
+
+    if healthy:
+        return generate_healthy_prompt()
 
     img = nib.load(str(label_file))
     lab = np.asanyarray(img.dataobj)
