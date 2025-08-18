@@ -5,7 +5,7 @@ from .functions import (
     estimate_midline_shift_mm,
     tumour_lobe_hemisphere,
 )
-from .prompt import generate_prompt
+from .prompt import generate_prompt, generate_healthy_prompt
 
 __all__ = [
     "voxel_volume_ml",
@@ -14,4 +14,5 @@ __all__ = [
     "estimate_midline_shift_mm",
     "tumour_lobe_hemisphere",
     "generate_prompt",
+    "generate_healthy_prompt",
 ]

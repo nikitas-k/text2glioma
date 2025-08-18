@@ -1,4 +1,13 @@
-"""Evaluation metrics for text-to-image models."""
+"""Evaluation metrics for text-to-image models and segmentations.
+
+This module exposes utility functions for quantifying output quality:
+
+* :func:`bertscore` – textual fidelity via BERTScore.
+* :func:`ssim` – structural similarity between images or volumes.
+* :func:`fid` – Fréchet Inception Distance between image sets.
+* :func:`biomedclip_accuracy` – retrieval accuracy using BiomedCLIP.
+* :func:`dice_coefficient` – overlap between predicted and ground-truth masks.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +15,14 @@ from typing import Sequence
 
 import torch
 from torch import Tensor
+
+__all__ = [
+    "bertscore",
+    "ssim",
+    "fid",
+    "biomedclip_accuracy",
+    "dice_coefficient",
+]
 
 
 def bertscore(predictions: Sequence[str], references: Sequence[str], lang: str = "en") -> float:
@@ -50,6 +67,27 @@ def fid(fake: Tensor, real: Tensor) -> float:
     metric.update(to4d(real) * 255, real=True)
     metric.update(to4d(fake) * 255, real=False)
     return metric.compute().item()
+
+
+def dice_coefficient(pred_mask: Tensor, gt_mask: Tensor, eps: float = 1e-6) -> float:
+    """Return the mean Dice coefficient between ``pred_mask`` and ``gt_mask``.
+
+    The inputs are expected to be binary masks with identical shapes. They may
+    include batch and channel dimensions; in such cases the Dice score is
+    computed per sample and then averaged over the batch.
+    """
+
+    if pred_mask.shape != gt_mask.shape:
+        raise ValueError("pred_mask and gt_mask must have the same shape")
+
+    pred = pred_mask.flatten(start_dim=1).bool()
+    gt = gt_mask.flatten(start_dim=1).bool()
+
+    intersection = (pred & gt).sum(dim=1).float()
+    union = pred.sum(dim=1).float() + gt.sum(dim=1).float()
+
+    dice = (2 * intersection + eps) / (union + eps)
+    return dice.mean().item()
 
 
 def biomedclip_accuracy(images: Sequence["Image.Image"], prompts: Sequence[str], device: torch.device) -> float:
