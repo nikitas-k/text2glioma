@@ -41,7 +41,13 @@ def generate_healthy_prompt() -> str:
     )
 
 
-def generate_prompt(label_file: str | Path, healthy: bool = False) -> str:
+def generate_prompt(
+    label_file: str | Path,
+    healthy: bool = False,
+    *,
+    mgmt_status: str | None = None,
+    idh_status: str | None = None,
+) -> str:
     """Generate a text prompt from a NIfTI label file.
 
     Parameters
@@ -51,6 +57,14 @@ def generate_prompt(label_file: str | Path, healthy: bool = False) -> str:
     healthy:
         When ``True``, bypass label parsing and return a healthy scan prompt
         via :func:`generate_healthy_prompt`.
+    mgmt_status:
+        Optional MGMT promoter status description, e.g. ``"methylated"`` or
+        ``"unmethylated"``. When provided, the phrase ``"MGMT <status>"`` is
+        appended to the prompt.
+    idh_status:
+        Optional IDH mutation status description such as ``"mutant"`` or
+        ``"wildtype"``. When provided, the phrase ``"IDH <status>"`` is
+        appended to the prompt.
 
     Returns
     -------
@@ -81,5 +95,9 @@ def generate_prompt(label_file: str | Path, healthy: bool = False) -> str:
         parts.append(f"{edema_sev} edema")
     if ring:
         parts.append("ring enhancement")
+    if mgmt_status:
+        parts.append(f"MGMT {mgmt_status}")
+    if idh_status:
+        parts.append(f"IDH {idh_status}")
 
     return ", ".join(parts) if parts else "no tumour features detected"
