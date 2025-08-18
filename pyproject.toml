@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 text2glioma = "src.cli:main"
+localise-train = "src.localisation_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
