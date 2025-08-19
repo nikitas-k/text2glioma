@@ -1,8 +1,15 @@
 from pathlib import Path
 import importlib.util
 
-import torch
 import pytest
+
+# Torch is an optional dependency; skip these tests if it is unavailable to
+# allow the remainder of the suite to run on lightweight environments.
+torch_spec = importlib.util.find_spec("torch")
+if torch_spec is None:  # pragma: no cover - best effort when torch missing
+    pytest.skip("torch not installed", allow_module_level=True)
+
+import torch
 
 spec = importlib.util.spec_from_file_location(
     "evaluation", Path(__file__).resolve().parents[1] / "src" / "evaluation.py"
