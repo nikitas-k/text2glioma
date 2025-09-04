@@ -1,0 +1,34 @@
+model:
+  name: "DiffusionModelUNet"
+  base_lr: 0.000025
+  params:
+    spatial_dims: 3
+    in_channels: 3
+    out_channels: 3
+    num_res_blocks: 2
+    num_channels: [256, 512, 768]
+    attention_levels: [False, True, True]
+    with_conditioning: True
+    resblock_updown: True
+    cross_attention_dim: 1024
+    num_head_channels: [0, 512, 768]
+    upcast_attention: True
+    use_flash_attention: False
+    transformer_num_layers: 1
+    norm_num_groups: 32
+    norm_eps: 1e-6
+
+scheduler:
+  name: "DDIMScheduler"
+  schedule: "scaled_linear_beta"
+  num_train_timesteps: 1000
+  beta_start: 0.0015
+  beta_end: 0.0205
+  prediction_type: "v_prediction"
+
+conditioning:
+  tokenizer: "stabilityai/stable-diffusion-2-1-base"
+  text_encoder: "stabilityai/stable-diffusion-2-1-base"
+  max_length: 77
+  projection_dim: 1024
+    
