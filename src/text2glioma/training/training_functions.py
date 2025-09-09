@@ -66,12 +66,9 @@ def train_autoencoder(
     for epoch in range(start_epoch, n_epochs):
         model.train()
         discriminator.train()
-        total_g_loss = 0.0
-        total_d_loss = 0.0
-        total_recon_loss = 0.0
-        total_kl_loss = 0.0
-        total_perceptual_loss = 0.0
-        total_adversarial_loss = 0.0
+        epoch_loss = 0
+        gen_epoch_loss = 0
+        disc_epoch_loss = 0
 
         for step, batch in enumerate(train_loader):
             images = batch["image"].to(device)
@@ -80,7 +77,7 @@ def train_autoencoder(
             # Train Generator
             # -----------------
             with torch.cuda.amp.autocast(enabled=True):
-                reconstruction, z_mu, z_sigma = autoencoder(images)
+                reconstruction, z_mu, z_sigma = model(images)
                 logits_fake = discriminator(reconstruction.contiguous().float())[-1]
 
                 recons_loss = F.l1_loss(reconstruction.float(), images.float())
