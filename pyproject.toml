@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "text2glioma"
+name = "ttogli"
 version = "0.1.0"
 description = "Generate text prompts from glioma segmentation labels"
 readme = "README.md"
@@ -20,10 +20,6 @@ dependencies = [
     "pillow",
     "PyYAML",
 ]
-
-[project.scripts]
-text2glioma = "src.cli:main"
-localise-train = "src.localisation_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]

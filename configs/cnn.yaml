@@ -1,23 +1,42 @@
-densenet:
+model:
   name: densenet121
   pretrained: false
-  num_classes: 2
-  in_channels: 1
-  dropout_rate: 0.2
-  spatial_dims: 3
-  progress: true
-  out_features: null
-  features_only: false
-  feature_size: 64
-  feature_stride: 4
-  feature_out_channels: [64, 128, 256, 512]
-  feature_reduction: true
-  feature_pool: "avg"
-  input_shape: [1, 160, 192, 160]
-  lr: 0.001
-  weight_decay: 0.0001
-  batch_size: 2
-  num_epochs: 1000
-  val_interval: 10
-  early_stopping: 50
-  
+  params:
+    num_classes: 2
+    in_channels: 1
+    dropout_rate: 0.2
+    spatial_dims: 3
+    progress: true
+    out_features: null
+    features_only: false
+    feature_size: 64
+    feature_stride: 4
+    feature_out_channels: [64, 128, 256, 512]
+    feature_reduction: true
+    feature_pool: "avg"
+    input_shape: [1, 160, 192, 96] # C, H, W, D
+
+lr: 0.001
+weight_decay: 0.0001
+
+experiment_name: mgmt # or 1p19q, idh, grade
+exp_type: real # or synthetic, real_synthetic
+debug: false
+resume: false
+model_save_path: ./models/mgmt_densenet121.pth # or None
+log_dir: ./logs/mgmt_densenet121
+
+criterion:
+  name: CEWithLogitsLoss
+  params: {}
+batch_size: 2
+n_epochs: 1000
+val_interval: 10
+early_stopping: 50
+
+seed: 42
+datalist: ./data/datalist_mgmt.json # if exp_type is real_synthetic or synthetic, this file should contain both real and synthetic data paths in separate keys
+num_workers: 4
+pin_memory: true
+
+

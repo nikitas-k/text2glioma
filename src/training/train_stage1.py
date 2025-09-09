@@ -11,7 +11,7 @@ from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
 from monai.config import print_config
 from monai.utils import set_determinism
 from training_functions import train_autoencoder
-from utils import load_config, get_dataloaders, get_model
+from src.utils import load_config, get_dataloaders, get_model
 from torch.utils.tensorboard import SummaryWriter
 import gdown
 
