@@ -155,7 +155,7 @@ def main():
         run_dir=run_dir,
         kl_weight=config["model"]["kl_weight"],
         perceptual_weight=config["model"]["perceptual_weight"],
-        adversarial_weight=config["model"]["adversarial_weight"],
+        adversarial_weight=config["model"]["adv_weight"],
     )
     print(f"Training completed. Best validation loss: {val_loss:.4f}")
 
