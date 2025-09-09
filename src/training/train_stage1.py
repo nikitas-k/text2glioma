@@ -11,16 +11,17 @@ from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
 from monai.config import print_config
 from monai.utils import set_determinism
 from training_functions import train_autoencoder
-from src.utils import load_config, get_dataloaders, get_model
+from text2glioma.src.utils import load_config, get_dataloaders, get_model
 from torch.utils.tensorboard import SummaryWriter
 import gdown
+import json
 
 warnings.filterwarnings("ignore")
 
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("data", type=str, required=True, help="Path to the data JSON file.")
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
     parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
@@ -32,12 +33,20 @@ def parse_args():
     parser.add_argument("--n_epochs", type=int, default=1000, help="Maximum number of training epochs.")
     parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights from Pinaya et al. for the autoencoder.")
     parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--initialize", action="store_true", help="Initialize (reset) the data for PersistentDataset.")
 
     return parser.parse_args()
 
 def main(args):
     set_determinism(args.seed)
     print_config()
+
+    datalist_json = args.data
+    with open(datalist_json, "r") as f:
+        datalist = json.load(f)
+    train_dataset = datalist["training"]
+    val_dataset = datalist["validation"]
 
     run_dir = Path(args.run_dir) / "text2glioma" / "autoencoder_stage1"
     output_dir = run_dir / "output"
@@ -74,12 +83,15 @@ def main(args):
 
     model_type = config["model"]["name"]
     train_loader, val_loader = get_dataloaders(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
         cache_dir=cache_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         shuffle=not args.no_shuffle,
         model_type=model_type,
+        initialize=args.initialize,
     )
 
     print("Initializing model...")        

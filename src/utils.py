@@ -43,6 +43,7 @@ def get_dataloaders(
         pin_memory=False,
         shuffle=False,
         model_type="AutoencoderKL",
+        initialize=False,
     ):
     if model_type not in ["AutoencoderKL", "DiffusionModelUNet"]:
         raise ValueError(f"Model type {model_type} not supported for dataloaders.")
@@ -107,14 +108,14 @@ def get_dataloaders(
                 T.ToTensord(keys=["image"]),
             ]
         )
-    train_dataset = PersistentDataset(
+    train_data = PersistentDataset(
         data=train_dataset,
         transform=train_transform,
         cache_dir=cache_dir / "train",
         num_workers=num_workers,
     )
 
-    val_dataset = PersistentDataset(
+    val_data = PersistentDataset(
         data=val_dataset,
         transform=T.Compose(
             [
@@ -133,9 +134,12 @@ def get_dataloaders(
         cache_dir=cache_dir / "val",
         num_workers=num_workers,
     )
+    if initialize:
+        train_data.set_data(train_dataset)  # Reset to ensure data is correct
+        val_data.set_data(val_dataset)  # Reset to ensure data is correct
 
     train_loader = DataLoader(
-        train_dataset,
+        train_data,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
@@ -144,7 +148,7 @@ def get_dataloaders(
     )
 
     val_loader = DataLoader(
-        val_dataset,
+        val_data,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
