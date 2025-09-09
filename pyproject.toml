@@ -42,8 +42,8 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["src/*"]
+include = ["src/text2glioma*"]
 
 [project.scripts]
-train_stage1 = "text2glioma.training.train_stage1:main"
-train_stage2 = "text2glioma.training.train_stage2:main"
+train_stage1 = "training.train_stage1:main"
+train_stage2 = "training.train_stage2:main"
