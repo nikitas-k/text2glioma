@@ -43,3 +43,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["src*"]
+
+[project.scripts]
+train_stage1 = "src.training.train_stage1:main"
+train_stage2 = "src.training.train_stage2:main"
