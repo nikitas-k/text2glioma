@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 import torch.optim as optim
-from generative.loss.perceptual import PerceptualLoss
+from generative.losses.perceptual import PerceptualLoss
 from generative.networks.nets import AutoEncoderKL
 from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
 from monai.config import print_config
