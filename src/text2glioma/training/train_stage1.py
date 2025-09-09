@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore")
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("data", type=str, required=True, help="Path to the data JSON file.")
+    parser.add_argument("data", type=str, help="Path to the data JSON file.")
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
     parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
@@ -39,7 +39,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    
+
     set_determinism(args.seed)
     print_config()
 
