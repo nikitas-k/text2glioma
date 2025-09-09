@@ -259,8 +259,8 @@ def get_experiment_dataloaders(
 
 def get_model(model_type, config, pretrained=False):
     if model_type == "AutoencoderKL":
-        from generative.networks.nets import AutoEncoderKL
-        model = AutoEncoderKL(**config["model"])
+        from generative.networks.nets import AutoencoderKL
+        model = AutoencoderKL(**config["model"])
         if pretrained:
             print("Using pretrained weights from Pinaya et al. for the autoencoder.")
             state_dict = gdown.download(
