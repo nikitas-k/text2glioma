@@ -260,7 +260,7 @@ def get_experiment_dataloaders(
 def get_model(model_type, config, pretrained=False):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
-        model = AutoencoderKL(**config["model"])
+        model = AutoencoderKL(**config["model"]["params"])
         if pretrained:
             print("Using pretrained weights from Pinaya et al. for the autoencoder.")
             state_dict = gdown.download(
@@ -272,7 +272,7 @@ def get_model(model_type, config, pretrained=False):
 
     elif model_type == "DiffusionModelUNet":
         from generative.networks.nets import DiffusionModelUNet
-        model = DiffusionModelUNet(**config["model"])
+        model = DiffusionModelUNet(**config["model"]["params"])
     else:
         raise ValueError(f"Model type {model_type} not supported.")
     
