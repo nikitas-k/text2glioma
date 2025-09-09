@@ -10,7 +10,7 @@ from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.config import print_config
 from monai.utils import set_determinism
 from training_functions import train_ldm
-from src.utils import load_config, get_dataloaders, get_model, stage1_ify #workaround for DataParallel
+from text2glioma.utils import load_config, get_dataloaders, get_model, stage1_ify #workaround for DataParallel
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
 

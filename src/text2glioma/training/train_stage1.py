@@ -9,8 +9,8 @@ from generative.losses.perceptual import PerceptualLoss
 from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
 from monai.config import print_config
 from monai.utils import set_determinism
-from src.training.training_functions import train_autoencoder
-from src.utils import load_config, get_dataloaders, get_model
+from text2glioma.training.training_functions import train_autoencoder
+from text2glioma.utils import load_config, get_dataloaders, get_model
 from torch.utils.tensorboard import SummaryWriter
 import gdown
 import json

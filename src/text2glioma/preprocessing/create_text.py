@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.utils.validation import check_random_state
 from sklearn.model_selection import train_test_split
 
-from utils import compose_radiology_prompts
+from text2glioma.utils import compose_radiology_prompts
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Create datalist and prompts.", help="Create datalist and prompts. Assumes flat directory structure with images in input_dir and labels are in label_dir or input_dir if label_dir is not given.")
