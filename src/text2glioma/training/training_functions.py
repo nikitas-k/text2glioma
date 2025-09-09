@@ -3,8 +3,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
+from generative.losses import PatchAdversarialLoss
 
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
@@ -59,6 +61,8 @@ def train_autoencoder(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    adv_loss = PatchAdversarialLoss(criterion="least_squares")
+
     for epoch in range(start_epoch, n_epochs):
         model.train()
         discriminator.train()
@@ -69,105 +73,82 @@ def train_autoencoder(
         total_perceptual_loss = 0.0
         total_adversarial_loss = 0.0
 
-        for batch in train_loader:
+        for step, batch in enumerate(train_loader):
             images = batch["image"].to(device)
 
             # -----------------
-            # Train Discriminator
+            # Train Generator
             # -----------------
-            optimizer_d.zero_grad()
-            with torch.cuda.amp.autocast():
-                recon_images, z_mu, z_logvar = model(images)
-                real_preds = discriminator(images)
-                fake_preds = discriminator(recon_images.detach())
-                d_loss_real = torch.mean((real_preds - 1) ** 2)
-                d_loss_fake = torch.mean(fake_preds ** 2)
-                d_loss = (d_loss_real + d_loss_fake) / 2
+            with torch.cuda.amp.autocast(enabled=True):
+                reconstruction, z_mu, z_sigma = autoencoder(images)
+                logits_fake = discriminator(reconstruction.contiguous().float())[-1]
 
-            scaler_d.scale(d_loss).backward()
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
+                recons_loss = F.l1_loss(reconstruction.float(), images.float())
+                p_loss = perceptual_loss(reconstruction.float(), images.float())
+            
+                generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
 
-            # -----------------
-            # Train Generator (Autoencoder)
-            # -----------------
-            optimizer_g.zero_grad()
-            with torch.cuda.amp.autocast():
-                recon_images, z_mu, z_logvar = model(images)
-                recon_loss = nn.functional.mse_loss(recon_images, images)
+                kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
+                kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
-                kl_loss = -0.5 * torch.mean(1 + z_logvar - z_mu**2 - z_logvar.exp())
+                loss_g = recons_loss + (kl_weight * kl_loss) + (perceptual_weight * p_loss.mean()) + (adversarial_weight * generator_loss)
 
-                p_loss = perceptual_loss(recon_images, images)
-
-                adv_preds = discriminator(recon_images)
-                adversarial_loss = torch.mean((adv_preds - 1) ** 2)
-
-                g_loss = (
-                    recon_loss +
-                    kl_weight * kl_loss +
-                    perceptual_weight * p_loss +
-                    adversarial_weight * adversarial_loss
-                )
-
-            scaler_g.scale(g_loss).backward()
+            scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
 
-            total_g_loss += g_loss.item() * images.size(0)
-            total_d_loss += d_loss.item() * images.size(0)
-            total_recon_loss += recon_loss.item() * images.size(0)
-            total_kl_loss += kl_loss.item() * images.size(0)
-            total_perceptual_loss += p_loss.item() * images.size(0)
-            total_adversarial_loss += adversarial_loss.item() * images.size(0)
-        avg_g_loss = total_g_loss / len(train_loader.dataset)
-        avg_d_loss = total_d_loss / len(train_loader.dataset)
-        avg_recon_loss = total_recon_loss / len(train_loader.dataset)
-        avg_kl_loss = total_kl_loss / len(train_loader.dataset)
-        avg_perceptual_loss = total_perceptual_loss / len(train_loader.dataset)
-        avg_adversarial_loss = total_adversarial_loss / len(train_loader.dataset)
+            # Discriminator part
+            optimizer_d.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=True):
+                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+                loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
+                logits_real = discriminator(images.contiguous().detach())[-1]
+                loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
+                discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
+
+                loss_d = adversarial_weight * discriminator_loss
+
+            scaler_d.scale(loss_d).backward()
+            scaler_d.step(optimizer_d)
+            scaler_d.update()
+
+            epoch_loss += recons_loss.item()
+            gen_epoch_loss += generator_loss.item()
+            disc_epoch_loss += discriminator_loss.item()
+            
+        avg_recon_loss = epoch_loss / (step + 1)
+        avg_g_loss = gen_epoch_loss / (step + 1)
+        avg_d_loss = disc_epoch_loss / (step + 1)
 
         if writer_train:
             writer_train.add_scalar("Loss/Generator", avg_g_loss, epoch)
             writer_train.add_scalar("Loss/Discriminator", avg_d_loss, epoch)
             writer_train.add_scalar("Loss/Reconstruction", avg_recon_loss, epoch)
-            writer_train.add_scalar("Loss/KL", avg_kl_loss, epoch)
-            writer_train.add_scalar("Loss/Perceptual", avg_perceptual_loss, epoch)
-            writer_train.add_scalar("Loss/Adversarial", avg_adversarial_loss, epoch)
+
         print(
             f"Epoch [{epoch+1}/{n_epochs}] "
             f"Generator Loss: {avg_g_loss:.4f} "
             f"Discriminator Loss: {avg_d_loss:.4f} "
             f"Reconstruction Loss: {avg_recon_loss:.4f} "
-            f"KL Loss: {avg_kl_loss:.4f} "
-            f"Perceptual Loss: {avg_perceptual_loss:.4f} "
-            f"Adversarial Loss: {avg_adversarial_loss:.4f}"
         )
 
         # Validation
         if (epoch + 1) % val_interval == 0:
             model.eval()
-            discriminator.eval()
-            val_loss = 0.0
+            avg_val_loss = 0
             with torch.no_grad():
-                for batch in val_loader:
+                for val_step, batch in enumerate(val_loader, start=1):
                     images = batch["image"].to(device)
-                    recon_images, z_mu, z_logvar = model(images)
-                    recon_loss = nn.functional.mse_loss(recon_images, images)
-                    kl_loss = -0.5 * torch.mean(1 + z_logvar - z_mu**2 - z_logvar.exp())
-                    p_loss = perceptual_loss(recon_images, images)
-                    adv_preds = discriminator(recon_images)
-                    adversarial_loss = torch.mean((adv_preds - 1) ** 2)
+                    optimizer_g.zero_grad(set_to_none=True)
 
-                    total_loss = (
-                        recon_loss +
-                        kl_weight * kl_loss +
-                        perceptual_weight * p_loss +
-                        adversarial_weight * adversarial_loss
-                    )
-                    val_loss += total_loss.item() * images.size(0)
-                avg_val_loss = val_loss / len(val_loader.dataset)
+                    with torch.cuda.amp.autocast(enabled=True):
+                        reconstruction, z_mu, z_sigma = model(images)
+                        recons_loss = F.l1_loss(reconstruction.float(), images.float())
 
+                    avg_val_loss += recons_loss.item()
+
+            avg_val_loss /= val_step
             if writer_val:
                 writer_val.add_scalar("Loss/Validation", avg_val_loss, epoch)
             print(f"Validation Loss: {avg_val_loss:.4f}")
@@ -178,6 +159,7 @@ def train_autoencoder(
                 torch.save(model.state_dict(), model_dir / "best_autoencoder.pth")
                 torch.save(discriminator.state_dict(), model_dir / "best_discriminator.pth")
                 print(f"Best model saved with validation loss: {best_loss:.4f}")
+                  
             # Save checkpoint
             torch.save(
                 {
