@@ -37,7 +37,7 @@ def parse_args():
 
     return parser.parse_args()
 
-def main(args):
+def main(args=None):
     set_determinism(args.seed)
     print_config()
 
