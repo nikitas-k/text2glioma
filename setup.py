@@ -42,11 +42,5 @@ setuptools.setup(
         "safetensors",
     ],
     include_package_data=True,
-    entry_points={
-        'console_scripts': [
-            'train_stage1=src.training.train_stage1:main',
-            'train_stage2=src.training.train_stage2:main',
-            'generate=src.inference.generate:main',
-        ],
-    },
+    package_data={"": ["*.json", "*.yaml"]},
 )
