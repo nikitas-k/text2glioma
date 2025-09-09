@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -40,15 +41,15 @@ def train_autoencoder(
     optimizer_d: torch.optim.Optimizer,
     scaler_g: torch.cuda.amp.GradScaler,
     scaler_d: torch.cuda.amp.GradScaler,
-    device: str | torch.device,
+    device: str,
     n_epochs: int,
     start_epoch: int = 0,
     best_loss: float = float("inf"),
     val_interval: int = 1,
-    model_dir: str | Path = "./models",
-    writer_train: None | SummaryWriter = None,
-    writer_val: None | SummaryWriter = None,
-    run_dir: str | Path = "./runs",
+    model_dir: str = "./models",
+    writer_train: Any = None,
+    writer_val: Any = None,
+    run_dir: str  = "./runs",
     kl_weight: float = 1e-6,
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
