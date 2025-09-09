@@ -13,12 +13,14 @@ from training_functions import train_ldm
 from text2glioma.utils import load_config, get_dataloaders, get_model, stage1_ify #workaround for DataParallel
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
+import json
 
 warnings.filterwarnings("ignore")
 
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("data", type=str, required=True, help="Path to the data JSON file.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
     parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
@@ -36,15 +38,25 @@ def parse_args():
 
     return parser.parse_args()
 
-def main(args):
+def main():
+    args = parse_args()
     set_determinism(args.seed)
     print_config()
+
+    datalist_json = args.data
+    with open(datalist_json, "r") as f:
+        datalist = json.load(f)
+    train_dataset = datalist["training"]
+    val_dataset = datalist["validation"]
 
     run_dir = Path(args.run_dir) / "text2glioma" / "ldm_stage2"
     output_dir = run_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     config = load_config(args.config)
+
+    cache_dir = output_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     model_dir = output_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -60,15 +72,6 @@ def main(args):
         checkpoint = None
         resume = False
 
-    print("Preparing data loaders...")
-    train_loader, val_loader = get_dataloaders(
-        config,
-        args.batch_size,
-        args.num_workers,
-        pin_memory=args.pin_memory,
-        shuffle=not args.no_shuffle,
-    )
-
     print("Initializing models...")
     stage1 = get_model("AutoencoderKL", args.stage1_uri, device=args.device)
     stage1.eval()
@@ -77,6 +80,19 @@ def main(args):
 
     model_type = config["model"].get("name", "DiffusionModelUNet")
     ldm = get_model(model_type, config, device=args.device)
+
+    print("Preparing data loaders...")
+    train_loader, val_loader = get_dataloaders(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        cache_dir=cache_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        shuffle=not args.no_shuffle,
+        model_type=model_type,
+        initialize=False
+    )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
     if noise_scheduler_type == "DDPMScheduler":
@@ -146,6 +162,5 @@ def main(args):
 
     print(f"Training completed, final validation loss: {val_loss:0.5f}")
 
-    if __name__ == "__main__":
-        args = parse_args()
-        main(args)
+if __name__ == "__main__":
+    main()

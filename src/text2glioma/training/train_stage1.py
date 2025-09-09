@@ -17,7 +17,29 @@ import json
 
 warnings.filterwarnings("ignore")
 
-def main(args):
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("data", type=str, required=True, help="Path to the data JSON file.")
+    parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
+    parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
+    parser.add_argument("--pin_memory", action="store_true", help="Pin memory for data loading.")
+    parser.add_argument("--no_shuffle", action="store_true", help="Disable shuffling of the training data.")
+    parser.add_argument("--val_interval", type=int, default=1, help="Validation interval (in epochs).")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
+    parser.add_argument("--n_epochs", type=int, default=1000, help="Maximum number of training epochs.")
+    parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights from Pinaya et al. for the autoencoder.")
+    parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--initialize", action="store_true", help="Initialize (reset) the data for PersistentDataset.")
+
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    
     set_determinism(args.seed)
     print_config()
 
@@ -139,22 +161,5 @@ def main(args):
     print(f"Training completed. Best validation loss: {val_loss:.4f}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("data", type=str, required=True, help="Path to the data JSON file.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
-    parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
-    parser.add_argument("--pin_memory", action="store_true", help="Pin memory for data loading.")
-    parser.add_argument("--no_shuffle", action="store_true", help="Disable shuffling of the training data.")
-    parser.add_argument("--val_interval", type=int, default=1, help="Validation interval (in epochs).")
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--n_epochs", type=int, default=1000, help="Maximum number of training epochs.")
-    parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights from Pinaya et al. for the autoencoder.")
-    parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-    parser.add_argument("--initialize", action="store_true", help="Initialize (reset) the data for PersistentDataset.")
-
-    args = parser.parse_args()
-    main(args)
+    # get things going...
+    main()
