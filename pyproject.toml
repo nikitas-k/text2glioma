@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ttogli"
+name = "text2glioma"
 version = "0.1.0"
 description = "Generate text prompts from glioma segmentation labels"
 readme = "README.md"
@@ -12,13 +12,33 @@ dependencies = [
     "numpy",
     "scipy",
     "nibabel",
-    "torch",
-    "torchvision",
     "torchmetrics",
     "bert-score",
     "open-clip-torch",
     "pillow",
     "PyYAML",
+    "torch>=1.10.0",
+    "torchvision",
+    "monai>=1.0.0",
+    "monai-generative",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "tqdm",
+    "matplotlib",
+    "tensorboard",
+    "pydicom",
+    "nibabel",
+    "gdown",
+    "PyYAML",
+    "transformers",
+    "diffusers",
+    "ftfy",
+    "regex",
+    "scipy",
+    "einops",
+    "accelerate",
+    "safetensors",
 ]
 
 [tool.setuptools.packages.find]

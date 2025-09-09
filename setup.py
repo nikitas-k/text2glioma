@@ -1,41 +1,8 @@
 import setuptools
-with open("README.md", "r") as fh:
-    long_description = fh.read()
+
 setuptools.setup(
     name="text2glioma",
     version="0.0.1",
-    author="Nikitas Koussis",
-    author_email="nikitas.koussis@newcastle.edu.au",
-    description="Text-to-Glioma: Generative AI for Brain Tumor Imaging",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="nikitas-k.github.io/text2glioma",
-    packages=setuptools.find_packages(),
-    python_requires='>=3.8',
-    install_requires=[
-        "torch>=1.10.0",
-        "torchvision",
-        "monai>=1.0.0",
-        "monai-generative",
-        "numpy",
-        "pandas",
-        "scikit-learn",
-        "tqdm",
-        "matplotlib",
-        "tensorboard",
-        "pydicom",
-        "nibabel",
-        "gdown",
-        "PyYAML",
-        "transformers",
-        "diffusers",
-        "ftfy",
-        "regex",
-        "scipy",
-        "einops",
-        "accelerate",
-        "safetensors",
-    ],
     include_package_data=True,
     package_data={"": ["*.json", "*.yaml"]},
 )
