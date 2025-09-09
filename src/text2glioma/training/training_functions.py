@@ -3,7 +3,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
