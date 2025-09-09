@@ -38,8 +38,8 @@ def get_dataloaders(
         cache_dir,
         train_dataset, 
         val_dataset, 
-        batch_size, 
-        num_workers,
+        batch_size,
+        num_workers=4,
         pin_memory=False,
         shuffle=False,
         model_type="AutoencoderKL",
@@ -112,7 +112,6 @@ def get_dataloaders(
         data=train_dataset,
         transform=train_transform,
         cache_dir=cache_dir / "train",
-        num_workers=num_workers,
     )
 
     val_data = PersistentDataset(
@@ -132,7 +131,6 @@ def get_dataloaders(
             ]
         ),
         cache_dir=cache_dir / "val",
-        num_workers=num_workers,
     )
     if initialize:
         train_data.set_data(train_dataset)  # Reset to ensure data is correct
