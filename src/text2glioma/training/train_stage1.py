@@ -99,7 +99,7 @@ def main():
     model = get_model(model_type, config, args.pretrained)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
-    perceptual_loss = PerceptualLoss(**config["perceptual_network"]["params"])        
+    perceptual_loss = PerceptualLoss(**config["perceptual_network"]["params"], cache_dir=cache_dir)        
     
     if torch.cuda.device_count() > 1 and args.use_parallel:
         print(f"Let's use {torch.cuda.device_count()} GPUs!")
