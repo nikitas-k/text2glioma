@@ -209,7 +209,7 @@ def train_ldm(
     model_dir: str = "./models",
     writer_train: Any = None,
     writer_val: Any = None,
-    run_dir: str | Path = "./runs",
+    run_dir: str = "./runs",
     scale_factor: float = 1.0,
 ):
     model_dir = Path(model_dir)
