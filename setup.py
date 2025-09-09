@@ -1,0 +1,51 @@
+import setuptools
+with open("README.md", "r") as fh:
+    long_description = fh.read()
+setuptools.setup(
+    name="text2glioma",
+    version="0.0.1",
+    author="Nikitas Koussis",
+    author_email="nikitas.koussis@newcastle.edu.au",
+    description="Text-to-Glioma: Generative AI for Brain Tumor Imaging",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="nikitas-k.github.io/text2glioma",
+    packages=setuptools.find_packages(),
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+    ],
+    python_requires='>=3.8',
+    install_requires=[
+        "torch>=1.10.0",
+        "torchvision",
+        "monai>=1.0.0[all]",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "tqdm",
+        "matplotlib",
+        "tensorboard",
+        "pydicom",
+        "nibabel",
+        "gdown",
+        "PyYAML",
+        "transformers",
+        "diffusers",
+        "ftfy",
+        "regex",
+        "scipy",
+        "einops",
+        "accelerate",
+        "safetensors",
+    ],
+    include_package_data=True,
+    entry_points={
+        'console_scripts': [
+            'train_stage1=src.training.train_stage1:main',
+            'train_stage2=src.training.train_stage2:main',
+            'generate=src.inference.generate:main',
+        ],
+    },
+)
