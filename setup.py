@@ -20,7 +20,8 @@ setuptools.setup(
     install_requires=[
         "torch>=1.10.0",
         "torchvision",
-        "monai>=1.0.0[all]",
+        "monai>=1.0.0",
+        "monai-generative",
         "numpy",
         "pandas",
         "scikit-learn",
