@@ -57,7 +57,7 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 192, 96), mode="trilinear"),
+                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
                 ),
@@ -68,7 +68,7 @@ def get_dataloaders(
                     prob=0.1,
                     translate_range=(1, 1, 1),
                     scale_range=(-0.02, 0.02),
-                    spatial_size=[160, 192, 96],
+                    spatial_size=[160, 224, 160],
                     mode="trilinear",
                 ),
                 T.RandShiftIntensityd(
@@ -88,7 +88,7 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 192, 96), mode="trilinear"),
+                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
                 ),
@@ -97,7 +97,7 @@ def get_dataloaders(
                     prob=0.1,
                     translate_range=(1, 1, 1),
                     scale_range=(-0.02, 0.02),
-                    spatial_size=[160, 192, 96],
+                    spatial_size=[160, 224, 160],
                     mode="trilinear",
                 ),
                 T.RandShiftIntensityd(

@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
     parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for models and tokenizers.")
     parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor for input images.")
+    parser.add_argument("--train_spec", type=str, default="impression", metavar=["impression", "findings"], help="Which version of training to run.")
 
     return parser.parse_args()
 
@@ -42,6 +43,12 @@ def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
+
+    if args.train_spec not in ["impression", "findings"]:
+        raise ValueError(f"Unrecognized training option: {args.train_spec}"
+                          "Expected: impression, findings")
+    else:
+        print(f"Training {args.train_spec}...")
 
     datalist_json = args.data
     with open(datalist_json, "r") as f:
@@ -155,6 +162,7 @@ def main():
         writer_val=writer_val,
         n_epochs=args.n_epochs,
         start_epoch=start_epoch,
+        text_field=args.train_spec,
         val_interval=args.val_interval,
         run_dir=run_dir,
         scale_factor=args.scale_factor,

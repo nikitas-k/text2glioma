@@ -13,7 +13,7 @@ from monai.utils import set_determinism
 from monai.networks import nets
 from monai.losses import BCEWithLogitsLoss, CEWithLogitsLoss
 
-from ..utils import get_experiment_dataloaders, get_model
+from text2glioma.utils import get_experiment_dataloaders, get_model, print_resource_usage
 
 def stats(dataloader, model, device):
     model.eval()
@@ -29,7 +29,7 @@ def stats(dataloader, model, device):
     accuracy = 100 * correct / total
     return accuracy
 
-def run_experiment(config, experiment_name, exp_type, debug=False, resume=False):
+def run_experiment(run_dir, config, experiment_name, exp_type, debug=False, resume=False, resource_monitor=True):
     """Run a classification experiment based on the provided configuration."""
     set_determinism(config.get("seed", 0))
     print_config()
@@ -48,8 +48,24 @@ def run_experiment(config, experiment_name, exp_type, debug=False, resume=False)
     if target is None:
         raise ValueError(f"Data for experiment type '{exp_type}' not found in the datalist file {datalist}.")
     
-    cache_dir = config.get("cache_dir", "./cache")
-    cache_dir = Path(cache_dir)
+    run_dir = Path(run_dir) / "text2glioma" / "experiments" / experiment_name / exp_type
+    output_dir = run_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    model_dir = output_dir / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Run directory: {str(run_dir)}")
+    print(f"Config: {str(config)}")
+
+    writer_train = SummaryWriter(log_dir / "train")
+    writer_val = SummaryWriter(log_dir / "val")
+    print("Getting data...")
+    
+    cache_dir = output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     batch_size = config.get("batch_size", 48)
@@ -73,11 +89,14 @@ def run_experiment(config, experiment_name, exp_type, debug=False, resume=False)
     if model_cfg is None:
         raise ValueError("Model configuration is missing.")
     
-    model = get_model(model_cfg)
-    model = model(**config["params"])
-    if resume and Path(config.get("model_save_path", "./model.pth")).exists():
-        print(f"Resuming from saved model at {config.get('model_save_path')}")
-        model = torch.load(config.get("model_save_path"), map_location="cpu")        
+    if resume and Path(model_dir / "checkpoint.pth").exists():
+        print(f"Resuming from checkpoint in {run_dir}")
+        model = torch.load(model_dir / "checkpoint.pth", map_location="cpu")
+    else:
+        print(f"No checkpoint found in {model_dir}. Starting fresh training.")
+        resume = False
+        model = get_model(model_cfg)
+        model = model(**config["params"])      
     
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
@@ -102,6 +121,8 @@ def run_experiment(config, experiment_name, exp_type, debug=False, resume=False)
     best_loss = float('inf')
 
     for epoch in range(n_epochs):
+        if resource_monitor:
+            print_resource_usage(epoch)
         model.train()
         running_loss = 0.0
         for i, data in enumerate(train_loader):
@@ -137,7 +158,7 @@ def run_experiment(config, experiment_name, exp_type, debug=False, resume=False)
             avg_val_loss = val_loss / len(val_loader)
             if avg_val_loss < best_loss:
                 best_loss = avg_val_loss
-                model_save_path = Path(config.get("model_save_path", "./best_model.pth"))
+                model_save_path = model_dir / "best_model.pth"
                 torch.save(model.state_dict(), model_save_path)
                 print(f"Saved best model to {model_save_path} with val loss {best_loss:.4f}")
 
@@ -146,7 +167,7 @@ def run_experiment(config, experiment_name, exp_type, debug=False, resume=False)
         print(f"Epoch [{epoch+1}/{n_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
 
     writer.close()
-    model_save_path = Path(config.get("model_save_path", "./final_model.pth"))
+    model_save_path = model_dir / "final_model.pth"
     torch.save(model.state_dict, model_save_path)
 
     print(f"Model saved to {model_save_path}")

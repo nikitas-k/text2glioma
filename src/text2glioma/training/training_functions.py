@@ -188,6 +188,7 @@ def train_ldm(
     scaler: torch.cuda.amp.GradScaler,
     device: str,
     n_epochs: int,
+    text_field: str = "impression",
     start_epoch: int = 0,
     val_interval: int = 1,
     model_dir: str = "./models",
@@ -195,6 +196,7 @@ def train_ldm(
     writer_val: Any = None,
     run_dir: str = "./runs",
     scale_factor: float = 1.0,
+    resource_monitor: bool = True,
 ):
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -202,14 +204,14 @@ def train_ldm(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(start_epoch, n_epochs):
+        if resource_monitor:
+            print_resource_usage(epoch)
         model.train()
         total_loss = 0.0
 
         for batch in train_loader:
             images = batch["image"].to(device)
-            if scale_factor != 1.0:
-                images = nn.functional.interpolate(images, scale_factor=scale_factor, mode='bilinear', align_corners=False)
-            texts = batch["text"]
+            texts = batch[text_field]
 
             # Prepare conditioning
             cond, _ = prepare_conditioning(tokenizer, text_encoder, texts, images.size(0), device)

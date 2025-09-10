@@ -11,7 +11,11 @@ def parse_args():
         "datalist",
         type=str,
         help="Path to the datalist JSON file.",
-        required=True,
+    )
+    parser.add_argument(
+        "run_dir",
+        type=str,
+        help="Where to run the experiments."
     )
     parser.add_argument(
         "--config",
@@ -52,15 +56,17 @@ def parse_args():
 
     return parser.parse_args()
 
-def main(args):
+def main():
+    args = parse_args()
     config = load_config(args.config)
+    run_dir = args.run_dir
 
     if args.experiment in ["mgmt", "1p19q", "idh", "grade"]:
         if args.exp_type in ["real", "synthetic", "real_synthetic"]:
             config["datalist"] = args.datalist
             if args.exp_type == "combined":
                 config["data_ratio"] = args.ratio
-            run_experiment(config, args.experiment, args.exp_type, debug=args.debug, resume=args.resume)
+            run_experiment(run_dir, config, args.experiment, args.exp_type, debug=args.debug, resume=args.resume)
 
     else:
         raise ValueError(f"Unknown experiment: {args.experiment} with type {args.exp_type}"
