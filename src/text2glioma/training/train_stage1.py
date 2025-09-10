@@ -34,7 +34,6 @@ def parse_args():
     parser.add_argument("--use_parallel", action="store_true", default=False, help="Use DataParallel for multi-GPU training.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--initialize", action="store_true", default=False, help="Initialize (reset) the data for PersistentDataset.")
-    parser.add_argument("--resource_monitor", action="store_true", default=True, help="Print and log resource utilization.")
     parser.add_argument("--fresh", action="store_true", default=False, help="Start fresh training (overwrite checkpoints)")
 
     return parser.parse_args()
@@ -158,7 +157,6 @@ def main():
         kl_weight=config["model"]["kl_weight"],
         perceptual_weight=config["model"]["perceptual_weight"],
         adversarial_weight=config["model"]["adv_weight"],
-        resource_monitor=args.resource_monitor,
     )
     print(f"Training completed. Best validation loss: {val_loss:.4f}")
 

@@ -60,7 +60,6 @@ def train_autoencoder(
     kl_weight: float = 1e-6,
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
-    resource_monitor: bool = True,
 ):
     raw_model = model.module if hasattr(model, "module") else model
 
