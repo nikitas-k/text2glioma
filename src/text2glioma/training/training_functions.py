@@ -8,6 +8,8 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
 
+from text2glioma.utils import print_resource_usage
+
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
     tokens = tokenizer(
@@ -55,6 +57,7 @@ def train_autoencoder(
     kl_weight: float = 1e-6,
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
+    resource_monitor: bool = True,
 ):
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +67,8 @@ def train_autoencoder(
     adv_loss = PatchAdversarialLoss(criterion="least_squares")
 
     for epoch in range(start_epoch, n_epochs):
+        if resource_monitor:
+            print_resource_usage(epoch)
         model.train()
         discriminator.train()
         epoch_loss = 0

@@ -1,5 +1,6 @@
 import yaml
 from pathlib import Path
+import psutil
 
 import torch
 import torch.nn as nn
@@ -255,8 +256,6 @@ def get_experiment_dataloaders(
     )
     return train_loader, val_loader
 
-
-
 def get_model(model_type, config, pretrained=False):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
@@ -277,3 +276,23 @@ def get_model(model_type, config, pretrained=False):
         raise ValueError(f"Model type {model_type} not supported.")
     
     return model
+
+def print_resource_usage(epoch: int = None):
+    if epoch:
+        print(f"Epoch: {epoch}")
+    print("--- Resource Usage ---")
+    cpu_percent = psutil.cpu_percent()
+    ram = psutil.virtual_memory()
+    print(f"CPU Usage: {cpu_percent:0.2f}% | RAM Usage: {ram.percent:0.2f}% ({ram.used // (1024**2):0.3f}MB/{ram.total // (1024**2):0.3f}MB)")
+    if torch.cuda.is_available():
+        cuda_device_list = []
+        for i in range(torch.cuda.device_count()):
+            gpu_name = torch.cuda.get_device_name(i)
+            vram_used = torch.cuda.memory_allocated(i) // (1024**2)
+            vram_total = torch.cuda.get_device_properties(i).total_memory // (1024**2)
+            print(f"GPU {i}: {gpu_name} | VRAM Usage: {vram_used:0.2f}MB/{vram_total:0.2f}MB")
+            cuda_device_list.append({
+                'device': gpu_name,
+                "vram_used": vram_used,
+                "vram_total": vram_total,
+            })
