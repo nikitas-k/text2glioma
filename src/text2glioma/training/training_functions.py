@@ -67,8 +67,6 @@ def train_autoencoder(
     adv_loss = PatchAdversarialLoss(criterion="least_squares")
 
     for epoch in range(start_epoch, n_epochs):
-        if resource_monitor:
-            print_resource_usage(epoch)
         model.train()
         discriminator.train()
         epoch_loss = 0
@@ -122,6 +120,8 @@ def train_autoencoder(
         avg_recon_loss = epoch_loss / (step + 1)
         avg_g_loss = gen_epoch_loss / (step + 1)
         avg_d_loss = disc_epoch_loss / (step + 1)
+        if resource_monitor:
+            print_resource_usage(epoch)
 
         if writer_train:
             writer_train.add_scalar("Loss/Generator", avg_g_loss, epoch)
@@ -154,6 +154,8 @@ def train_autoencoder(
             if writer_val:
                 writer_val.add_scalar("Loss/Validation", avg_val_loss, epoch)
             print(f"Validation Loss: {avg_val_loss:.4f}")
+            if resource_monitor:
+                print_resource_usage(epoch)
 
             # Save best model
             if avg_val_loss < best_loss:
@@ -204,8 +206,6 @@ def train_ldm(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(start_epoch, n_epochs):
-        if resource_monitor:
-            print_resource_usage(epoch)
         model.train()
         total_loss = 0.0
 
@@ -218,7 +218,7 @@ def train_ldm(
 
             # Encode images to latent space
             with torch.no_grad():
-                latents = stage1(images).detach()
+                latents = stage1(images) * scale_factor
 
             # Sample noise and timestep
             noise = torch.randn_like(latents).to(device)
@@ -259,15 +259,13 @@ def train_ldm(
             with torch.no_grad():
                 for batch in val_loader:
                     images = batch["image"].to(device)
-                    if scale_factor != 1.0:
-                        images = nn.functional.interpolate(images, scale_factor=scale_factor, mode='bilinear', align_corners=False)
-                    texts = batch["text"]
+                    texts = batch[text_field]
 
                     # Prepare conditioning
                     cond, _ = prepare_conditioning(tokenizer, text_encoder, texts, images.size(0), device)
 
                     # Encode images to latent space
-                    latents = stage1(images).detach()
+                    latents = stage1(images).detach() * scale_factor
 
                     # Sample noise and timestep
                     noise = torch.randn_like(latents).to(device)
