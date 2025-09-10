@@ -68,9 +68,7 @@ def train_autoencoder(
     model_dir.mkdir(parents=True, exist_ok=True)
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    adv_loss = PatchAdversarialLoss(criterion="least_squares")
-
+    
     val_loss = eval_autoencoder(
         model=model,
         discriminator=discriminator,

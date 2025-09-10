@@ -10,7 +10,7 @@ import torch.nn as nn
 from monai.data import DataLoader
 from monai.data.dataset import PersistentDataset
 from monai import transforms as T
-from pynvml.smi import nvidia_smi
+from pynvml_utils import nvidia_smi
 from torch.utils.tensorboard import SummaryWriter
 
 import gdown
