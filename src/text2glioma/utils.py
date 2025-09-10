@@ -2,11 +2,16 @@ import yaml
 from pathlib import Path
 import psutil
 
+import matplotlib.pyplot as plt
+
+import numpy as np
 import torch
 import torch.nn as nn
 from monai.data import DataLoader
 from monai.data.dataset import PersistentDataset
 from monai import transforms as T
+from pynvml.smi import nvidia_smi
+from torch.utils.tensorboard import SummaryWriter
 
 import gdown
 
@@ -22,6 +27,69 @@ class Stage1Wrapper(nn.Module):
         z = self.model.sampling(z_mu, z_sigma)
 
         return z
+    
+def get_lr(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group["lr"]
+    
+def get_figure(
+    img: torch.Tensor,
+    recons: torch.Tensor,
+):
+    img_npy_0 = np.clip(a=img[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
+    recons_npy_0 = np.clip(a=recons[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
+    img_npy_1 = np.clip(a=img[0, 0, :, :, 30].cpu().numpy(), a_min=0, a_max=1)
+    recons_npy_1 = np.clip(a=recons[0, 0, :, :, 30].cpu().numpy(), a_min=0, a_max=1)
+    img_npy_2 = np.clip(a=img[0, 0, :, :, 50].cpu().numpy(), a_min=0, a_max=1)
+    recons_npy_2 = np.clip(a=recons[0, 0, :, :, 50].cpu().numpy(), a_min=0, a_max=1)
+    img_npy_3 = np.clip(a=img[0, 0, :, :, 40].cpu().numpy(), a_min=0, a_max=1)
+    recons_npy_3 = np.clip(a=recons[0, 0, :, :, 40].cpu().numpy(), a_min=0, a_max=1)
+
+    img_row_0 = np.concatenate(
+        (
+            img_npy_0,
+            recons_npy_0,
+            img_npy_1,
+            recons_npy_1,
+        ),
+        axis=1,
+    )
+
+    img_row_1 = np.concatenate(
+        (
+            img_npy_2,
+            recons_npy_2,
+            img_npy_3,
+            recons_npy_3,
+        ),
+        axis=1,
+    )
+
+    img = np.concatenate(
+        (
+            img_row_0,
+            img_row_1,
+        ),
+        axis=0,
+    )
+
+    fig = plt.figure(dpi=300)
+    plt.imshow(img, cmap="gray")
+    plt.axis("off")
+    return fig
+    
+def log_reconstructions(
+    image: torch.Tensor,
+    reconstruction: torch.Tensor,
+    writer: SummaryWriter,
+    step: int,
+    title: str = "RECONSTRUCTION",
+) -> None:
+    fig = get_figure(
+        image,
+        reconstruction,
+    )
+    writer.add_figure(title, fig, step)
     
 def stage1_ify(stage1):
     """Wraps the stage 1 model if it is not already wrapped."""
@@ -276,6 +344,15 @@ def get_model(model_type, config, pretrained=False):
         raise ValueError(f"Model type {model_type} not supported.")
     
     return model
+
+def print_gpu_memory_report():
+    if torch.cuda.is_available():
+        nvsmi = nvidia_smi.getInstance()
+        data = nvsmi.DeviceQuery("memory.used, memory.total, utilization.gpu")["gpu"]
+        print("Memory report")
+        for i, data_by_rank in enumerate(data):
+            mem_report = data_by_rank["fb_memory_usage"]
+            print(f"gpu:{i} mem(%) {int(mem_report['used'] * 100.0 / mem_report['total'])}")
 
 def print_resource_usage(epoch: int = None):
     if epoch:
