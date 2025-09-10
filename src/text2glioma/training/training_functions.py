@@ -68,7 +68,7 @@ def train_autoencoder(
     model_dir.mkdir(parents=True, exist_ok=True)
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     val_loss = eval_autoencoder(
         model=model,
         discriminator=discriminator,
@@ -253,7 +253,7 @@ def eval_autoencoder(
     step: int,
     writer: SummaryWriter,
     kl_weight: float,
-    adv_weight: float,
+    adversarial_weight: float,
     perceptual_weight: float,
 ) -> float:
     model.eval()
@@ -264,7 +264,7 @@ def eval_autoencoder(
     for x in loader:
         images = x["image"].to(device)
 
-        with autocast(enabled=True):
+        with torch.cuda.amp.autocast(enabled=True):
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
@@ -272,14 +272,14 @@ def eval_autoencoder(
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
-            if adv_weight > 0:
+            if adversarial_weight > 0:
                 logits_fake = discriminator(reconstruction.contiguous().float())[-1]
                 generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
 
             # DISCRIMINATOR
-            if adv_weight > 0:
+            if adversarial_weight > 0:
                 logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
                 loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
                 logits_real = discriminator(images.contiguous().detach())[-1]
@@ -288,7 +288,7 @@ def eval_autoencoder(
             else:
                 discriminator_loss = torch.tensor([0.0]).to(device)
 
-            loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adv_weight * generator_loss
+            loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adversarial_weight * generator_loss
 
             loss = loss.mean()
             l1_loss = l1_loss.mean()
