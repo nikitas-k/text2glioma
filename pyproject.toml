@@ -47,3 +47,4 @@ where = ["src"]
 [project.scripts]
 train_stage1 = "text2glioma.training.train_stage1:main"
 train_stage2 = "text2glioma.training.train_stage2:main"
+convert_dataset = "text2glioma.preprocessing.data_conversion:main"
