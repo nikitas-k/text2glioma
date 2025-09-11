@@ -195,8 +195,8 @@ def ivygap_converter(source_dir, output_dir, verbose=False):
 
         out_dir = work_dir / subj
         for sdir, sdesc in matches:
-            safe_desc = re.sub(r'[^A-Za-z0-9_.-]+', '_', sdesc)[:80]
-            out_stem = f"{subj}_T2TSE_{dt.strftime('%Y%m%d')}__{safe_desc}"
+            #safe_desc = re.sub(r'[^A-Za-z0-9_.-]+', '_', sdesc)[:80]
+            out_stem = f"{subj}_T2"
             print(f"[{subj}] Converting: {sdir.name}  ({sdesc})  -> {out_stem}.nii.gz")
             nii = _convert_series(sdir, out_dir, out_stem)
             if nii:
