@@ -80,13 +80,13 @@ def main():
         resume = False
 
     print("Initializing models...")
-    stage1 = get_model("AutoencoderKL", args.stage1_uri, device=args.device)
+    stage1 = get_model("AutoencoderKL", args.stage1_uri)
     stage1.eval()
     for param in stage1.parameters():
         param.requires_grad = False
 
     model_type = config["model"].get("name", "DiffusionModelUNet")
-    ldm = get_model(model_type, config, device=args.device)
+    ldm = get_model(model_type, config)
 
     print("Preparing data loaders...")
     train_loader, val_loader = get_dataloaders(
