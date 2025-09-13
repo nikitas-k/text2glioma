@@ -348,6 +348,7 @@ def train_ldm(
     run_dir: str = "./runs",
     scale_factor: float = 1.0,
 ) -> float:
+    raw_model = model.module if hasattr(model, "module") else model
 
     val_loss = eval_ldm(
         model=model,
@@ -405,7 +406,7 @@ def train_ldm(
             # Save checkpoint
             checkpoint = {
                 "epoch": epoch + 1,
-                "diffusion": model.state_dict(),
+                "diffusion": raw_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "best_loss": best_loss,
             }
@@ -414,7 +415,7 @@ def train_ldm(
             if val_loss <= best_loss:
                 print(f"New best val loss {val_loss}")
                 best_loss = val_loss
-                torch.save(model.state_dict(), str(run_dir / "best_model.pth"))
+                torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
 
     print(f"Training finished!")
     print(f"Saving final model...")
