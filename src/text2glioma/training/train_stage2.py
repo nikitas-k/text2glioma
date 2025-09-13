@@ -62,6 +62,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     config = load_config(args.config)
+    stage1_config = load_config(args.stage1_config)
 
     cache_dir = output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +84,7 @@ def main():
     print("Initializing models...")
     stage1 = stage1_ify(
         get_model(
-            model_type="AutoencoderKL", config=args.stage1_config, from_file=args.stage1_uri
+            model_type="AutoencoderKL", config=stage1_config, from_file=args.stage1_uri
             )
         )
     stage1.eval()
