@@ -2,8 +2,10 @@ import yaml
 from pathlib import Path
 import psutil
 import datetime
+from typing import Tuple, Any
 
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -379,3 +381,33 @@ def print_resource_usage(epoch: int = None):
                 "vram_used": vram_used,
                 "vram_total": vram_total,
             })
+
+@torch.no_grad()
+def log_ldm_sample_unconditioned(
+    model: nn.Module,
+    stage1: nn.Module,
+    text_encoder,
+    scheduler: nn.Module,
+    spatial_shape: Tuple,
+    writer: SummaryWriter,
+    step: int,
+    device: torch.device,
+    scale_factor: float = 1.0,
+) -> None:
+    latent = torch.randn((1,) + spatial_shape)
+    latent = latent.to(device)
+
+    prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
+    prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
+    prompt_embeds = prompt_embeds[0]
+
+    for t in tqdm(scheduler.timesteps, ncols=70):
+        noise_pred = model(x=latent, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)
+        latent, _ = scheduler.step(noise_pred, t, latent)
+
+    x_hat = stage1.decode(latent / scale_factor)
+    img_0 = np.clip(a=x_hat[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
+    fig = plt.figure(dpi=300)
+    plt.imshow(img_0, cmap="gray")
+    plt.axis("off")
+    writer.add_figure("SAMPLE", fig, step)

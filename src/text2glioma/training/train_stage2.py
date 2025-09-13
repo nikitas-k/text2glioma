@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--no_shuffle", action="store_true", help="Disable shuffling of the training data.")
     parser.add_argument("--val_interval", type=int, default=1, help="Validation interval (in epochs).")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--n_epochs", type=int, default=1000, help="Maximum number of training epochs.")
+    parser.add_argument("--n_epochs", type=int, default=250, help="Maximum number of training epochs.")
     parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
     parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for models and tokenizers.")
     parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor for input images.")
@@ -103,17 +103,19 @@ def main():
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
     if noise_scheduler_type == "DDPMScheduler":
-        scheduler = DDPMScheduler(**config["model"]["scheduler"].get("params", {}))
+        scheduler = DDPMScheduler(**config["scheduler"].get("params", {}))
     elif noise_scheduler_type == "DDIMScheduler":
-        scheduler = DDIMScheduler(**config["model"]["scheduler"].get("params", {}))
+        scheduler = DDIMScheduler(**config["scheduler"].get("params", {}))
     else:
         raise ValueError(f"Unsupported noise scheduler type: {noise_scheduler_type}")
 
-    tokenizer = config["conditioning"].get("tokenizer", None)
-    text_encoder = config["conditioning"].get("text_encoder", None)
+    tokenizer = config["conditioning"].get("tokenizer", "stability-ai/stable-diffusion-2-base")
+    text_encoder = config["conditioning"].get("text_encoder", "stability-ai/stable-diffusion-2-base")
     if tokenizer and text_encoder:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir)
         text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir)
+    else:
+        raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
 
     if args.use_parallel and torch.cuda.device_count() > 1:
         ldm = torch.nn.DataParallel(ldm)
@@ -138,7 +140,7 @@ def main():
     writer_train = SummaryWriter(log_dir / "train")
     writer_val = SummaryWriter(log_dir / "val")
 
-    optimizer = optim.AdamW(ldm.parameters(), lr=config.get("learning_rate", 1e-4))
+    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
     scaler = torch.cuda.amp.GradScaler()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -166,6 +168,7 @@ def main():
         start_epoch=start_epoch,
         text_field=args.train_spec,
         val_interval=args.val_interval,
+        dropout_p=config["conditioning"].get("dropout_p", 0.2),
         run_dir=run_dir,
         scale_factor=args.scale_factor,
     )

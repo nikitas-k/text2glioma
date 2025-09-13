@@ -11,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
 
-from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions
+from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned
 
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
@@ -323,7 +323,9 @@ def eval_autoencoder(
 
     return total_losses["l1_loss"]
 
-
+# ----------------------------------------------------------------------------------------------------------------------
+# Latent Diffusion Model
+# ----------------------------------------------------------------------------------------------------------------------
 def train_ldm(
     model: nn.Module,
     stage1: nn.Module,
@@ -339,116 +341,207 @@ def train_ldm(
     text_field: str = "impression",
     start_epoch: int = 0,
     val_interval: int = 1,
+    dropout_p: float = 0.2,
     model_dir: str = "./models",
     writer_train: Any = None,
     writer_val: Any = None,
     run_dir: str = "./runs",
     scale_factor: float = 1.0,
-    resource_monitor: bool = True,
-):
-    model_dir = Path(model_dir)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+) -> float:
+
+    val_loss = eval_ldm(
+        model=model,
+        stage1=stage1,
+        scheduler=scheduler,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        text_field=text_field,
+        loader=val_loader,
+        device=device,
+        step=len(train_loader) * start_epoch,
+        writer=writer_val,
+        sample=False,
+        scale_factor=scale_factor,
+    )
+    print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
-        model.train()
-        total_loss = 0.0
+        train_epoch_ldm(
+            model=model,
+            stage1=stage1,
+            scheduler=scheduler,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            text_field=text_field,
+            dropout_p=dropout_p,
+            loader=train_loader,
+            optimizer=optimizer,
+            device=device,
+            epoch=epoch,
+            writer=writer_train,
+            scaler=scaler,
+            scale_factor=scale_factor,
+        )
 
-        for batch in train_loader:
-            images = batch["image"].to(device)
-            texts = batch[text_field]
+        if (epoch + 1) % val_interval == 0:
+            val_loss = eval_ldm(
+                model=model,
+                stage1=stage1,
+                scheduler=scheduler,
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                text_field=text_field,
+                loader=val_loader,
+                device=device,
+                step=len(train_loader) * epoch,
+                writer=writer_val,
+                sample=True if (epoch + 1) % (val_interval * 2) == 0 else False,
+                scale_factor=scale_factor,
+            )
+
+            print(f"epoch {epoch + 1} val loss: {val_loss:.4f}")
+            print_gpu_memory_report()
+
+            # Save checkpoint
+            checkpoint = {
+                "epoch": epoch + 1,
+                "diffusion": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "best_loss": best_loss,
+            }
+            torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
+
+            if val_loss <= best_loss:
+                print(f"New best val loss {val_loss}")
+                best_loss = val_loss
+                torch.save(model.state_dict(), str(run_dir / "best_model.pth"))
+
+    print(f"Training finished!")
+    print(f"Saving final model...")
+    torch.save(model.state_dict(), str(run_dir / "final_model.pth"))
+
+    return val_loss
+
+
+def train_epoch_ldm(
+    model: nn.Module,
+    stage1: nn.Module,
+    scheduler: nn.Module,
+    tokenizer: Any,
+    text_encoder: Any,
+    text_field: str,
+    dropout_p: float,
+    loader: torch.utils.data.DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    writer: SummaryWriter,
+    scaler: torch.cuda.amp.GradScaler,
+    scale_factor: float = 1.0,
+) -> None:
+    model.train()
+
+    pbar = tqdm(enumerate(loader), total=len(loader))
+    for step, x in pbar:
+        images = x["image"].to(device)
+        reports = x[text_field].to(device)
+        timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
+
+        optimizer.zero_grad(set_to_none=True)
+        with torch.cuda.amp.autocast(enabled=True):
+            with torch.no_grad():
+                e = stage1.encode_stage_2_inputs(images) * scale_factor
 
             # Prepare conditioning
-            cond, _ = prepare_conditioning(tokenizer, text_encoder, texts, images.size(0), device)
+            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
 
-            # Encode images to latent space
-            with torch.no_grad():
-                latents = stage1(images) * scale_factor
+            noise = torch.randn_like(e).to(device)
+            noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
+            noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
-            # Sample noise and timestep
-            noise = torch.randn_like(latents).to(device)
-            bsz = latents.size(0)
-            timesteps = torch.randint(0, scheduler.num_train_timesteps, (bsz,), device=device).long()
+            if scheduler.prediction_type == "v_prediction":
+                # Use v-prediction parameterization
+                target = scheduler.get_velocity(e, noise, timesteps)
+            elif scheduler.prediction_type == "epsilon":
+                target = noise
+            loss = F.mse_loss(noise_pred.float(), target.float())
 
-            noisy_latents = scheduler.add_noise(latents, noise, timesteps)
+        losses = OrderedDict(loss=loss)
 
-            optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
-                noise_pred = model(noisy_latents, timesteps, context=cond)
+        scaler.scale(losses["loss"]).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-            if scheduler.prediction_type == "epsilon":
-                loss = nn.functional.mse_loss(noise_pred, noise)
-            elif scheduler.prediction_type == "v_prediction":
-                v = scheduler.get_velocity(latents, noise, timesteps)
-                loss = nn.functional.mse_loss(noise_pred, v)
-            else:
-                raise ValueError(f"Unknown prediction type: {scheduler.prediction_type}")
+        writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+        for k, v in losses.items():
+            writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
-            total_loss += loss.item() * images.size(0)
+        pbar.set_postfix({"epoch": epoch, "loss": f"{losses['loss'].item():.5f}", "lr": f"{get_lr(optimizer):.6f}"})
 
-        avg_loss = total_loss / len(train_loader.dataset)
 
-        if writer_train:
-            writer_train.add_scalar("Loss/Train", avg_loss, epoch)
-        print(f"Epoch [{epoch+1}/{n_epochs}] Training Loss: {avg_loss:.4f}")
-        scheduler.step()
+@torch.no_grad()
+def eval_ldm(
+    model: nn.Module,
+    stage1: nn.Module,
+    scheduler: nn.Module,
+    tokenizer: Any,
+    text_encoder: Any,
+    text_field: str,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    step: int,
+    writer: SummaryWriter,
+    sample: bool = False,
+    scale_factor: float = 1.0,
+) -> float:
+    model.eval()
+    total_losses = OrderedDict()
 
-        # Validation
-        if (epoch + 1) % val_interval == 0:
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    images = batch["image"].to(device)
-                    texts = batch[text_field]
+    for x in loader:
+        images = x["image"].to(device)
+        reports = x[text_field].to(device)
+        timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
-                    # Prepare conditioning
-                    cond, _ = prepare_conditioning(tokenizer, text_encoder, texts, images.size(0), device)
+        with torch.cuda.amp.autocast(enabled=True):
+            e = stage1.encode_stage_2_inputs(images) * scale_factor
 
-                    # Encode images to latent space
-                    latents = stage1(images).detach() * scale_factor
+            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
 
-                    # Sample noise and timestep
-                    noise = torch.randn_like(latents).to(device)
-                    bsz = latents.size(0)
-                    timesteps = torch.randint(0, scheduler.num_train_timesteps, (bsz,), device=device).long()
+            noise = torch.randn_like(e).to(device)
+            noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
+            noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
-                    noisy_latents = scheduler.add_noise(latents, noise, timesteps)
+            if scheduler.prediction_type == "v_prediction":
+                # Use v-prediction parameterization
+                target = scheduler.get_velocity(e, noise, timesteps)
+            elif scheduler.prediction_type == "epsilon":
+                target = noise
+            loss = F.mse_loss(noise_pred.float(), target.float())
 
-                    with torch.cuda.amp.autocast():
-                        noise_pred = model(noisy_latents, timesteps, context=cond)
+        loss = loss.mean()
+        losses = OrderedDict(loss=loss)
 
-                    if scheduler.prediction_type == "epsilon":
-                        loss = nn.functional.mse_loss(noise_pred, noise)
-                    elif scheduler.prediction_type == "v_prediction":
-                        v = scheduler.get_velocity(latents, noise, timesteps)
-                        loss = nn.functional.mse_loss(noise_pred, v)
-                    else:
-                        raise ValueError(f"Unknown prediction type: {scheduler.prediction_type}")
+        for k, v in losses.items():
+            total_losses[k] = total_losses.get(k, 0) + v.item() * images.shape[0]
 
-                    val_loss += loss.item() * images.size(0)
-                avg_val_loss = val_loss / len(val_loader.dataset)
+    for k in total_losses.keys():
+        total_losses[k] /= len(loader.dataset)
 
-            if writer_val:
-                writer_val.add_scalar("Loss/Validation", avg_val_loss, epoch)
-            print(f"Validation Loss: {avg_val_loss:.4f}")
+    for k, v in total_losses.items():
+        writer.add_scalar(f"{k}", v, step)
 
-            # Save best model
-            torch.save(model.state_dict(), model_dir / "best_ldm.pth")
-            print(f"Model saved at epoch {epoch+1}")
-            # Save checkpoint
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "ldm_state_dict": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                },
-                run_dir / "checkpoint.pth",
-            )
-    return avg_val_loss
+    if sample:
+        log_ldm_sample_unconditioned(
+            model=model,
+            stage1=stage1,
+            scheduler=scheduler,
+            text_encoder=text_encoder,
+            spatial_shape=tuple(e.shape[1:]),
+            writer=writer,
+            step=step,
+            device=device,
+            scale_factor=scale_factor,
+        )
 
+    return total_losses["loss"]

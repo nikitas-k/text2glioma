@@ -31,4 +31,5 @@ conditioning:
   text_encoder: "stabilityai/stable-diffusion-2-1-base"
   max_length: 77
   projection_dim: 1024
+  dropout_p: 0.2
     
