@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("data", type=str, help="Path to the data JSON file.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
+    parser.add_argument("--stage1_config", type=str, required=True, help="Path to the stage 1 autoencoder config file.")
     parser.add_argument("--run_dir", type=str, required=True, help="Directory containing model checkpoints and logs.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
@@ -82,11 +83,11 @@ def main():
     print("Initializing models...")
     stage1 = stage1_ify(
         get_model(
-            model_type="AutoencoderKL", config=config, from_file=args.stage1_uri
+            model_type="AutoencoderKL", config=args.stage1_config, from_file=args.stage1_uri
             )
         )
     stage1.eval()
-    
+
     for param in stage1.parameters():
         param.requires_grad = False
 
