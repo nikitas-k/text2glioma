@@ -20,11 +20,12 @@ model:
 
 scheduler:
   name: "DDIMScheduler"
-  schedule: "scaled_linear_beta"
-  num_train_timesteps: 1000
-  beta_start: 0.0015
-  beta_end: 0.0205
-  prediction_type: "v_prediction"
+  params:
+    schedule: "scaled_linear_beta"
+    num_train_timesteps: 1000
+    beta_start: 0.0015
+    beta_end: 0.0205
+    prediction_type: "v_prediction"
 
 conditioning:
   tokenizer: "stabilityai/stable-diffusion-2-1-base"
