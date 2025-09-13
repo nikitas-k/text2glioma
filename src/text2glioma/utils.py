@@ -99,7 +99,7 @@ def log_reconstructions(
     )
     writer.add_figure(title, fig, step)
     
-def stage1_ify(stage1):
+def stage1_ify(stage1 : Any) -> Any:
     """Wraps the stage 1 model if it is not already wrapped."""
     if not isinstance(stage1, Stage1Wrapper):
         stage1 = Stage1Wrapper(stage1)
@@ -332,7 +332,7 @@ def get_experiment_dataloaders(
     )
     return train_loader, val_loader
 
-def get_model(model_type, config, pretrained=False):
+def get_model(model_type, config, pretrained=False, from_file=None):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
         model = AutoencoderKL(**config["model"]["params"])
@@ -344,6 +344,9 @@ def get_model(model_type, config, pretrained=False):
             )
         
             model.load_state_dict(state_dict)
+        elif from_file is not None:
+            print(f"Loading autoencoder weights from {from_file}.")
+            model.load_state_dict(torch.load(from_file, map_location="cpu"))
 
     elif model_type == "DiffusionModelUNet":
         from generative.networks.nets import DiffusionModelUNet

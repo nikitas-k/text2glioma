@@ -80,8 +80,13 @@ def main():
         resume = False
 
     print("Initializing models...")
-    stage1 = get_model("AutoencoderKL", args.stage1_uri)
+    stage1 = stage1_ify(
+        get_model(
+            model_type="AutoencoderKL", config=config, from_file=args.stage1_uri
+            )
+        )
     stage1.eval()
+    
     for param in stage1.parameters():
         param.requires_grad = False
 
@@ -121,7 +126,7 @@ def main():
         ldm = torch.nn.DataParallel(ldm)
         tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
         text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
-        stage1 = torch.nn.DataParallel(stage1_ify(stage1))
+        stage1 = torch.nn.DataParallel(stage1)
 
     if resume and checkpoint is not None:
         ldm.load_state_dict(checkpoint["ldm_state_dict"])
