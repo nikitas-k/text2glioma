@@ -111,14 +111,14 @@ def main():
 
     tokenizer = config["conditioning"].get("tokenizer", None)
     text_encoder = config["conditioning"].get("text_encoder", None)
-    if tokenizer and txt_encoder:
+    if tokenizer and text_encoder:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir)
         text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir)
 
     if args.use_parallel and torch.cuda.device_count() > 1:
         ldm = torch.nn.DataParallel(ldm)
         tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
-        txt_encoder = torch.nn.DataParallel(txt_encoder) if txt_encoder else None
+        text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
         stage1 = torch.nn.DataParallel(stage1_ify(stage1))
 
     if resume and checkpoint is not None:
@@ -142,6 +142,8 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    tokenizer = tokenizer.to(device)
+    text_encoder = text_encoder.to(device)
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
     

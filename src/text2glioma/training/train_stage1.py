@@ -29,12 +29,12 @@ def parse_args():
     parser.add_argument("--no_shuffle", action="store_true", default=True, help="Disable shuffling of the training data.")
     parser.add_argument("--val_interval", type=int, default=1, help="Validation interval (in epochs).")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
-    parser.add_argument("--n_epochs", type=int, default=1000, help="Maximum number of training epochs.")
+    parser.add_argument("--num_epochs", type=int, default=500, help="Maximum number of training epochs.")
     parser.add_argument("--pretrained", action="store_true", default=False, help="Use pretrained weights from Pinaya et al. for the autoencoder.")
     parser.add_argument("--use_parallel", action="store_true", default=False, help="Use DataParallel for multi-GPU training.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--initialize", action="store_true", default=False, help="Initialize (reset) the data for PersistentDataset.")
-    parser.add_argument("--fresh", action="store_true", default=False, help="Start fresh training (overwrite checkpoints)")
+    parser.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint")
 
     return parser.parse_args()
 
@@ -61,14 +61,18 @@ def main():
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    if not args.fresh and (run_dir.exists() and (run_dir / "checkpoint.pth").exists()):
-        print(f"Resuming from checkpoint in {run_dir}")
-        checkpoint = torch.load(run_dir / "checkpoint.pth", map_location="cpu")
-        resume = True
+    resume = args.resume
+
+    if resume is True:
+        if (run_dir.exists() and (run_dir / "checkpoint.pth").exists()):
+            print(f"Resuming from checkpoint in {run_dir}")
+            checkpoint = torch.load(run_dir / "checkpoint.pth", map_location="cpu")
+        else:
+            print(f"No checkpoint found in {run_dir}."
+                  "Running training for the first time...")
     else:
-        print(f"No checkpoint found in {run_dir}. Starting fresh training.")
+        print("Running training for the first time...")
         checkpoint = None
-        resume = False
 
     print(f"Run directory: {str(run_dir)}")
     print(f"Arguments: {str(args)}")

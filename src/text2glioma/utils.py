@@ -1,6 +1,7 @@
 import yaml
 from pathlib import Path
 import psutil
+import datetime
 
 import matplotlib.pyplot as plt
 
@@ -35,6 +36,7 @@ def get_lr(optimizer):
 def get_figure(
     img: torch.Tensor,
     recons: torch.Tensor,
+    cache_dir: str = None,
 ):
     img_npy_0 = np.clip(a=img[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
     recons_npy_0 = np.clip(a=recons[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
@@ -76,6 +78,8 @@ def get_figure(
     fig = plt.figure(dpi=300)
     plt.imshow(img, cmap="gray")
     plt.axis("off")
+    if cache_dir is not None:
+        plt.savefig(str(Path(cache_dir, f'sample_{datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}.png')), dpi=300)
     return fig
     
 def log_reconstructions(
@@ -84,10 +88,12 @@ def log_reconstructions(
     writer: SummaryWriter,
     step: int,
     title: str = "RECONSTRUCTION",
+    cache_dir: str = None,
 ) -> None:
     fig = get_figure(
         image,
         reconstruction,
+        cache_dir=cache_dir,
     )
     writer.add_figure(title, fig, step)
     
