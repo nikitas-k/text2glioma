@@ -116,8 +116,8 @@ def main():
     else:
         raise ValueError(f"Unsupported noise scheduler type: {noise_scheduler_type}")
 
-    tokenizer = config["conditioning"].get("tokenizer", "stability-ai/stable-diffusion-2-1-base")
-    text_encoder = config["conditioning"].get("text_encoder", "stability-ai/stable-diffusion-2-1-base")
+    tokenizer = config["conditioning"].get("tokenizer", "stabilityai/stable-diffusion-2-1-base")
+    text_encoder = config["conditioning"].get("text_encoder", "stabilityai/stable-diffusion-2-1-base")
     if tokenizer and text_encoder:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir)
         text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir)
