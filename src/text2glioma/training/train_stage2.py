@@ -119,8 +119,8 @@ def main():
     tokenizer = config["conditioning"].get("tokenizer", "stabilityai/stable-diffusion-2-1-base")
     text_encoder = config["conditioning"].get("text_encoder", "stabilityai/stable-diffusion-2-1-base")
     if tokenizer and text_encoder:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir)
-        text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir, tokenizer_type="CLIPTokenizer")
+        text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir, text_encoder_type="CLIPTextModel")
     else:
         raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
 
