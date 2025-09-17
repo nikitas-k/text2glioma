@@ -445,7 +445,7 @@ def train_epoch_ldm(
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
         images = x["image"].to(device)
-        reports = x[text_field].to(device)
+        reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         optimizer.zero_grad(set_to_none=True)
@@ -501,7 +501,7 @@ def eval_ldm(
 
     for x in loader:
         images = x["image"].to(device)
-        reports = x[text_field].to(device)
+        reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         with torch.cuda.amp.autocast(enabled=True):
