@@ -128,7 +128,6 @@ def main():
         ldm = torch.nn.DataParallel(ldm)
         tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
         text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
-        stage1 = torch.nn.DataParallel(stage1)
 
     if resume and checkpoint is not None:
         ldm.load_state_dict(checkpoint["ldm_state_dict"])
