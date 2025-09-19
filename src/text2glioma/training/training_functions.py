@@ -451,7 +451,7 @@ def train_epoch_ldm(
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=True):
             with torch.no_grad():
-                e = stage1.encode_stage_2_inputs(images) * scale_factor
+                e = stage1(images) * scale_factor
 
             # Prepare conditioning
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
@@ -505,7 +505,7 @@ def eval_ldm(
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         with torch.cuda.amp.autocast(enabled=True):
-            e = stage1.encode_stage_2_inputs(images) * scale_factor
+            e = stage1(images) * scale_factor
 
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
 
