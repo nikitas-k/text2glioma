@@ -126,8 +126,8 @@ def main():
 
     if args.use_parallel and torch.cuda.device_count() > 1:
         ldm = torch.nn.DataParallel(ldm)
-        tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
-        text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
+        #tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
+        #text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
 
     if resume and checkpoint is not None:
         ldm.load_state_dict(checkpoint["ldm_state_dict"])
