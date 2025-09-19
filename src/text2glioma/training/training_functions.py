@@ -15,9 +15,11 @@ from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructio
 
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
+    """Encode a list of texts into text embeddings using the provided tokenizer and text encoder."""
+    max_length = tokenizer.module.model_max_length if hasattr(tokenizer, "module") else tokenizer.model_max_length
     tokens = tokenizer(
         text=texts,
-        max_length=tokenizer.model_max_length if pad_to_max else None,
+        max_length=max_length if pad_to_max else None,
         padding="max_length" if pad_to_max else True,
         truncation=True,
         return_tensors="pt",
