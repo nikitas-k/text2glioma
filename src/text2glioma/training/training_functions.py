@@ -14,7 +14,7 @@ from generative.losses import PatchAdversarialLoss
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned
 
 @torch.no_grad()
-def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
+def encode_text(tokenizer, text_encoder, texts, pad_to_max=True):
     """Encode a list of texts into text embeddings using the provided tokenizer and text encoder."""
     tokens = tokenizer(
         text=texts,
@@ -24,18 +24,18 @@ def encode_text(tokenizer, text_encoder, texts, device, pad_to_max=True):
         return_tensors="pt",
     )
     out = text_encoder(**tokens)
-    return out.last_hidden_state.to(device)
+    return out.last_hidden_state
 
-def get_uncond(tokenizer, text_encoder, batch_size, device):
-    return encode_text(tokenizer, text_encoder, [""] * batch_size, device)
+def get_uncond(tokenizer, text_encoder, batch_size):
+    return encode_text(tokenizer, text_encoder, [""] * batch_size)
 
-def prepare_conditioning(tokenizer, text_encoder, texts, batch_size, device, dropout_p=0.2, uncond_cache=None):
+def prepare_conditioning(tokenizer, text_encoder, texts, batch_size, dropout_p=0.2, uncond_cache=None):
     B = len(texts)
-    cond = encode_text(tokenizer, text_encoder, texts, device)
+    cond = encode_text(tokenizer, text_encoder, texts)
     uncond = uncond_cache if (uncond_cache is not None and uncond_cache.size(0) == B) \
-        else get_uncond(tokenizer, text_encoder, batch_size, device)
+        else get_uncond(tokenizer, text_encoder, batch_size)
     # text dropout for classifier-free guidance
-    drop = (torch.rand(B) < dropout_p).to(device).float().view(B, 1, 1)
+    drop = (torch.rand(B) < dropout_p).float().view(B, 1, 1)
     context = cond * (1 - drop) + uncond * drop
     return context, uncond
 
@@ -455,7 +455,7 @@ def train_epoch_ldm(
                 e = stage1(images) * scale_factor
 
             # Prepare conditioning
-            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
+            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
