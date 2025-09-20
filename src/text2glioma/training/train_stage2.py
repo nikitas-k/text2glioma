@@ -127,7 +127,7 @@ def main():
     if args.use_parallel and torch.cuda.device_count() > 1:
         ldm = torch.nn.DataParallel(ldm)
         #tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
-        #text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
+        text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
 
     if resume and checkpoint is not None:
         ldm.load_state_dict(checkpoint["ldm_state_dict"])
@@ -150,8 +150,11 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    tokenizer = tokenizer.to(device)
     text_encoder = text_encoder.to(device)
+    text_encoder.eval()
+    for param in text_encoder.parameters():
+        param.requires_grad = False
+        
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
     
