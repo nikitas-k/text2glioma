@@ -448,6 +448,7 @@ def train_epoch_ldm(
         images = x["image"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
+        print(timesteps.shape)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=True):
@@ -456,9 +457,11 @@ def train_epoch_ldm(
 
             # Prepare conditioning
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p)
+            print(cond.shape)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
+            print(noisy_e.shape)
             noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":
@@ -504,14 +507,17 @@ def eval_ldm(
         images = x["image"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
+        print(timesteps.shape)
 
         with torch.cuda.amp.autocast(enabled=True):
             e = stage1(images) * scale_factor
 
-            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
+            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0)
 
+            print(cond.shape)
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
+            print(noisy_e.shape)
             noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":
