@@ -151,10 +151,6 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     text_encoder = text_encoder.to(device)
-    text_encoder.eval()
-    for param in text_encoder.parameters():
-        param.requires_grad = False
-        
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
     
