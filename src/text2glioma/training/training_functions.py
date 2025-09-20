@@ -31,7 +31,7 @@ def get_uncond(tokenizer, text_encoder, batch_size, device):
 
 def prepare_conditioning(tokenizer, text_encoder, texts, batch_size, dropout_p=0.2, uncond_cache=None, device='cpu'):
     B = len(texts)
-    cond = encode_text(tokenizer, text_encoder, texts)
+    cond = encode_text(tokenizer, text_encoder, texts, device=device)
     uncond = uncond_cache if (uncond_cache is not None and uncond_cache.size(0) == B) \
         else get_uncond(tokenizer, text_encoder, batch_size, device=device)
     # text dropout for classifier-free guidance
