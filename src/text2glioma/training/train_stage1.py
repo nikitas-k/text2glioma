@@ -1,9 +1,11 @@
 """ Training script for autoencoder (stage 1) with KL regularization. """
 import argparse
+import os
 import warnings
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from generative.losses.perceptual import PerceptualLoss
 from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
@@ -32,17 +34,45 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=500, help="Maximum number of training epochs.")
     parser.add_argument("--pretrained", action="store_true", default=False, help="Use pretrained weights from Pinaya et al. for the autoencoder.")
     parser.add_argument("--use_parallel", action="store_true", default=False, help="Use DataParallel for multi-GPU training.")
+    parser.add_argument("--distributed", action="store_true", default=False, help="Enable DistributedDataParallel training.")
+    parser.add_argument("--dist_backend", type=str, default="nccl", help="Distributed backend to use.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--initialize", action="store_true", default=False, help="Initialize (reset) the data for PersistentDataset.")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint")
 
     return parser.parse_args()
 
+def init_distributed(args):
+    if not args.distributed:
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+        return False
+
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    else:
+        print("Distributed mode requested but environment variables RANK/WORLD_SIZE not set. Falling back to single process.")
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+        args.distributed = False
+        return False
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend=args.dist_backend, init_method="env://", world_size=args.world_size, rank=args.rank)
+    dist.barrier()
+    return True
+
 def main():
     args = parse_args()
 
     set_determinism(args.seed)
     print_config()
+    distributed = init_distributed(args)
+    is_main_process = args.rank == 0
 
     datalist_json = args.data
     with open(datalist_json, "r") as f:
@@ -57,9 +87,11 @@ def main():
     config = load_config(args.config)
 
     model_dir = output_dir / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process:
+        model_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process:
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     resume = args.resume
 
@@ -80,12 +112,13 @@ def main():
         print(f"{k}: {v}")
     print(f"Config: {str(config)}")
 
-    writer_train = SummaryWriter(log_dir / "train")
-    writer_val = SummaryWriter(log_dir / "val")
-    print("Getting data...")
+    writer_train = SummaryWriter(log_dir / "train") if is_main_process else None
+    writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
+    if is_main_process:
+        print("Getting data...")
     
     cache_dir = output_dir / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)  # cache needs to exist on all ranks
 
     model_type = config["model"]["name"]
     train_loader, val_loader = get_dataloaders(
@@ -98,24 +131,38 @@ def main():
         shuffle=not args.no_shuffle,
         model_type=model_type,
         initialize=args.initialize,
+        distributed=distributed,
+        rank=args.rank,
+        world_size=args.world_size if distributed else 1,
     )
 
-    print("Initializing model...")        
+    if is_main_process:
+        print("Initializing model...")        
     model = get_model(model_type, config, args.pretrained)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
     perceptual_loss = PerceptualLoss(**config["perceptual_network"]["params"], cache_dir=cache_dir)        
-    
-    if torch.cuda.device_count() > 1 and args.use_parallel:
+
+    if distributed:
+        if args.use_parallel and is_main_process:
+            print("DistributedDataParallel enabled; ignoring DataParallel flag.")
+    elif torch.cuda.device_count() > 1 and args.use_parallel:
         print(f"Let's use {torch.cuda.device_count()} GPUs!")
         model = torch.nn.DataParallel(model)
         discriminator = torch.nn.DataParallel(discriminator)
         perceptual_loss = torch.nn.DataParallel(perceptual_loss)
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+    else:
+        device = torch.device("cpu")
     model = model.to(device)
     perceptual_loss = perceptual_loss.to(device)
     discriminator = discriminator.to(device)
+
+    if distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+        discriminator = torch.nn.parallel.DistributedDataParallel(discriminator, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
 
     optimizer_g = optim.AdamW(model.parameters(), lr=config["model"]["lr"])
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
@@ -128,7 +175,7 @@ def main():
     start_epoch = 0
     if resume and checkpoint is not None:
         print("Using checkpoint to resume training...")
-        checkpoint = torch.load(run_dir / "checkpoint.pth")
+        checkpoint = torch.load(run_dir / "checkpoint.pth", map_location="cpu")
         model.load_state_dict(checkpoint["state_dict"])
         discriminator.load_state_dict(checkpoint["discriminator"])
         optimizer_g.load_state_dict(checkpoint["optimizer_g"])
@@ -150,7 +197,7 @@ def main():
         scaler_g=scaler_g,
         scaler_d=scaler_d,
         device=device,
-        n_epochs=args.n_epochs,
+        n_epochs=args.num_epochs,
         start_epoch=start_epoch,
         best_loss=best_loss,
         val_interval=args.val_interval,
@@ -162,7 +209,10 @@ def main():
         perceptual_weight=config["model"]["perceptual_weight"],
         adversarial_weight=config["model"]["adv_weight"],
     )
-    print(f"Training completed. Best validation loss: {val_loss:.4f}")
+    if is_main_process:
+        print(f"Training completed. Best validation loss: {val_loss:.4f}")
+    if distributed:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     # get things going...

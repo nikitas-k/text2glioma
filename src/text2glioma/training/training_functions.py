@@ -84,6 +84,8 @@ def train_autoencoder(
     print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
+        if hasattr(train_loader, \"sampler\") and hasattr(train_loader.sampler, \"set_epoch\"):
+            train_loader.sampler.set_epoch(epoch)
         train_epoch_autoencoder(
             model=model,
             discriminator=discriminator,
@@ -225,10 +227,11 @@ def train_epoch_autoencoder(
 
         losses["d_loss"] = discriminator_loss
 
-        writer.add_scalar("lr_g", get_lr(optimizer_g), epoch * len(loader) + step)
-        writer.add_scalar("lr_d", get_lr(optimizer_d), epoch * len(loader) + step)
-        for k, v in losses.items():
-            writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
+        if writer is not None:
+            writer.add_scalar("lr_g", get_lr(optimizer_g), epoch * len(loader) + step)
+            writer.add_scalar("lr_d", get_lr(optimizer_d), epoch * len(loader) + step)
+            for k, v in losses.items():
+                writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
         pbar.set_postfix(
             {
@@ -312,8 +315,9 @@ def eval_autoencoder(
     for k in total_losses.keys():
         total_losses[k] /= len(loader.dataset)
 
-    for k, v in total_losses.items():
-        writer.add_scalar(f"{k}", v, step)
+    if writer is not None:
+        for k, v in total_losses.items():
+            writer.add_scalar(f"{k}", v, step)
 
     log_reconstructions(
         image=images,
@@ -351,6 +355,7 @@ def train_ldm(
 ) -> float:
     raw_model = model.module if hasattr(model, "module") else model
 
+    best_loss = float("inf")
     val_loss = eval_ldm(
         model=model,
         stage1=stage1,
@@ -368,6 +373,8 @@ def train_ldm(
     print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         train_epoch_ldm(
             model=model,
             stage1=stage1,
@@ -477,10 +484,11 @@ def train_epoch_ldm(
         scaler.step(optimizer)
         scaler.update()
 
-        writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
+        if writer is not None:
+            writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
 
-        for k, v in losses.items():
-            writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
+            for k, v in losses.items():
+                writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
         pbar.set_postfix({"epoch": epoch, "loss": f"{losses['loss'].item():.5f}", "lr": f"{get_lr(optimizer):.6f}"})
 
@@ -536,8 +544,9 @@ def eval_ldm(
     for k in total_losses.keys():
         total_losses[k] /= len(loader.dataset)
 
-    for k, v in total_losses.items():
-        writer.add_scalar(f"{k}", v, step)
+    if writer is not None:
+        for k, v in total_losses.items():
+            writer.add_scalar(f"{k}", v, step)
 
     if sample:
         log_ldm_sample_unconditioned(

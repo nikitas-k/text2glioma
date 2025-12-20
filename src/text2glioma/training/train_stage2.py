@@ -1,9 +1,11 @@
 """ Training script for LDM (stage 2) with frozen autoencoder. """
 import argparse
+import os
 import warnings
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from generative.networks.nets import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
@@ -34,16 +36,44 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
     parser.add_argument("--n_epochs", type=int, default=250, help="Maximum number of training epochs.")
     parser.add_argument("--use_parallel", action="store_true", help="Use DataParallel for multi-GPU training.")
+    parser.add_argument("--distributed", action="store_true", help="Enable DistributedDataParallel training.")
+    parser.add_argument("--dist_backend", type=str, default="nccl", help="Distributed backend to use.")
     parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for models and tokenizers.")
     parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor for input images.")
     parser.add_argument("--train_spec", type=str, default="impression", metavar=["impression", "findings"], help="Which version of training to run.")
 
     return parser.parse_args()
 
+def init_distributed(args):
+    if not args.distributed:
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+        return False
+
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    else:
+        print("Distributed mode requested but environment variables RANK/WORLD_SIZE not set. Falling back to single process.")
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+        args.distributed = False
+        return False
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend=args.dist_backend, init_method="env://", world_size=args.world_size, rank=args.rank)
+    dist.barrier()
+    return True
+
 def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
+    distributed = init_distributed(args)
+    is_main_process = args.rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
         raise ValueError(f"Unrecognized training option: {args.train_spec}"
@@ -68,9 +98,11 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     model_dir = output_dir / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process:
+        model_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process:
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     if run_dir.exists() and (run_dir / "checkpoint.pth").exists():
         print(f"Resuming from checkpoint in {run_dir}")
@@ -105,7 +137,10 @@ def main():
         pin_memory=args.pin_memory,
         shuffle=not args.no_shuffle,
         model_type=model_type,
-        initialize=False
+        initialize=False,
+        distributed=distributed,
+        rank=args.rank,
+        world_size=args.world_size if distributed else 1,
     )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
@@ -124,7 +159,10 @@ def main():
     else:
         raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
 
-    if args.use_parallel and torch.cuda.device_count() > 1:
+    if distributed:
+        if args.use_parallel and is_main_process:
+            print("DistributedDataParallel enabled; ignoring DataParallel flag.")
+    elif args.use_parallel and torch.cuda.device_count() > 1:
         ldm = torch.nn.DataParallel(ldm)
         #tokenizer = torch.nn.DataParallel(tokenizer) if tokenizer else None
         text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
@@ -136,25 +174,33 @@ def main():
     else:
         start_epoch = 0
 
-    print(f"Starting training from epoch {start_epoch}")
-    print(f"Run directory: {str(run_dir)}")
-    print(f"Arguments: {str(args)}")
-    for k, v in vars(args).items():
-        print(f"{k}: {v}")
-    print(f"Config: {str(config)}")
+    if is_main_process:
+        print(f"Starting training from epoch {start_epoch}")
+        print(f"Run directory: {str(run_dir)}")
+        print(f"Arguments: {str(args)}")
+        for k, v in vars(args).items():
+            print(f"{k}: {v}")
+        print(f"Config: {str(config)}")
 
-    writer_train = SummaryWriter(log_dir / "train")
-    writer_val = SummaryWriter(log_dir / "val")
+    writer_train = SummaryWriter(log_dir / "train") if is_main_process else None
+    writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
 
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
     scaler = torch.cuda.amp.GradScaler()
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+    else:
+        device = torch.device("cpu")
     text_encoder = text_encoder.to(device)
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
+
+    if distributed:
+        ldm = torch.nn.parallel.DistributedDataParallel(ldm, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
     
-    print("Starting training...")
+    if is_main_process:
+        print("Starting training...")
     val_loss = train_ldm(
         model=ldm,
         stage1=stage1,
@@ -179,6 +225,8 @@ def main():
     )
 
     print(f"Training completed, final validation loss: {val_loss:0.5f}")
+    if distributed:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
