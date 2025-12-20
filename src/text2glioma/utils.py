@@ -1,3 +1,4 @@
+import os
 import yaml
 from pathlib import Path
 import psutil
@@ -15,6 +16,8 @@ from monai.data.dataset import PersistentDataset
 from monai import transforms as T
 from pynvml_utils import nvidia_smi
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 import gdown
 
@@ -92,6 +95,8 @@ def log_reconstructions(
     title: str = "RECONSTRUCTION",
     cache_dir: str = None,
 ) -> None:
+    if writer is None:
+        return
     fig = get_figure(
         image,
         reconstruction,
@@ -121,6 +126,9 @@ def get_dataloaders(
         shuffle=False,
         model_type="AutoencoderKL",
         initialize=False,
+        distributed: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
     ):
     if model_type not in ["AutoencoderKL", "DiffusionModelUNet"]:
         raise ValueError(f"Model type {model_type} not supported for dataloaders.")
@@ -213,10 +221,18 @@ def get_dataloaders(
         train_data.set_data(train_dataset)  # Reset to ensure data is correct
         val_data.set_data(val_dataset)  # Reset to ensure data is correct
 
+    train_sampler = None
+    val_sampler = None
+    if distributed and world_size > 1:
+        train_sampler = DistributedSampler(train_data, num_replicas=world_size, rank=rank, shuffle=shuffle)
+        val_sampler = DistributedSampler(val_data, num_replicas=world_size, rank=rank, shuffle=False)
+        shuffle = False
+
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
@@ -226,6 +242,7 @@ def get_dataloaders(
         val_data,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
