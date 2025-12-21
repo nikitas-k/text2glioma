@@ -84,8 +84,6 @@ def train_autoencoder(
     print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
-        if hasattr(train_loader, \"sampler\") and hasattr(train_loader.sampler, \"set_epoch\"):
-            train_loader.sampler.set_epoch(epoch)
         train_epoch_autoencoder(
             model=model,
             discriminator=discriminator,
