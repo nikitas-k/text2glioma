@@ -208,7 +208,7 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 192, 96), mode="trilinear"),
+                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
                 ),
