@@ -16,7 +16,7 @@ model:
     use_flash_attention: False
     transformer_num_layers: 1
     norm_num_groups: 32
-    norm_eps: 1e-6
+    norm_eps: 1.0e-6
 
 scheduler:
   name: "DDIMScheduler"
