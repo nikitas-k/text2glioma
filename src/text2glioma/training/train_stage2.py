@@ -168,7 +168,10 @@ def main():
         text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
 
     if resume and checkpoint is not None:
-        ldm.load_state_dict(checkpoint["ldm_state_dict"])
+        ldm_state_dict = checkpoint.get("ldm_state_dict", checkpoint.get("diffusion"))
+        if ldm_state_dict is None:
+            raise KeyError("Checkpoint missing 'ldm_state_dict' or 'diffusion' keys.")
+        ldm.load_state_dict(ldm_state_dict)
         start_epoch = checkpoint["epoch"] + 1
         print(f"Resumed from epoch {start_epoch}")
     else:
