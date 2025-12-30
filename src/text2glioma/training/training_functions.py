@@ -23,6 +23,7 @@ def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
         truncation=True,
         return_tensors="pt",
     )
+    tokens = {key: value.to(device) for key, value in tokens.items()}
     out = text_encoder(**tokens)
     return out.last_hidden_state.to(device)
 
