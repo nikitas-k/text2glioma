@@ -63,13 +63,13 @@ def init_distributed(args):
     args.world_size = dist.get_world_size()
     args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
     
-    return dist
+    return True
 
 def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
-    dist = init_distributed(args)
+    distributed = init_distributed(args)
     is_main_process = args.rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
@@ -135,9 +135,9 @@ def main():
         shuffle=not args.no_shuffle,
         model_type=model_type,
         initialize=False,
-        distributed=True if dist else False,
+        distributed=distributed,
         rank=args.rank,
-        world_size=args.world_size if dist else 1,
+        world_size=args.world_size if distributed else 1,
     )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
