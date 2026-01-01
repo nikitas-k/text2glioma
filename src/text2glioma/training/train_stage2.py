@@ -56,12 +56,17 @@ def init_distributed(args):
         args.world_size = int(os.environ["WORLD_SIZE"])
         args.local_rank = int(os.environ.get("LOCAL_RANK", 0))     
         
-    dist.init_process_group(backend=args.dist_backend)
-    dist.barrier()
+    dist.init_process_group(
+        backend=args.dist_backend,
+        init_method="env://",
+        world_size=args.world_size,
+        rank=args.rank,
+        device_id=args.local_rank,
+    )
+    dist.barrier(device_ids=[args.local_rank])
     args.rank = dist.get_rank()
-    torch.cuda.set_device(args.local_rank)
     args.world_size = dist.get_world_size()
-    args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
     
     return True
 
