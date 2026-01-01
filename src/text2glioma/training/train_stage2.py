@@ -64,7 +64,7 @@ def init_distributed(args):
         rank=args.rank,
         device_id=device_id,
     )
-    dist.barrier(device_ids=[args.local_rank])
+
     args.rank = dist.get_rank()
     args.world_size = dist.get_world_size()
     args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
