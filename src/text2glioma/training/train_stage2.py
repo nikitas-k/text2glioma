@@ -55,17 +55,27 @@ def init_distributed(args):
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ["WORLD_SIZE"])
         args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    
+    elif dist.is_available() and dist.is_initialized():
+        args.rank = dist.get_rank()
+        args.world_size = dist.get_world_size()
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    
     else:
         print("Distributed mode requested but environment variables RANK/WORLD_SIZE not set. Falling back to single process.")
         args.rank = 0
         args.world_size = 1
         args.local_rank = 0
         args.distributed = False
-        return False
+        return False        
 
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group(backend=args.dist_backend, init_method="env://", world_size=args.world_size, rank=args.rank)
     dist.barrier()
+    args.rank = dist.get_rank()
+    args.world_size = dist.get_world_size()
+    args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    
     return True
 
 def main():
