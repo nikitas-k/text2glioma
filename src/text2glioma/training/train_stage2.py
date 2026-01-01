@@ -68,21 +68,21 @@ def init_distributed(args):
         args.local_rank = 0
         args.distributed = False
         return False        
-
-    torch.cuda.set_device(args.local_rank)
-    dist.init_process_group(backend=args.dist_backend, init_method="env://", world_size=args.world_size, rank=args.rank)
+        
+    dist.init_process_group(backend=args.dist_backend)
     dist.barrier()
     args.rank = dist.get_rank()
+    torch.cuda.set_device('cuda')
     args.world_size = dist.get_world_size()
-    args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
     
-    return True
+    return dist
 
 def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
-    distributed = init_distributed(args)
+    dist = init_distributed(args)
     is_main_process = args.rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
@@ -148,9 +148,9 @@ def main():
         shuffle=not args.no_shuffle,
         model_type=model_type,
         initialize=False,
-        distributed=distributed,
+        distributed=True if dist else False,
         rank=args.rank,
-        world_size=args.world_size if distributed else 1,
+        world_size=args.world_size if dist else 1,
     )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
