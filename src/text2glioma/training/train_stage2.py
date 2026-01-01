@@ -79,9 +79,10 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     node = os.uname()[1]
+    world_size = torch.cuda.device_count()
 
     # create model and move it to GPU with id rank
-    device_id = rank % torch.cuda.device_count()
+    device_id = rank % world_size
     is_main_process = rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
@@ -197,19 +198,23 @@ def main():
     writer_train = SummaryWriter(log_dir / "train") if is_main_process else None
     writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
 
-    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
-    scaler = torch.cuda.amp.GradScaler()
-
     if torch.cuda.is_available():
-        device = device_id if distributed else args.device
+        device = torch.device(f"cuda:{device_id}") if distributed else args.device
     else:
         device = torch.device("cpu")
-    text_encoder = text_encoder.to(device)
-    ldm = ldm.to(device)
-    stage1 = stage1.to(device)
 
     if distributed:
-        ldm = DDP(ldm, device_ids=device_id, find_unused_parameters=False)
+        ldm = DDP(ldm, device_ids=[device_id], find_unused_parameters=False)
+        text_encoder = DDP(text_encoder, device_ids=[device_id])
+        stage1 = DDP(stage1, device_ids=[device_id])
+
+    else:
+        text_encoder = text_encoder.to(device)
+        ldm = ldm.to(device)
+        stage1 = stage1.to(device)
+
+    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
+    scaler = torch.cuda.amp.GradScaler()
     
     if is_main_process:
         print("Starting training...")
