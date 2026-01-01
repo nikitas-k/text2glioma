@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
 from generative.networks.nets import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.config import print_config
@@ -64,7 +65,7 @@ def init_distributed(args):
         rank=args.rank,
         device_id=device_id,
     )
-
+    dist.barrier(device_ids=[args.rank])
     args.rank = dist.get_rank()
     args.world_size = dist.get_world_size()
     args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
@@ -75,8 +76,13 @@ def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
-    distributed = init_distributed(args)
-    is_main_process = args.rank == 0
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    node = os.uname()[1]
+
+    # create model and move it to GPU with id rank
+    device_id = rank % torch.cuda.device_count()
+    is_main_process = rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
         raise ValueError(f"Unrecognized training option: {args.train_spec}"
@@ -195,7 +201,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
 
     if torch.cuda.is_available():
-        device = torch.device(f"cuda:0" if distributed else args.device)
+        device = device_id if distributed else args.device
     else:
         device = torch.device("cpu")
     text_encoder = text_encoder.to(device)
@@ -203,7 +209,7 @@ def main():
     stage1 = stage1.to(device)
 
     if distributed:
-        ldm = torch.nn.parallel.DistributedDataParallel(ldm, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+        ldm = DDP(ldm, device_ids=device_id, find_unused_parameters=False)
     
     if is_main_process:
         print("Starting training...")
