@@ -54,20 +54,7 @@ def init_distributed(args):
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ["WORLD_SIZE"])
-        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    
-    elif dist.is_available() and dist.is_initialized():
-        args.rank = dist.get_rank()
-        args.world_size = dist.get_world_size()
-        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    
-    else:
-        print("Distributed mode requested but environment variables RANK/WORLD_SIZE not set. Falling back to single process.")
-        args.rank = 0
-        args.world_size = 1
-        args.local_rank = 0
-        args.distributed = False
-        return False        
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))     
         
     dist.init_process_group(backend=args.dist_backend)
     dist.barrier()
@@ -202,7 +189,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
 
     if torch.cuda.is_available():
-        device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+        device = torch.device(f"cuda:0" if distributed else args.device)
     else:
         device = torch.device("cpu")
     text_encoder = text_encoder.to(device)
