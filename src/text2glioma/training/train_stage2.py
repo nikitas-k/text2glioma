@@ -76,14 +76,17 @@ def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    node = os.uname()[1]
-    world_size = torch.cuda.device_count()
+    distributed = args.distributed
 
-    # create model and move it to GPU with id rank
-    device_id = rank % world_size
-    is_main_process = rank == 0
+    if distributed:
+        dist.init_process_group("nccl")
+        rank = dist.get_rank()
+        node = os.uname()[1]
+        world_size = torch.cuda.device_count()
+
+        # create model and move it to GPU with id rank
+        device_id = rank % world_size
+        is_main_process = rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
         raise ValueError(f"Unrecognized training option: {args.train_spec}"
