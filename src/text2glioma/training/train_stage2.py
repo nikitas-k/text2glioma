@@ -211,10 +211,9 @@ def main():
         text_encoder = DDP(text_encoder, device_ids=[device_id])
         stage1 = DDP(stage1, device_ids=[device_id])
 
-    else:
-        text_encoder = text_encoder.to(device)
-        ldm = ldm.to(device)
-        stage1 = stage1.to(device)
+    text_encoder = text_encoder.to(device)
+    ldm = ldm.to(device)
+    stage1 = stage1.to(device)
 
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
     scaler = torch.cuda.amp.GradScaler()
