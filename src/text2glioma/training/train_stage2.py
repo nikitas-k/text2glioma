@@ -152,7 +152,7 @@ def main():
         model_type=model_type,
         initialize=False,
         distributed=distributed,
-        rank=args.rank if distributed else 0,
+        rank=rank if distributed else 0,
         world_size=args.world_size if distributed else 1,
     )
     
