@@ -153,7 +153,7 @@ def main():
         initialize=False,
         distributed=distributed,
         rank=rank if distributed else 0,
-        world_size=args.world_size if distributed else 1,
+        world_size=world_size if distributed else 1,
     )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
