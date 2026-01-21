@@ -8,10 +8,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
 
-from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned
+from text2glioma.utils import (
+    get_lr,
+    get_text_encoder_hidden_states,
+    log_ldm_sample_unconditioned,
+    log_reconstructions,
+    print_gpu_memory_report,
+)
 
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
@@ -25,7 +30,7 @@ def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
     )
     tokens = {key: value.to(device) for key, value in tokens.items()}
     out = text_encoder(**tokens)
-    return out.last_hidden_state.to(device)
+    return get_text_encoder_hidden_states(out).to(device)
 
 def get_uncond(tokenizer, text_encoder, batch_size, device):
     return encode_text(tokenizer, text_encoder, [""] * batch_size, device=device)
@@ -546,6 +551,7 @@ def eval_ldm(
             model=model,
             stage1=stage1,
             scheduler=scheduler,
+            tokenizer=tokenizer,
             text_encoder=text_encoder,
             spatial_shape=tuple(e.shape[1:]),
             writer=writer,

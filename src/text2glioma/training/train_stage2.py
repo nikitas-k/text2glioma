@@ -13,9 +13,14 @@ from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.config import print_config
 from monai.utils import set_determinism
 from text2glioma.training.training_functions import train_ldm
-from text2glioma.utils import load_config, get_dataloaders, get_model, stage1_ify #workaround for DataParallel
+from text2glioma.utils import (
+    get_dataloaders,
+    get_model,
+    load_config,
+    load_text_encoder_and_tokenizer,
+    stage1_ify,
+)  # workaround for DataParallel
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, CLIPTextModel
 import json
 
 warnings.filterwarnings("ignore")
@@ -164,13 +169,11 @@ def main():
     else:
         raise ValueError(f"Unsupported noise scheduler type: {noise_scheduler_type}")
 
-    tokenizer = config["conditioning"].get("tokenizer", "stabilityai/stable-diffusion-2-1-base")
-    text_encoder = config["conditioning"].get("text_encoder", "stabilityai/stable-diffusion-2-1-base")
-    if tokenizer and text_encoder:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir, local_files_only=True)
-        text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir, local_files_only=True)
-    else:
-        raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
+    tokenizer, text_encoder = load_text_encoder_and_tokenizer(
+        config["conditioning"],
+        cache_dir=args.cache_dir,
+        local_files_only=True,
+    )
 
     if distributed:
         if args.use_parallel and is_main_process:
