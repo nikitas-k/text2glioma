@@ -47,9 +47,14 @@ def parse_args():
 
 def init_distributed(args):
     if not args.distributed:
-        args.rank = 0
-        args.world_size = 1
-        args.local_rank = 0
+        if dist.is_available() and dist.is_initialized():
+            args.rank = dist.get_rank()
+            args.world_size = dist.get_world_size()
+            args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        else:
+            args.rank = 0
+            args.world_size = 1
+            args.local_rank = 0
         return False
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -57,6 +62,7 @@ def init_distributed(args):
         args.world_size = int(os.environ["WORLD_SIZE"])
         args.local_rank = int(os.environ.get("LOCAL_RANK", 0))     
 
+    torch.cuda.set_device(args.local_rank)
     device_id = torch.device("cuda", args.local_rank)
     dist.init_process_group(
         backend=args.dist_backend,
@@ -65,7 +71,7 @@ def init_distributed(args):
         rank=args.rank,
         device_id=device_id,
     )
-    dist.barrier(device_ids=[args.rank])
+    dist.barrier(device_ids=[args.local_rank])
     args.rank = dist.get_rank()
     args.world_size = dist.get_world_size()
     args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
@@ -202,8 +208,12 @@ def main():
     writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
 
     if torch.cuda.is_available():
-        device = torch.device(f"cuda:{device_id}") if distributed else args.device
+        device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+        if distributed:
+            torch.cuda.set_device(device)
     else:
+        if distributed and args.dist_backend == "nccl":
+            raise RuntimeError("Distributed training with NCCL requires CUDA, but no GPU was detected.")
         device = torch.device("cpu")
 
     if distributed:
@@ -215,6 +225,16 @@ def main():
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
 
+    if distributed:
+        if device.type == "cuda":
+            ldm = torch.nn.parallel.DistributedDataParallel(
+                ldm,
+                device_ids=[device.index],
+                output_device=device.index,
+                find_unused_parameters=False,
+            )
+        else:
+            ldm = torch.nn.parallel.DistributedDataParallel(ldm, find_unused_parameters=False)
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
     scaler = torch.cuda.amp.GradScaler()
     
