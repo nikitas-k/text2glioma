@@ -20,6 +20,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
 import gdown
+from transformers import AutoModel, AutoTokenizer, CLIPModel, CLIPTextModel, CLIPTextModelWithProjection
 
 class Stage1Wrapper(nn.Module):
     """Wraps the stage 1 model to bypass DataParallel issues."""
@@ -405,10 +406,65 @@ def print_resource_usage(epoch: int = None):
                 "vram_total": vram_total,
             })
 
+def get_text_encoder_hidden_states(encoder_output: Any) -> torch.Tensor:
+    if hasattr(encoder_output, "last_hidden_state") and encoder_output.last_hidden_state is not None:
+        return encoder_output.last_hidden_state
+    if hasattr(encoder_output, "text_model_output") and encoder_output.text_model_output is not None:
+        return encoder_output.text_model_output.last_hidden_state
+    if hasattr(encoder_output, "hidden_states") and encoder_output.hidden_states is not None:
+        return encoder_output.hidden_states[-1]
+    if hasattr(encoder_output, "text_embeds") and encoder_output.text_embeds is not None:
+        return encoder_output.text_embeds[:, None, :]
+    if isinstance(encoder_output, (tuple, list)) and encoder_output and torch.is_tensor(encoder_output[0]):
+        return encoder_output[0]
+    raise ValueError("Unsupported text encoder output; unable to extract hidden states.")
+
+def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = None, local_files_only: bool = True):
+    tokenizer_name = conditioning_config.get("tokenizer")
+    text_encoder_name = conditioning_config.get("text_encoder")
+    if not tokenizer_name or not text_encoder_name:
+        raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
+
+    tokenizer_subfolder = conditioning_config.get("tokenizer_subfolder", "tokenizer")
+    text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
+    text_encoder_class = conditioning_config.get("text_encoder_class", "CLIPTextModel")
+
+    def normalize_subfolder(subfolder_value: Any) -> Any:
+        if subfolder_value in ("", None):
+            return None
+        return subfolder_value
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        subfolder=normalize_subfolder(tokenizer_subfolder),
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
+    )
+
+    encoder_classes = {
+        "CLIPTextModel": CLIPTextModel,
+        "CLIPTextModelWithProjection": CLIPTextModelWithProjection,
+        "CLIPModel": CLIPModel,
+        "AutoModel": AutoModel,
+    }
+    encoder_cls = encoder_classes.get(text_encoder_class)
+    if encoder_cls is None:
+        raise ValueError(f"Unsupported text encoder class: {text_encoder_class}")
+
+    text_encoder = encoder_cls.from_pretrained(
+        text_encoder_name,
+        subfolder=normalize_subfolder(text_encoder_subfolder),
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
+    )
+
+    return tokenizer, text_encoder
+
 @torch.no_grad()
 def log_ldm_sample_unconditioned(
     model: nn.Module,
     stage1: nn.Module,
+    tokenizer,
     text_encoder,
     scheduler: nn.Module,
     spatial_shape: Tuple,
@@ -420,9 +476,20 @@ def log_ldm_sample_unconditioned(
     latent = torch.randn((1,) + spatial_shape)
     latent = latent.to(device)
 
-    prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
-    prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
-    prompt_embeds = prompt_embeds[0]
+    if tokenizer is None:
+        prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
+        prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
+        prompt_embeds = get_text_encoder_hidden_states(prompt_embeds)
+    else:
+        tokens = tokenizer(
+            text=[""],
+            max_length=tokenizer.model_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        tokens = {key: value.to(device) for key, value in tokens.items()}
+        prompt_embeds = get_text_encoder_hidden_states(text_encoder(**tokens))
 
     for t in tqdm(scheduler.timesteps, ncols=70):
         noise_pred = model(x=latent, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)
