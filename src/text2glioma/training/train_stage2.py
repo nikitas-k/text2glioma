@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
 from generative.networks.nets import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.config import print_config
@@ -59,14 +60,7 @@ def init_distributed(args):
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ["WORLD_SIZE"])
-        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    else:
-        print("Distributed mode requested but environment variables RANK/WORLD_SIZE not set. Falling back to single process.")
-        args.rank = 0
-        args.world_size = 1
-        args.local_rank = 0
-        args.distributed = False
-        return False
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))     
 
     torch.cuda.set_device(args.local_rank)
     device_id = torch.device("cuda", args.local_rank)
@@ -81,14 +75,24 @@ def init_distributed(args):
     args.rank = dist.get_rank()
     args.world_size = dist.get_world_size()
     args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    
     return True
 
 def main():
     args = parse_args()
     set_determinism(args.seed)
     print_config()
-    distributed = init_distributed(args)
-    is_main_process = args.rank == 0
+    distributed = args.distributed
+
+    if distributed:
+        dist.init_process_group("nccl")
+        rank = dist.get_rank()
+        node = os.uname()[1]
+        world_size = torch.cuda.device_count()
+
+        # create model and move it to GPU with id rank
+        device_id = rank % world_size
+        is_main_process = rank == 0
 
     if args.train_spec not in ["impression", "findings"]:
         raise ValueError(f"Unrecognized training option: {args.train_spec}"
@@ -154,8 +158,8 @@ def main():
         model_type=model_type,
         initialize=False,
         distributed=distributed,
-        rank=args.rank,
-        world_size=args.world_size if distributed else 1,
+        rank=rank if distributed else 0,
+        world_size=world_size if distributed else 1,
     )
     
     noise_scheduler_type = config["scheduler"].get("name", "DDPMScheduler")
@@ -203,9 +207,6 @@ def main():
     writer_train = SummaryWriter(log_dir / "train") if is_main_process else None
     writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
 
-    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
-    scaler = torch.cuda.amp.GradScaler()
-
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
         if distributed:
@@ -214,6 +215,12 @@ def main():
         if distributed and args.dist_backend == "nccl":
             raise RuntimeError("Distributed training with NCCL requires CUDA, but no GPU was detected.")
         device = torch.device("cpu")
+
+    if distributed:
+        ldm = DDP(ldm, device_ids=[device_id], find_unused_parameters=False)
+        text_encoder = DDP(text_encoder, device_ids=[device_id])
+        stage1 = DDP(stage1, device_ids=[device_id])
+
     text_encoder = text_encoder.to(device)
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
@@ -228,6 +235,8 @@ def main():
             )
         else:
             ldm = torch.nn.parallel.DistributedDataParallel(ldm, find_unused_parameters=False)
+    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
+    scaler = torch.cuda.amp.GradScaler()
     
     if is_main_process:
         print("Starting training...")
