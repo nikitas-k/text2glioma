@@ -23,6 +23,7 @@ def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
         truncation=True,
         return_tensors="pt",
     )
+    tokens = {key: value.to(device) for key, value in tokens.items()}
     out = text_encoder(**tokens)
     return out.last_hidden_state.to(device)
 
@@ -81,7 +82,6 @@ def train_autoencoder(
         adversarial_weight=adversarial_weight,
         perceptual_weight=perceptual_weight,
     )
-    print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
         train_epoch_autoencoder(
@@ -114,7 +114,6 @@ def train_autoencoder(
                 adversarial_weight=adversarial_weight,
                 perceptual_weight=perceptual_weight,
             )
-            print(f"epoch {epoch + 1} val loss: {val_loss:.4f}")
             print_gpu_memory_report()
 
             # Save checkpoint
@@ -419,12 +418,9 @@ def train_ldm(
             torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
 
             if val_loss <= best_loss:
-                print(f"New best val loss {val_loss}")
                 best_loss = val_loss
                 torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
 
-    print(f"Training finished!")
-    print(f"Saving final model...")
     torch.save(model.state_dict(), str(run_dir / "final_model.pth"))
 
     return val_loss
@@ -453,8 +449,6 @@ def train_epoch_ldm(
         images = x["image"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
-        print(timesteps.shape)
-
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=True):
             with torch.no_grad():
@@ -462,11 +456,9 @@ def train_epoch_ldm(
 
             # Prepare conditioning
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
-            print(cond.shape)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
-            print(noisy_e.shape)
             noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":
@@ -513,17 +505,13 @@ def eval_ldm(
         images = x["image"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
-        print(timesteps.shape)
-
         with torch.cuda.amp.autocast(enabled=True):
             e = stage1(images) * scale_factor
 
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
 
-            print(cond.shape)
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
-            print(noisy_e.shape)
             noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":

@@ -46,9 +46,14 @@ def parse_args():
 
 def init_distributed(args):
     if not args.distributed:
-        args.rank = 0
-        args.world_size = 1
-        args.local_rank = 0
+        if dist.is_available() and dist.is_initialized():
+            args.rank = dist.get_rank()
+            args.world_size = dist.get_world_size()
+            args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        else:
+            args.rank = 0
+            args.world_size = 1
+            args.local_rank = 0
         return False
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -64,8 +69,18 @@ def init_distributed(args):
         return False
 
     torch.cuda.set_device(args.local_rank)
-    dist.init_process_group(backend=args.dist_backend, init_method="env://", world_size=args.world_size, rank=args.rank)
-    dist.barrier()
+    device_id = torch.device("cuda", args.local_rank)
+    dist.init_process_group(
+        backend=args.dist_backend,
+        init_method="env://",
+        world_size=args.world_size,
+        rank=args.rank,
+        device_id=device_id,
+    )
+    dist.barrier(device_ids=[args.local_rank])
+    args.rank = dist.get_rank()
+    args.world_size = dist.get_world_size()
+    args.local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
     return True
 
 def main():
@@ -168,7 +183,10 @@ def main():
         text_encoder = torch.nn.DataParallel(text_encoder) if text_encoder else None
 
     if resume and checkpoint is not None:
-        ldm.load_state_dict(checkpoint["ldm_state_dict"])
+        ldm_state_dict = checkpoint.get("ldm_state_dict", checkpoint.get("diffusion"))
+        if ldm_state_dict is None:
+            raise KeyError("Checkpoint missing 'ldm_state_dict' or 'diffusion' keys.")
+        ldm.load_state_dict(ldm_state_dict)
         start_epoch = checkpoint["epoch"] + 1
         print(f"Resumed from epoch {start_epoch}")
     else:
@@ -190,14 +208,26 @@ def main():
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+        if distributed:
+            torch.cuda.set_device(device)
     else:
+        if distributed and args.dist_backend == "nccl":
+            raise RuntimeError("Distributed training with NCCL requires CUDA, but no GPU was detected.")
         device = torch.device("cpu")
     text_encoder = text_encoder.to(device)
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
 
     if distributed:
-        ldm = torch.nn.parallel.DistributedDataParallel(ldm, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=False)
+        if device.type == "cuda":
+            ldm = torch.nn.parallel.DistributedDataParallel(
+                ldm,
+                device_ids=[device.index],
+                output_device=device.index,
+                find_unused_parameters=False,
+            )
+        else:
+            ldm = torch.nn.parallel.DistributedDataParallel(ldm, find_unused_parameters=False)
     
     if is_main_process:
         print("Starting training...")

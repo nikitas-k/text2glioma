@@ -33,6 +33,9 @@ class Stage1Wrapper(nn.Module):
         z = self.model.sampling(z_mu, z_sigma)
 
         return z
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.model.decode(z)
     
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
