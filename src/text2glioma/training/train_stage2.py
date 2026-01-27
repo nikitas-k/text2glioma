@@ -211,7 +211,7 @@ def main():
     writer_val = SummaryWriter(log_dir / "val") if is_main_process else None
 
     if torch.cuda.is_available():
-        device = torch.device(f"cuda:{args.local_rank}" if distributed else args.device)
+        device = torch.device(f"cuda:{device}" if distributed else args.device)
         if distributed:
             torch.cuda.set_device(device)
     else:
