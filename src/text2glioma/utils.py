@@ -1,3 +1,4 @@
+import os
 import yaml
 from pathlib import Path
 import psutil
@@ -16,6 +17,8 @@ from monai.data import DataLoader
 from monai.data.dataset import PersistentDataset
 from monai import transforms as T
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 try:
     from pynvml_utils import nvidia_smi
@@ -24,6 +27,7 @@ except ImportError:
     _HAS_PYNVML = False
 
 import gdown
+from transformers import AutoModel, AutoTokenizer, CLIPModel, CLIPTextModel, CLIPTextModelWithProjection
 
 class Stage1Wrapper(nn.Module):
     """Wraps the stage 1 model to bypass DataParallel issues."""
@@ -167,6 +171,8 @@ def log_reconstructions(
     title: str = "RECONSTRUCTION",
     cache_dir: str = None,
 ) -> None:
+    if writer is None:
+        return
     fig = get_figure(
         image,
         reconstruction,
@@ -196,6 +202,9 @@ def get_dataloaders(
         shuffle=False,
         model_type="AutoencoderKL",
         initialize=False,
+        distributed: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
     ):
     if model_type not in ["AutoencoderKL", "DiffusionModelUNet"]:
         raise ValueError(f"Model type {model_type} not supported for dataloaders.")
@@ -318,10 +327,18 @@ def get_dataloaders(
         train_data.set_data(train_dataset)  # Reset to ensure data is correct
         val_data.set_data(val_dataset)  # Reset to ensure data is correct
 
+    train_sampler = None
+    val_sampler = None
+    if distributed and world_size > 1:
+        train_sampler = DistributedSampler(train_data, num_replicas=world_size, rank=rank, shuffle=shuffle)
+        val_sampler = DistributedSampler(val_data, num_replicas=world_size, rank=rank, shuffle=False)
+        shuffle = False
+
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
@@ -331,6 +348,7 @@ def get_dataloaders(
         val_data,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
@@ -495,10 +513,65 @@ def print_resource_usage(epoch: int = None):
                 "vram_total": vram_total,
             })
 
+def get_text_encoder_hidden_states(encoder_output: Any) -> torch.Tensor:
+    if hasattr(encoder_output, "last_hidden_state") and encoder_output.last_hidden_state is not None:
+        return encoder_output.last_hidden_state
+    if hasattr(encoder_output, "text_model_output") and encoder_output.text_model_output is not None:
+        return encoder_output.text_model_output.last_hidden_state
+    if hasattr(encoder_output, "hidden_states") and encoder_output.hidden_states is not None:
+        return encoder_output.hidden_states[-1]
+    if hasattr(encoder_output, "text_embeds") and encoder_output.text_embeds is not None:
+        return encoder_output.text_embeds[:, None, :]
+    if isinstance(encoder_output, (tuple, list)) and encoder_output and torch.is_tensor(encoder_output[0]):
+        return encoder_output[0]
+    raise ValueError("Unsupported text encoder output; unable to extract hidden states.")
+
+def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = None, local_files_only: bool = True):
+    tokenizer_name = conditioning_config.get("tokenizer")
+    text_encoder_name = conditioning_config.get("text_encoder")
+    if not tokenizer_name or not text_encoder_name:
+        raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
+
+    tokenizer_subfolder = conditioning_config.get("tokenizer_subfolder", "tokenizer")
+    text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
+    text_encoder_class = conditioning_config.get("text_encoder_class", "CLIPTextModel")
+
+    def normalize_subfolder(subfolder_value: Any) -> Any:
+        if subfolder_value in ("", None):
+            return None
+        return subfolder_value
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        subfolder=normalize_subfolder(tokenizer_subfolder),
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
+    )
+
+    encoder_classes = {
+        "CLIPTextModel": CLIPTextModel,
+        "CLIPTextModelWithProjection": CLIPTextModelWithProjection,
+        "CLIPModel": CLIPModel,
+        "AutoModel": AutoModel,
+    }
+    encoder_cls = encoder_classes.get(text_encoder_class)
+    if encoder_cls is None:
+        raise ValueError(f"Unsupported text encoder class: {text_encoder_class}")
+
+    text_encoder = encoder_cls.from_pretrained(
+        text_encoder_name,
+        subfolder=normalize_subfolder(text_encoder_subfolder),
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
+    )
+
+    return tokenizer, text_encoder
+
 @torch.no_grad()
 def log_ldm_sample_unconditioned(
     model: nn.Module,
     stage1: nn.Module,
+    tokenizer,
     text_encoder,
     scheduler: nn.Module,
     spatial_shape: Tuple,

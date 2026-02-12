@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
 
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning
@@ -23,8 +22,9 @@ def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
         truncation=True,
         return_tensors="pt",
     )
+    tokens = {key: value.to(device) for key, value in tokens.items()}
     out = text_encoder(**tokens)
-    return out.last_hidden_state.to(device)
+    return get_text_encoder_hidden_states(out).to(device)
 
 def get_uncond(tokenizer, text_encoder, batch_size, device):
     return encode_text(tokenizer, text_encoder, [""] * batch_size, device=device)
@@ -81,7 +81,6 @@ def train_autoencoder(
         adversarial_weight=adversarial_weight,
         perceptual_weight=perceptual_weight,
     )
-    print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
         train_epoch_autoencoder(
@@ -114,7 +113,6 @@ def train_autoencoder(
                 adversarial_weight=adversarial_weight,
                 perceptual_weight=perceptual_weight,
             )
-            print(f"epoch {epoch + 1} val loss: {val_loss:.4f}")
             print_gpu_memory_report()
 
             # Save checkpoint
@@ -233,10 +231,11 @@ def train_epoch_autoencoder(
 
         losses["d_loss"] = discriminator_loss
 
-        writer.add_scalar("lr_g", get_lr(optimizer_g), epoch * len(loader) + step)
-        writer.add_scalar("lr_d", get_lr(optimizer_d), epoch * len(loader) + step)
-        for k, v in losses.items():
-            writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
+        if writer is not None:
+            writer.add_scalar("lr_g", get_lr(optimizer_g), epoch * len(loader) + step)
+            writer.add_scalar("lr_d", get_lr(optimizer_d), epoch * len(loader) + step)
+            for k, v in losses.items():
+                writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
         pbar.set_postfix(
             {
@@ -328,8 +327,9 @@ def eval_autoencoder(
     for k in total_losses.keys():
         total_losses[k] /= len(loader.dataset)
 
-    for k, v in total_losses.items():
-        writer.add_scalar(f"{k}", v, step)
+    if writer is not None:
+        for k, v in total_losses.items():
+            writer.add_scalar(f"{k}", v, step)
 
     log_reconstructions(
         image=images,
@@ -391,6 +391,8 @@ def train_ldm(
     print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         train_epoch_ldm(
             model=model,
             stage1=stage1,
@@ -441,7 +443,6 @@ def train_ldm(
             torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
 
             if val_loss <= best_loss:
-                print(f"New best val loss {val_loss}")
                 best_loss = val_loss
                 torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
 
@@ -516,10 +517,11 @@ def train_epoch_ldm(
         scaler.step(optimizer)
         scaler.update()
 
-        writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
+        if writer is not None:
+            writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
 
-        for k, v in losses.items():
-            writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
+            for k, v in losses.items():
+                writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
         pbar.set_postfix({"epoch": epoch, "loss": f"{losses['loss'].item():.5f}", "lr": f"{get_lr(optimizer):.6f}"})
 
@@ -587,14 +589,16 @@ def eval_ldm(
     for k in total_losses.keys():
         total_losses[k] /= len(loader.dataset)
 
-    for k, v in total_losses.items():
-        writer.add_scalar(f"{k}", v, step)
+    if writer is not None:
+        for k, v in total_losses.items():
+            writer.add_scalar(f"{k}", v, step)
 
     if sample:
         log_ldm_sample_unconditioned(
             model=model,
             stage1=stage1,
             scheduler=scheduler,
+            tokenizer=tokenizer,
             text_encoder=text_encoder,
             spatial_shape=tuple(e.shape[1:]),
             writer=writer,
