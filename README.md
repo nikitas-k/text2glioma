@@ -18,14 +18,14 @@ and [Stable Diffusion 2.1](https://huggingface.co/stabilityai/stable-diffusion-2
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                     Stage 1 — VAE                        │
-│  4-ch MRI (T1/T1CE/T2/FLAIR) ──► AutoencoderKL ──► z    │
-│  160×224×160 → latent 10×14×10, 3 channels               │
+│  4-ch MRI (T1/T1CE/T2/FLAIR) ──► AutoencoderKL ──► z     │
+│  160×224×160 → latent 16×24×16, 3 channels               │
 └──────────────────────────────────────────────────────────┘
                           │  z
                           ▼
 ┌──────────────────────────────────────────────────────────┐
 │                  Stage 2 — LDM                           │
-│  Text prompt ──► CLIP encoder ──► cross-attention         │
+│  Text prompt ──► CLIP encoder ──► cross-attention        │
 │  Seg. mask   ──► one-hot + downsample ──► concat (7 ch)  │
 │  DiffusionModelUNet  (v-prediction, DDIM)                │
 └──────────────────────────────────────────────────────────┘
