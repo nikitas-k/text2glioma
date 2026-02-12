@@ -4,42 +4,59 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "text2glioma"
-version = "0.1.0"
-description = "Generate text prompts from glioma segmentation labels"
+version = "0.2.0"
+description = "Text- and mask-conditioned 3D latent diffusion for synthetic multi-sequence glioma MRI generation"
 readme = "README.md"
-requires-python = ">=3.8"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Nikitas Koussis"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = [
-    "numpy",
-    "scipy",
-    "nibabel",
-    "torchmetrics",
-    "bert-score",
-    "open-clip-torch",
-    "pillow",
-    "PyYAML",
-    "torch>=1.10.0",
-    "torchvision",
-    "monai>=1.0.0",
-    "monai-generative",
-    "numpy",
-    "pandas",
-    "scikit-learn",
-    "tqdm",
-    "matplotlib",
-    "tensorboard",
-    "pydicom",
-    "nibabel",
-    "gdown",
-    "PyYAML",
-    "transformers",
-    "diffusers",
-    "ftfy",
-    "regex",
-    "scipy",
     "einops",
     "accelerate",
+    "diffusers",
+    "ftfy",
+    "gdown",
+    "matplotlib",
+    "monai>=1.0.0",
+    "monai-generative",
+    "nibabel",
+    "numpy",
+    "pandas",
+    "pillow",
+    "psutil",
+    "pydicom",
+    "PyYAML",
+    "regex",
     "safetensors",
+    "scikit-learn",
+    "scikit-image",
+    "scipy",
+    "tensorboard",
+    "torch>=1.10.0",
+    "torchvision",
+    "tqdm",
+    "transformers",
 ]
+
+[project.optional-dependencies]
+eval = ["torchmetrics", "bert-score", "open-clip-torch"]
+gpu-monitor = ["pynvml", "pynvml-utils"]
+docs = ["sphinx", "sphinx-rtd-theme", "myst-parser", "sphinx-autodoc-typehints"]
+dev = ["pytest", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/nk233/text2glioma"
+Documentation = "https://text2glioma.readthedocs.io"
+Repository = "https://github.com/nk233/text2glioma"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -48,3 +65,6 @@ where = ["src"]
 train_stage1 = "text2glioma.training.train_stage1:main"
 train_stage2 = "text2glioma.training.train_stage2:main"
 convert_dataset = "text2glioma.preprocessing.data_conversion:main"
+sample = "text2glioma.inference.sampler:main"
+create_prompts = "text2glioma.preprocessing.create_text:main"
+text2glioma-validate = "text2glioma.validation.run_validation:main"

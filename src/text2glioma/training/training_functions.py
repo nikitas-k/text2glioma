@@ -11,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, CLIPTextModel
 from generative.losses import PatchAdversarialLoss
 
-from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned
+from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning
 
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
@@ -168,7 +168,15 @@ def train_epoch_autoencoder(
         with torch.cuda.amp.autocast(enabled=True):
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            p_loss = perceptual_loss(reconstruction.float(), images.float())
+            # MedicalNet perceptual loss expects single-channel → average over channels
+            n_ch = images.shape[1]
+            p_loss = sum(
+                perceptual_loss(
+                    reconstruction[:, c:c+1].float(),
+                    images[:, c:c+1].float()
+                )
+                for c in range(n_ch)
+            ) / n_ch
 
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
@@ -268,7 +276,15 @@ def eval_autoencoder(
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            p_loss = perceptual_loss(reconstruction.float(), images.float())
+            # MedicalNet perceptual loss expects single-channel → average over channels
+            n_ch = images.shape[1]
+            p_loss = sum(
+                perceptual_loss(
+                    reconstruction[:, c:c+1].float(),
+                    images[:, c:c+1].float()
+                )
+                for c in range(n_ch)
+            ) / n_ch
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
@@ -348,8 +364,13 @@ def train_ldm(
     writer_val: Any = None,
     run_dir: str = "./runs",
     scale_factor: float = 1.0,
+    num_mask_classes: int = 4,
+    mask_dropout_p: float = 0.2,
+    latent_channels: int = 3,
 ) -> float:
     raw_model = model.module if hasattr(model, "module") else model
+
+    best_loss = float("inf")
 
     val_loss = eval_ldm(
         model=model,
@@ -364,6 +385,8 @@ def train_ldm(
         writer=writer_val,
         sample=False,
         scale_factor=scale_factor,
+        num_mask_classes=num_mask_classes,
+        latent_channels=latent_channels,
     )
     print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
 
@@ -383,6 +406,8 @@ def train_ldm(
             writer=writer_train,
             scaler=scaler,
             scale_factor=scale_factor,
+            num_mask_classes=num_mask_classes,
+            mask_dropout_p=mask_dropout_p,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -399,6 +424,8 @@ def train_ldm(
                 writer=writer_val,
                 sample=True if (epoch + 1) % (val_interval * 2) == 0 else False,
                 scale_factor=scale_factor,
+                num_mask_classes=num_mask_classes,
+                latent_channels=latent_channels,
             )
 
             print(f"epoch {epoch + 1} val loss: {val_loss:.4f}")
@@ -420,7 +447,7 @@ def train_ldm(
 
     print(f"Training finished!")
     print(f"Saving final model...")
-    torch.save(model.state_dict(), str(run_dir / "final_model.pth"))
+    torch.save(raw_model.state_dict(), str(run_dir / "final_model.pth"))
 
     return val_loss
 
@@ -440,29 +467,41 @@ def train_epoch_ldm(
     writer: SummaryWriter,
     scaler: torch.cuda.amp.GradScaler,
     scale_factor: float = 1.0,
+    num_mask_classes: int = 4,
+    mask_dropout_p: float = 0.2,
 ) -> None:
     model.train()
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
         images = x["image"].to(device)
+        labels = x["label"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
-        print(timesteps.shape)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=True):
             with torch.no_grad():
                 e = stage1(images) * scale_factor
+                latent_spatial = e.shape[2:]  # (D', H', W')
 
-            # Prepare conditioning
+                # Prepare mask conditioning: one-hot → downsample → dropout
+                mask_cond = prepare_mask_conditioning(
+                    labels, latent_spatial,
+                    num_classes=num_mask_classes,
+                    dropout_p=mask_dropout_p,
+                ).to(device)
+
+            # Prepare text conditioning (with independent text dropout)
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
-            print(cond.shape)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
-            print(noisy_e.shape)
-            noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
+
+            # Concatenate noisy latent with mask conditioning: [B, latent_ch + num_classes, D', H', W']
+            model_input = torch.cat([noisy_e, mask_cond], dim=1)
+
+            noise_pred = model(x=model_input, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":
                 # Use v-prediction parameterization
@@ -499,26 +538,38 @@ def eval_ldm(
     writer: SummaryWriter,
     sample: bool = False,
     scale_factor: float = 1.0,
+    num_mask_classes: int = 4,
+    latent_channels: int = 3,
 ) -> float:
     model.eval()
     total_losses = OrderedDict()
 
     for x in loader:
         images = x["image"].to(device)
+        labels = x["label"].to(device)
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
-        print(timesteps.shape)
 
         with torch.cuda.amp.autocast(enabled=True):
             e = stage1(images) * scale_factor
+            latent_spatial = e.shape[2:]
+
+            # Prepare mask conditioning (no dropout during eval)
+            mask_cond = prepare_mask_conditioning(
+                labels, latent_spatial,
+                num_classes=num_mask_classes,
+                dropout_p=0.0,
+            ).to(device)
 
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
 
-            print(cond.shape)
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)
-            print(noisy_e.shape)
-            noise_pred = model(x=noisy_e, timesteps=timesteps, context=cond)
+
+            # Concatenate noisy latent with mask conditioning
+            model_input = torch.cat([noisy_e, mask_cond], dim=1)
+
+            noise_pred = model(x=model_input, timesteps=timesteps, context=cond)
 
             if scheduler.prediction_type == "v_prediction":
                 # Use v-prediction parameterization
@@ -550,6 +601,8 @@ def eval_ldm(
             step=step,
             device=device,
             scale_factor=scale_factor,
+            latent_channels=latent_channels,
+            num_mask_classes=num_mask_classes,
         )
 
     return total_losses["loss"]

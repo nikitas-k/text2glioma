@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for training.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
     parser.add_argument("--pin_memory", action="store_true", default=False, help="Pin memory for data loading.")
-    parser.add_argument("--no_shuffle", action="store_true", default=True, help="Disable shuffling of the training data.")
+    parser.add_argument("--no_shuffle", action="store_true", default=False, help="Disable shuffling of the training data.")
     parser.add_argument("--val_interval", type=int, default=1, help="Validation interval (in epochs).")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training.")
     parser.add_argument("--num_epochs", type=int, default=500, help="Maximum number of training epochs.")
@@ -150,7 +150,7 @@ def main():
         scaler_g=scaler_g,
         scaler_d=scaler_d,
         device=device,
-        n_epochs=args.n_epochs,
+        n_epochs=args.num_epochs,
         start_epoch=start_epoch,
         best_loss=best_loss,
         val_interval=args.val_interval,

@@ -4,7 +4,7 @@ from nibabel.orientations import aff2axcodes, axcodes2ornt, ornt_transform, appl
 from scipy.ndimage import generate_binary_structure, label as cc_label, convolve
 from sklearn.utils.validation import check_random_state
 
-from vasari_auto import get_vasari_features
+from text2glioma.preprocessing.vasari_auto import get_vasari_features
 
 # ---------- radiology-standard prompt composer (short + long) ----------
 from typing import Optional, Dict, Any
@@ -425,8 +425,8 @@ def compose_radiology_prompts(
     if include_diag: findings.append(f"Diagnosis: {include_diag}")
 
     if shuffle_order:
-        short_bits = rng.shuffle(short_bits)
-        findings = rng.shuffle(findings)
+        rng.shuffle(short_bits)
+        rng.shuffle(findings)
     
     short = ", ".join(short_bits)
     short = short[0].upper() + short[1:]  # capitalise

@@ -1,8 +1,8 @@
 from argparse import ArgumentParser
 
-from classification.experiments import run_experiment
+from text2glioma.classification.experiments import run_experiment
 
-from ..utils import load_config
+from text2glioma.utils import load_config
 
 def parse_args():
     parser = ArgumentParser()
@@ -75,5 +75,4 @@ def main():
     
     
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()
