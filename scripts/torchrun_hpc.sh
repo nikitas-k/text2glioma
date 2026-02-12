@@ -16,14 +16,17 @@
 #           --config configs/stage1.yaml --run_dir /scratch/runs/"
 #
 # PBS directives (adjust to your cluster):
-#PBS -N t2g-train
-#PBS -q gpu
-#PBS -l nodes=1:ppn=16:gpus=4
-#PBS -l mem=128gb
-#PBS -l walltime=72:00:00
-#PBS -o logs/t2g-train.o${PBS_JOBID}
-#PBS -e logs/t2g-train.e${PBS_JOBID}
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=scratch/vp06+gdata/vp06
 #PBS -j oe
+#PBS -l wd
+
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -68,9 +71,8 @@ fi
 
 # ── Activate environment (edit to match your setup) ─────────────────
 # Uncomment one of the following:
-# module load cuda/12.1 anaconda3
-# conda activate text2glioma
-# source /path/to/venv/bin/activate
+module load python3/3.9.2
+source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 # ── Resolve nproc_per_node if not supplied ──────────────────────────
 # If --nproc_per_node is in $@, torchrun will use it directly.
