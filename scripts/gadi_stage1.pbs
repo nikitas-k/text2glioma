@@ -1,0 +1,36 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+
+# ── Environment ─────────────────────────────────────────────────────
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+# ── Paths (edit these) ──────────────────────────────────────────────
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+
+# ── Launch via NCI torchrun wrapper ─────────────────────────────────
+torchrun_nccl.sh \
+    -m text2glioma.training.train_stage1_ddp \
+    --config  "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --data_dir "$DATA_DIR" \
+    --batch_size 2 \
+    --num_epochs 300 \
+    --val_interval 5 \
+    --pin_memory \
+    2>&1 > "${HOME}/job_logs/${PBS_JOBID}.log"

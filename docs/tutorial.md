@@ -485,27 +485,27 @@ accordingly.  It also works on bare-metal (no scheduler).
 **Example `qsub` submission (Stage 1):**
 
 ```bash
-qsub scripts/torchrun_hpc.sh \
-    -v TRAIN_ARGS="--nproc_per_node 4 \
+qsub -v TRAIN_ARGS="--nproc_per_node 4 \
         -m text2glioma.training.train_stage1_ddp \
         --config configs/stage1.yaml \
         --run_dir /scratch/$USER/runs/ \
         --data_dir /scratch/$USER/data \
-        --num_epochs 300"
+        --num_epochs 300" \
+        scripts/torchrun_hpc.sh
 ```
 
 **Example `qsub` submission (Stage 2):**
 
 ```bash
-qsub scripts/torchrun_hpc.sh \
-    -v TRAIN_ARGS="--nproc_per_node 4 \
+qsub -v TRAIN_ARGS="--nproc_per_node 4 \
         -m text2glioma.training.train_stage2_ddp \
         --config configs/ldm.yaml \
         --stage1_config configs/stage1.yaml \
         --stage1_uri /scratch/$USER/runs/text2glioma/autoencoder_stage1/output/models/best_model.pth \
         --run_dir /scratch/$USER/runs/ \
         --data_dir /scratch/$USER/data \
-        --num_epochs 250"
+        --num_epochs 250" \
+        scripts/torchrun_hpc.sh
 ```
 
 Edit the `#PBS` directives at the top of `torchrun_hpc.sh` to match
