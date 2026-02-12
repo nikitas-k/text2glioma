@@ -425,6 +425,173 @@ and logs accuracy on the real-only validation set.
 
 ---
 
+## Distributed training with DecathlonDataset (DDP)
+
+Two dedicated DDP CLIs are provided:
+
+- **`train_stage1_ddp`** — Stage-1 VAE training
+- **`train_stage2_ddp`** — Stage-2 LDM training (frozen VAE + CLIP)
+
+Both CLIs:
+
+1. Download **BraTS (Task01_BrainTumour)** via `monai.apps.DecathlonDataset`
+   (only on rank 0 — other ranks wait).
+2. Reorder channels from MSD order (FLAIR/T1/T1CE/T2) → pipeline order
+   (T1/T1CE/T2/FLAIR) automatically.
+3. Wrap trainable models in `DistributedDataParallel`.
+4. Use `DistributedSampler` with per-epoch shuffling.
+
+No JSON datalist is needed — the dataset is managed entirely by MONAI.
+
+### Single-node, multi-GPU (interactive)
+
+**Stage 1 (VAE):**
+
+```bash
+torchrun --nproc_per_node=4 \
+    -m text2glioma.training.train_stage1_ddp \
+    --config configs/stage1.yaml \
+    --run_dir /runs/ \
+    --data_dir ./data \
+    --batch_size 2 \
+    --num_epochs 300 \
+    --val_interval 5
+```
+
+**Stage 2 (LDM):**
+
+```bash
+torchrun --nproc_per_node=4 \
+    -m text2glioma.training.train_stage2_ddp \
+    --config configs/ldm.yaml \
+    --stage1_config configs/stage1.yaml \
+    --stage1_uri /runs/text2glioma/autoencoder_stage1/output/models/best_model.pth \
+    --run_dir /runs/ \
+    --data_dir ./data \
+    --batch_size 2 \
+    --num_epochs 250
+```
+
+Each GPU trains on its own shard of the dataset.  Effective batch size =
+`batch_size × nproc_per_node` (e.g. 2 × 4 = 8).
+
+### Multi-node with PBS
+
+A `torchrun` wrapper is provided at `scripts/torchrun_hpc.sh`.
+It auto-detects PBS environment variables (`$PBS_JOBID`, `$PBS_NODEFILE`)
+and sets `MASTER_ADDR`, `MASTER_PORT`, `NNODES`, and `NODE_RANK`
+accordingly.  It also works on bare-metal (no scheduler).
+
+**Example `qsub` submission (Stage 1):**
+
+```bash
+qsub scripts/torchrun_hpc.sh \
+    -v TRAIN_ARGS="--nproc_per_node 4 \
+        -m text2glioma.training.train_stage1_ddp \
+        --config configs/stage1.yaml \
+        --run_dir /scratch/$USER/runs/ \
+        --data_dir /scratch/$USER/data \
+        --num_epochs 300"
+```
+
+**Example `qsub` submission (Stage 2):**
+
+```bash
+qsub scripts/torchrun_hpc.sh \
+    -v TRAIN_ARGS="--nproc_per_node 4 \
+        -m text2glioma.training.train_stage2_ddp \
+        --config configs/ldm.yaml \
+        --stage1_config configs/stage1.yaml \
+        --stage1_uri /scratch/$USER/runs/text2glioma/autoencoder_stage1/output/models/best_model.pth \
+        --run_dir /scratch/$USER/runs/ \
+        --data_dir /scratch/$USER/data \
+        --num_epochs 250"
+```
+
+Edit the `#PBS` directives at the top of `torchrun_hpc.sh` to match
+your cluster (queue name, GPU type, wall-time, etc.):
+
+```bash
+#PBS -N t2g-train
+#PBS -q gpu
+#PBS -l nodes=1:ppn=16:gpus=4
+#PBS -l mem=128gb
+#PBS -l walltime=72:00:00
+```
+
+For **multi-node** jobs, set `-l nodes=N:ppn=…:gpus=…` and the script
+will pass `--nnodes=N` to `torchrun`.  Each node must be able to reach
+`MASTER_ADDR:MASTER_PORT`.
+
+### Resuming a DDP run
+
+```bash
+torchrun --nproc_per_node=4 \
+    -m text2glioma.training.train_stage1_ddp \
+    --config configs/stage1.yaml \
+    --run_dir /runs/ \
+    --resume
+```
+
+The same `--resume` flag works for `train_stage2_ddp`.
+
+The checkpoint (`checkpoint.pth`) stores the DDP-wrapped state dict,
+optimiser states, and epoch counter, so all ranks resume consistently.
+
+### Key CLI arguments — Stage 1 DDP
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | (required) | Stage-1 YAML config |
+| `--run_dir` | (required) | Root output directory |
+| `--data_dir` | `./data` | DecathlonDataset download path |
+| `--val_frac` | `0.2` | Train/val split ratio |
+| `--batch_size` | `2` | Per-GPU batch size |
+| `--num_epochs` | `300` | Training epochs |
+| `--val_interval` | `5` | Validate every N epochs |
+| `--resume` | `false` | Resume from checkpoint |
+| `--dist_backend` | `nccl` | `nccl` (GPU) or `gloo` (CPU) |
+| `--find_unused_parameters` | `false` | DDP flag for models with unused params |
+
+### Key CLI arguments — Stage 2 DDP
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | (required) | LDM YAML config (`configs/ldm.yaml`) |
+| `--stage1_config` | (required) | Stage-1 VAE YAML config |
+| `--stage1_uri` | (required) | Path to pretrained Stage-1 checkpoint |
+| `--run_dir` | (required) | Root output directory |
+| `--data_dir` | `./data` | DecathlonDataset download path |
+| `--val_frac` | `0.2` | Train/val split ratio |
+| `--batch_size` | `2` | Per-GPU batch size |
+| `--num_epochs` | `250` | Training epochs |
+| `--val_interval` | `5` | Validate every N epochs |
+| `--resume` | `false` | Resume from checkpoint |
+| `--train_spec` | `impression` | Text field for conditioning (`impression` or `findings`) |
+| `--scale_factor` | `1.0` | Latent scale factor |
+| `--mask_dropout_p` | from config | Override mask dropout probability |
+| `--text_dropout_p` | from config | Override text dropout probability |
+| `--cache_dir` | `None` | HuggingFace model cache directory |
+
+### Single-GPU fallback
+
+If `torchrun` is not used (i.e. `RANK` / `WORLD_SIZE` env vars are not
+set), both scripts fall back to single-process training automatically:
+
+```bash
+python -m text2glioma.training.train_stage1_ddp \
+    --config configs/stage1.yaml \
+    --run_dir /runs/
+
+python -m text2glioma.training.train_stage2_ddp \
+    --config configs/ldm.yaml \
+    --stage1_config configs/stage1.yaml \
+    --stage1_uri /path/to/best_model.pth \
+    --run_dir /runs/
+```
+
+---
+
 ## Tips and best practices
 
 ### Guidance scale tuning
@@ -454,5 +621,9 @@ for Stage 1.
 
 ### Multi-GPU
 
-Pass `--use_parallel` to wrap models in `DataParallel`.  The checkpoint
-saving logic correctly unwraps `model.module` before saving.
+**Recommended:** use `train_stage1_ddp` / `train_stage2_ddp` with
+`torchrun` for true distributed training (see the DDP section above).
+
+For the legacy `train_stage1` CLI, pass `--use_parallel` to wrap models
+in `DataParallel`, or `--distributed` for `DistributedDataParallel`.
+The checkpoint saving logic correctly unwraps `model.module` before saving.
