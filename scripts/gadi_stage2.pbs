@@ -33,7 +33,7 @@ torchrun_nccl.sh \
     --stage1_uri   "$STAGE1_URI" \
     --run_dir      "$RUN_DIR" \
     --data_dir     "$DATA_DIR" \
-    --batch_size 2 \
+    --batch_size 4 \
     --num_epochs 250 \
     --val_interval 5 \
     --pin_memory \

@@ -29,7 +29,7 @@ torchrun_nccl.sh \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
     --data_dir "$DATA_DIR" \
-    --batch_size 2 \
+    --batch_size 4 \
     --num_epochs 300 \
     --val_interval 5 \
     --pin_memory \
