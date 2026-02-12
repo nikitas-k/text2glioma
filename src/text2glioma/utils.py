@@ -2,8 +2,9 @@ import os
 import yaml
 from pathlib import Path
 import psutil
-import datetime
-from typing import Tuple, Any
+from datetime import datetime as _datetime
+from typing import Tuple, Any, Optional
+from itertools import islice
 
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -11,13 +12,19 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F_torch
 from monai.data import DataLoader
 from monai.data.dataset import PersistentDataset
 from monai import transforms as T
-from pynvml_utils import nvidia_smi
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
+
+try:
+    from pynvml_utils import nvidia_smi
+    _HAS_PYNVML = True
+except ImportError:
+    _HAS_PYNVML = False
 
 import gdown
 from transformers import AutoModel, AutoTokenizer, CLIPModel, CLIPTextModel, CLIPTextModelWithProjection
@@ -35,60 +42,125 @@ class Stage1Wrapper(nn.Module):
 
         return z
 
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        return self.model.decode(z)
+# ── Mask conditioning utilities ──────────────────────────────────────────────
+
+def masks_to_onehot(labels: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
+    """Convert integer label tensor to one-hot encoding.
     
+    Args:
+        labels: [B, 1, D, H, W] integer label tensor (0=bg, 1=nCET, 2=edema, 3=enhancing).
+        num_classes: Number of classes including background.
+    
+    Returns:
+        One-hot tensor [B, num_classes, D, H, W] float32.
+    """
+    B, C, D, H, W = labels.shape
+    labels_long = labels[:, 0].long()  # [B, D, H, W]
+    labels_long = labels_long.clamp(0, num_classes - 1)
+    onehot = F_torch.one_hot(labels_long, num_classes)  # [B, D, H, W, num_classes]
+    onehot = onehot.permute(0, 4, 1, 2, 3).float()    # [B, num_classes, D, H, W]
+    return onehot
+
+def downsample_mask_to_latent(
+    mask_onehot: torch.Tensor,
+    latent_shape: Tuple[int, int, int],
+) -> torch.Tensor:
+    """Downsample one-hot mask to match the VAE latent spatial dimensions.
+    
+    Args:
+        mask_onehot: [B, num_classes, D, H, W] one-hot mask at full resolution.
+        latent_shape: (D', H', W') target spatial dimensions of the latent.
+    
+    Returns:
+        Downsampled mask [B, num_classes, D', H', W'] via trilinear interpolation.
+    """
+    return F_torch.interpolate(
+        mask_onehot, size=latent_shape, mode="trilinear", align_corners=False
+    )
+
+def prepare_mask_conditioning(
+    labels: torch.Tensor,
+    latent_shape: Tuple[int, int, int],
+    num_classes: int = 4,
+    dropout_p: float = 0.0,
+) -> torch.Tensor:
+    """Full pipeline: labels → one-hot → downsample → optional dropout.
+    
+    Args:
+        labels: [B, 1, D, H, W] integer segmentation labels.
+        latent_shape: (D', H', W') spatial dims of VAE latent.
+        num_classes: Number of label classes (including background).
+        dropout_p: Probability of dropping mask conditioning (replacing with zeros)
+                   for classifier-free guidance training.
+    
+    Returns:
+        Mask conditioning tensor [B, num_classes, D', H', W'].
+    """
+    onehot = masks_to_onehot(labels, num_classes=num_classes)
+    mask_cond = downsample_mask_to_latent(onehot, latent_shape)
+    
+    if dropout_p > 0.0 and mask_cond.requires_grad is False:
+        B = mask_cond.shape[0]
+        drop = (torch.rand(B, device=mask_cond.device) < dropout_p).float()
+        drop = drop.view(B, 1, 1, 1, 1)  # broadcast over C, D, H, W
+        mask_cond = mask_cond * (1.0 - drop)
+    
+    return mask_cond
+
+def batchify(data, batch_size):
+    """Yield successive n-sized chunks from data."""
+    it = iter(data)
+    while True:
+        batch = list(islice(it, batch_size))
+        if not batch:
+            break
+        yield batch
+        
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group["lr"]
     
+# Channel names for multi-modal visualization
+MODALITY_NAMES = ["T1", "T1CE", "T2", "FLAIR"]
+
 def get_figure(
     img: torch.Tensor,
     recons: torch.Tensor,
     cache_dir: str = None,
 ):
-    img_npy_0 = np.clip(a=img[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
-    recons_npy_0 = np.clip(a=recons[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
-    img_npy_1 = np.clip(a=img[0, 0, :, :, 30].cpu().numpy(), a_min=0, a_max=1)
-    recons_npy_1 = np.clip(a=recons[0, 0, :, :, 30].cpu().numpy(), a_min=0, a_max=1)
-    img_npy_2 = np.clip(a=img[0, 0, :, :, 50].cpu().numpy(), a_min=0, a_max=1)
-    recons_npy_2 = np.clip(a=recons[0, 0, :, :, 50].cpu().numpy(), a_min=0, a_max=1)
-    img_npy_3 = np.clip(a=img[0, 0, :, :, 40].cpu().numpy(), a_min=0, a_max=1)
-    recons_npy_3 = np.clip(a=recons[0, 0, :, :, 40].cpu().numpy(), a_min=0, a_max=1)
-
-    img_row_0 = np.concatenate(
-        (
-            img_npy_0,
-            recons_npy_0,
-            img_npy_1,
-            recons_npy_1,
-        ),
-        axis=1,
-    )
-
-    img_row_1 = np.concatenate(
-        (
-            img_npy_2,
-            recons_npy_2,
-            img_npy_3,
-            recons_npy_3,
-        ),
-        axis=1,
-    )
-
-    img = np.concatenate(
-        (
-            img_row_0,
-            img_row_1,
-        ),
-        axis=0,
-    )
-
-    fig = plt.figure(dpi=300)
-    plt.imshow(img, cmap="gray")
-    plt.axis("off")
+    """Create reconstruction comparison figure.
+    
+    Supports multi-channel images: shows each modality as a separate row,
+    with original and reconstruction side-by-side at different slice depths.
+    For single-channel, produces the legacy 2×4 layout.
+    """
+    n_channels = img.shape[1]
+    slice_depths = [60, 30, 50, 40]
+    
+    rows = []
+    for ch in range(n_channels):
+        cols = []
+        for d in slice_depths:
+            d_safe = min(d, img.shape[-1] - 1)
+            orig = np.clip(img[0, ch, :, :, d_safe].cpu().numpy(), 0, 1)
+            rec = np.clip(recons[0, ch, :, :, d_safe].cpu().numpy(), 0, 1)
+            cols.append(np.concatenate((orig, rec), axis=1))  # side-by-side
+        rows.append(np.concatenate(cols, axis=1))
+    
+    grid = np.concatenate(rows, axis=0)
+    
+    fig, ax = plt.subplots(dpi=300)
+    ax.imshow(grid, cmap="gray")
+    ax.axis("off")
+    # Add modality labels on the left
+    if n_channels > 1:
+        h_per_ch = grid.shape[0] / n_channels
+        for ch in range(n_channels):
+            name = MODALITY_NAMES[ch] if ch < len(MODALITY_NAMES) else f"ch{ch}"
+            ax.text(2, int(h_per_ch * (ch + 0.5)), name,
+                    fontsize=6, color="yellow", va="center")
     if cache_dir is not None:
-        plt.savefig(str(Path(cache_dir, f'sample_{datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}.png')), dpi=300)
+        plt.savefig(str(Path(cache_dir, f'sample_{_datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}.png')), dpi=300)
     return fig
     
 def log_reconstructions(
@@ -141,13 +213,14 @@ def get_dataloaders(
         train_transform = T.Compose(
             [
                 T.LoadImaged(keys=["image"]),
-                T.EnsureChannelFirstd(keys=["image"]),
+                T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
                 T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
                 T.ScaleIntensityRangePercentilesd(
-                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
+                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
+                    channel_wise=True,
                 ),
                 T.RandFlipd(
                     keys=["image"], prob=0.5, spatial_axis=0),
@@ -160,7 +233,8 @@ def get_dataloaders(
                     mode="trilinear",
                 ),
                 T.RandShiftIntensityd(
-                    keys=["image"], offsets=0.05, prob=0.1
+                    keys=["image"], offsets=0.05, prob=0.1,
+                    channel_wise=True,
                 ),
                 T.RandAdjustContrastd(
                     keys=["image"], prob=0.1, gamma=(0.97, 1.03)
@@ -171,30 +245,35 @@ def get_dataloaders(
     else:  # DiffusionModelUNet
         train_transform = T.Compose(
             [
-                T.LoadImaged(keys=["image"]),
-                T.EnsureChannelFirstd(keys=["image"]),
+                T.LoadImaged(keys=["image", "label"]),
+                T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
+                T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
-                T.Orientationd(keys=["image"], axcodes="LPS"),
-                T.CropForegroundd(keys=["image"], source_key="image"),
+                T.EnsureTyped(keys=["label"], dtype=torch.float32),
+                T.Orientationd(keys=["image", "label"], axcodes="LPS"),
+                T.CropForegroundd(keys=["image", "label"], source_key="image"),
                 T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+                T.Resized(keys=["label"], spatial_size=(160, 224, 160), mode="nearest"),
                 T.ScaleIntensityRangePercentilesd(
-                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
+                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
+                    channel_wise=True,
                 ),
                 T.RandAffined(
-                    keys=["image"],
+                    keys=["image", "label"],
                     prob=0.1,
                     translate_range=(1, 1, 1),
                     scale_range=(-0.02, 0.02),
                     spatial_size=[160, 224, 160],
-                    mode="trilinear",
+                    mode=["trilinear", "nearest"],
                 ),
                 T.RandShiftIntensityd(
-                    keys=["image"], offsets=0.05, prob=0.1
+                    keys=["image"], offsets=0.05, prob=0.1,
+                    channel_wise=True,
                 ),
                 T.RandAdjustContrastd(
                     keys=["image"], prob=0.1, gamma=(0.97, 1.03)
                 ),
-                T.ToTensord(keys=["image"]),
+                T.ToTensord(keys=["image", "label"]),
             ]
         )
     train_data = PersistentDataset(
@@ -203,22 +282,45 @@ def get_dataloaders(
         cache_dir=cache_dir / "train",
     )
 
-    val_data = PersistentDataset(
-        data=val_dataset,
-        transform=T.Compose(
+    if model_type == "DiffusionModelUNet":
+        val_transform = T.Compose(
+            [
+                T.LoadImaged(keys=["image", "label"]),
+                T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
+                T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
+                T.EnsureTyped(keys=["image"], dtype=torch.float32),
+                T.EnsureTyped(keys=["label"], dtype=torch.float32),
+                T.Orientationd(keys=["image", "label"], axcodes="LPS"),
+                T.CropForegroundd(keys=["image", "label"], source_key="image"),
+                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+                T.Resized(keys=["label"], spatial_size=(160, 224, 160), mode="nearest"),
+                T.ScaleIntensityRangePercentilesd(
+                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
+                    channel_wise=True,
+                ),
+                T.ToTensord(keys=["image", "label"]),
+            ]
+        )
+    else:
+        val_transform = T.Compose(
             [
                 T.LoadImaged(keys=["image"]),
-                T.EnsureChannelFirstd(keys=["image"]),
+                T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
                 T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
                 T.ScaleIntensityRangePercentilesd(
-                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
+                    keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
+                    channel_wise=True,
                 ),
                 T.ToTensord(keys=["image"]),
             ]
-        ),
+        )
+
+    val_data = PersistentDataset(
+        data=val_dataset,
+        transform=val_transform,
         cache_dir=cache_dir / "val",
     )
     if initialize:
@@ -296,7 +398,7 @@ def get_experiment_dataloaders(
                 prob=0.1,
                 translate_range=(1, 1, 1),
                 scale_range=(-0.02, 0.02),
-                spatial_size=[160, 192, 96],
+                spatial_size=[160, 224, 160],
                 mode="trilinear",
             ),
             T.RandShiftIntensityd(
@@ -378,13 +480,18 @@ def get_model(model_type, config, pretrained=False, from_file=None):
     return model
 
 def print_gpu_memory_report():
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and _HAS_PYNVML:
         nvsmi = nvidia_smi.getInstance()
         data = nvsmi.DeviceQuery("memory.used, memory.total, utilization.gpu")["gpu"]
         print("Memory report")
         for i, data_by_rank in enumerate(data):
             mem_report = data_by_rank["fb_memory_usage"]
             print(f"gpu:{i} mem(%) {int(mem_report['used'] * 100.0 / mem_report['total'])}")
+    elif torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            vram_used = torch.cuda.memory_allocated(i) // (1024**2)
+            vram_total = torch.cuda.get_device_properties(i).total_mem // (1024**2)
+            print(f"gpu:{i} mem(%) {int(vram_used * 100.0 / max(vram_total, 1))}")
 
 def print_resource_usage(epoch: int = None):
     if epoch:
@@ -472,32 +579,42 @@ def log_ldm_sample_unconditioned(
     step: int,
     device: torch.device,
     scale_factor: float = 1.0,
+    latent_channels: int = 3,
+    num_mask_classes: int = 4,
 ) -> None:
-    latent = torch.randn((1,) + spatial_shape)
+    latent_spatial = spatial_shape[1:]  # strip channel dim → (D', H', W')
+    latent = torch.randn((1, latent_channels) + latent_spatial)
     latent = latent.to(device)
 
-    if tokenizer is None:
-        prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
-        prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
-        prompt_embeds = get_text_encoder_hidden_states(prompt_embeds)
-    else:
-        tokens = tokenizer(
-            text=[""],
-            max_length=tokenizer.model_max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        tokens = {key: value.to(device) for key, value in tokens.items()}
-        prompt_embeds = get_text_encoder_hidden_states(text_encoder(**tokens))
+    # Zero mask = unconditional w.r.t. mask
+    mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
+    model_input = torch.cat([latent, mask_cond], dim=1)
+
+    prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
+    prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
+    prompt_embeds = prompt_embeds[0]
 
     for t in tqdm(scheduler.timesteps, ncols=70):
-        noise_pred = model(x=latent, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)
+        noise_pred = model(x=model_input, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)
         latent, _ = scheduler.step(noise_pred, t, latent)
+        # Reconstruct model_input for next step
+        model_input = torch.cat([latent, mask_cond], dim=1)
 
     x_hat = stage1.decode(latent / scale_factor)
-    img_0 = np.clip(a=x_hat[0, 0, :, :, 60].cpu().numpy(), a_min=0, a_max=1)
-    fig = plt.figure(dpi=300)
-    plt.imshow(img_0, cmap="gray")
-    plt.axis("off")
+    n_ch = x_hat.shape[1]
+    depth_idx = min(60, x_hat.shape[-1] - 1)
+    cols = []
+    for c in range(n_ch):
+        cols.append(np.clip(x_hat[0, c, :, :, depth_idx].cpu().numpy(), 0, 1))
+    grid = np.concatenate(cols, axis=1)
+    fig, ax = plt.subplots(dpi=300)
+    ax.imshow(grid, cmap="gray")
+    ax.axis("off")
+    # Add modality labels
+    if n_ch > 1:
+        w_per_ch = grid.shape[1] / n_ch
+        for c in range(n_ch):
+            name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
+            ax.text(int(w_per_ch * c) + 2, 10, name,
+                    fontsize=6, color="yellow")
     writer.add_figure("SAMPLE", fig, step)

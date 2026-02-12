@@ -1,107 +1,256 @@
 # text2glioma
 
-Utilities for generating synthetic glioma volumes from textual descriptions
-and for training lightweight downstream models. The snippets below outline a
-minimal end‑to‑end workflow a newcomer can replicate.
+**Text- and mask-conditioned 3D latent diffusion for synthetic multi-sequence glioma MRI generation.**
 
-## 1. Generate diseased images
+[![Documentation](https://readthedocs.org/projects/text2glioma/badge/?version=latest)](https://text2glioma.readthedocs.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 
-`src/inference.py` provides `generate_images` which samples a volume from a
-pathological prompt.  Passing a `healthy_prompt` in the configuration file
-produces a reference scan and a difference map highlighting the lesion.
+text2glioma generates realistic synthetic 3D brain MRI volumes (T1, T1CE, T2, FLAIR) from
+**free-text radiology prompts** and **segmentation masks**, using a two-stage
+latent diffusion pipeline built on [MONAI Generative](https://github.com/Project-MONAI/GenerativeModels)
+and [Stable Diffusion 2.1](https://huggingface.co/stabilityai/stable-diffusion-2-1-base) text conditioning.
 
-```python
-from pathlib import Path
-import torch
-from src.inference import generate_images
+---
 
-image, diff = generate_images(
-    model=model,                   # latent diffusion UNet
-    stage1=autoencoder,            # VAE with a ``decode`` method
-    scheduler=scheduler,
-    text_encoder=text_encoder,
-    prompt="enhancing glioma in the left frontal lobe",
-    config_path=Path("configs/inference.yaml"),
-    device=torch.device("cuda"),
-)
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Stage 1 — VAE                        │
+│  4-ch MRI (T1/T1CE/T2/FLAIR) ──► AutoencoderKL ──► z    │
+│  160×224×160 → latent 10×14×10, 3 channels               │
+└──────────────────────────────────────────────────────────┘
+                          │  z
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│                  Stage 2 — LDM                           │
+│  Text prompt ──► CLIP encoder ──► cross-attention         │
+│  Seg. mask   ──► one-hot + downsample ──► concat (7 ch)  │
+│  DiffusionModelUNet  (v-prediction, DDIM)                │
+└──────────────────────────────────────────────────────────┘
+                          │  ẑ
+                          ▼
+                  VAE decoder ──► 4-ch synthetic MRI
 ```
 
-Key sampling options are stored in `configs/inference.yaml`:
+### Key features
 
-- `guidance_scale` – strength of classifier‑free guidance.
-- `num_steps` – number of denoising steps.
-- `depth`, `height`, `width` – spatial dimensions of the generated volume.
-- `scale_factor` – latent scaling factor used by the autoencoder.
-- `healthy_prompt` – optional baseline prompt to obtain a healthy reference.
-- `difference_threshold` – minimum absolute difference kept in the mask.
-- `save_difference` – when `true`, writes the difference map to
-  `difference.pt`.
+| Feature | Detail |
+|---------|--------|
+| **Multi-sequence** | T1, T1CE, T2, FLAIR — all generated simultaneously |
+| **Dual conditioning** | Free-text via cross-attention + mask via channel concatenation |
+| **Dual CFG** | Independent `guidance_scale_text` / `guidance_scale_mask` |
+| **VASARI prompts** | Automated radiological feature extraction for prompt creation |
+| **Per-channel perceptual loss** | MedicalNet ResNet-50 computed per modality |
+| **4D NIfTI output** | All four sequences saved in a single file `[D,H,W,C]` |
 
-The returned `image`/`diff` pair can be saved to disk and reused for
-downstream tasks.
+---
 
-## 2. Train downstream models with paired data
-
-### 2a. MGMT and IDH status classifier
-
-`src/status_classifier.py` implements simple training loops for binary
-classification.  Dataloaders must yield dictionaries containing `"image"` and
-`"label"` entries:
-
-```python
-from torch import optim
-from dataloaders.brain_tumour_dataset import LoaderConfig, create_dataloaders
-from src.status_classifier import (
-    ClassifierTrainingConfig,
-    train_classifier,
-    evaluate_classifier,
-)
-
-files = [{"image": "image.npy", "label": 0}, {"image": "image2.npy", "label": 1}]
-loaders = create_dataloaders(LoaderConfig(train_files=files, val_files=files))
-
-model = MyModel()
-optimizer = optim.Adam(model.parameters())
-config = ClassifierTrainingConfig(n_epochs=5, device=torch.device("cuda"))
-
-train_classifier(model, loaders["train"], optimizer, config=config)
-accuracy = evaluate_classifier(model, loaders["val"], config.device)
-```
-
-Labels may encode MGMT promoter methylation or IDH mutation status depending on
-the experiment.
-
-### 2b. Segmentation for pathology localisation
-
-Use `src/functions/localisation.py` or the convenience CLI to obtain lesion
-masks by comparing healthy and diseased volumes and then train a small UNet:
+## Installation
 
 ```bash
-python -m src.localisation_cli healthy_dir diseased_dir masks_dir --threshold 0.2 --epochs 5
+# Core install
+pip install -e .
+
+# With evaluation metrics (BERTScore, CLIP, etc.)
+pip install -e ".[eval]"
+
+# With GPU memory monitoring
+pip install -e ".[gpu-monitor]"
+
+# Full development install
+pip install -e ".[dev,docs,eval,gpu-monitor]"
 ```
 
-`healthy_dir` and `diseased_dir` should contain paired `.npy` volumes. The
-command saves masks to `masks_dir` before training a minimal segmentation model
-on the diseased images and collected masks.
+**Requirements:** Python ≥ 3.9, PyTorch ≥ 1.10, CUDA recommended.
 
-## 3. Inference and evaluation metrics
+---
 
-For inference on new prompts, call `generate_images` as in step 1.  The module
-`src/evaluation.py` exposes a number of quality metrics which can be applied to
-generated images or segmentations:
+## Quick start
+
+### 1. Prepare your dataset
+
+Organise your BraTS-style data so each subject has a 4D NIfTI image
+(T1/T1CE/T2/FLAIR as the 4th dimension) and a segmentation label:
+
+```
+data/
+  subj001_image.nii.gz   # shape (D, H, W, 4)
+  subj001_label.nii.gz   # integer labels: 0=bg, 1=nCET, 2=edema, 3=ET
+  ...
+```
+
+Create the datalist JSON with VASARI-based text prompts:
+
+```bash
+create_prompts \
+    --input_dir data/ \
+    --output_dir data/ \
+    --label_dir data/ \
+    --atlas_dir /path/to/atlas_masks/
+```
+
+This produces `data/datalist.json` with train/val splits, each entry
+containing `image`, `label`, `impression` (short prompt), and `findings`
+(detailed prompt) fields.
+
+### 2. Train Stage 1 (VAE)
+
+```bash
+train_stage1 data/datalist.json \
+    --config configs/stage1.yaml \
+    --run_dir runs/ \
+    --batch_size 2 \
+    --num_epochs 300 \
+    --device cuda
+```
+
+### 3. Train Stage 2 (LDM)
+
+```bash
+train_stage2 data/datalist.json \
+    --config configs/ldm.yaml \
+    --stage1_config configs/stage1.yaml \
+    --stage1_uri runs/text2glioma/autoencoder_stage1/output/final_model.pth \
+    --run_dir runs/ \
+    --batch_size 2 \
+    --n_epochs 250 \
+    --device cuda
+```
+
+### 4. Generate synthetic images
+
+```bash
+sample prompts.json output/ \
+    --config configs/ldm.yaml \
+    --stage1_config configs/stage1.yaml \
+    --stage1_uri runs/.../final_model.pth \
+    --model_ckpt runs/.../best_model.pth \
+    --n_samples 50 \
+    --guidance_scale_text 7.5 \
+    --guidance_scale_mask 3.0 \
+    --ddim_steps 50
+```
+
+Or use the Python API directly:
 
 ```python
-from src.evaluation import ssim, fid, dice_coefficient
+import torch
+from text2glioma.utils import load_config, get_model, stage1_ify
+from text2glioma.inference.inference_functions import GenericSampler
+from transformers import AutoTokenizer, CLIPTextModel
+from generative.networks.schedulers import DDIMScheduler
 
-ssim_score = ssim(predictions, references)
-fid_score = fid(fake_images, real_images)
-dice = dice_coefficient(pred_mask, gt_mask)
+config = load_config("configs/ldm.yaml")
+stage1_config = load_config("configs/stage1.yaml")
+
+# Load models
+stage1 = stage1_ify(get_model("AutoencoderKL", stage1_config, from_file="stage1.pth"))
+model = get_model("DiffusionModelUNet", config)
+model.load_state_dict(torch.load("ldm.pth", map_location="cpu"))
+
+tokenizer = AutoTokenizer.from_pretrained(
+    "stabilityai/stable-diffusion-2-1-base", subfolder="tokenizer"
+)
+text_encoder = CLIPTextModel.from_pretrained(
+    "stabilityai/stable-diffusion-2-1-base", subfolder="text_encoder"
+)
+scheduler = DDIMScheduler(**config["scheduler"]["params"])
+
+device = torch.device("cuda")
+sampler = GenericSampler(stage1, model, scheduler, tokenizer, text_encoder, device=device)
+
+# Generate
+images = sampler.sample(
+    steps=50,
+    batch_size=1,
+    latent_shape=(3, 10, 14, 10),
+    texts=["Large enhancing mass in the right temporal lobe with moderate vasogenic edema"],
+    guidance_scale_text=7.5,
+    guidance_scale_mask=0.0,  # text-only generation
+)
+# images shape: [1, 4, 160, 224, 160] — (T1, T1CE, T2, FLAIR)
 ```
 
-Additional helpers such as `bertscore` and `biomedclip_accuracy` quantify text
-alignment and image–text retrieval performance.
+---
 
-`src/prompt.py` also exposes `generate_prompt` with optional `mgmt_status` and
-`idh_status` arguments to embed molecular information into prompts used for
-generation, classification or reporting.
+## Configuration files
+
+| File | Purpose |
+|------|---------|
+| `configs/stage1.yaml` | VAE architecture, learning rates, loss weights |
+| `configs/ldm.yaml` | LDM UNet, scheduler, text encoder, mask settings |
+| `configs/inference.yaml` | Guidance scales, spatial dimensions, mask options |
+| `configs/cnn.yaml` | Downstream classifier experiments |
+
+---
+
+## Project structure
+
+```
+text2glioma/
+├── configs/                     # YAML configuration files
+├── docs/                        # Sphinx documentation (ReadTheDocs)
+├── src/text2glioma/
+│   ├── __init__.py              # Package version
+│   ├── utils.py                 # Models, data loaders, transforms, visualisation
+│   ├── preprocessing/
+│   │   ├── vasari_auto.py       # Automated VASARI feature extraction
+│   │   ├── utils.py             # Prompt composer (short + long)
+│   │   ├── create_text.py       # CLI: create datalist with prompts
+│   │   └── data_conversion.py   # DICOM-to-NIfTI converter
+│   ├── training/
+│   │   ├── training_functions.py # Train/eval loops for VAE and LDM
+│   │   ├── train_stage1.py      # CLI: train VAE
+│   │   └── train_stage2.py      # CLI: train LDM
+│   ├── inference/
+│   │   ├── inference_functions.py # Dual CFG sampling, GenericSampler
+│   │   ├── sampler.py           # CLI: batch inference
+│   │   └── saver.py             # Multi-channel NIfTI saver
+│   ├── classification/
+│   │   ├── experiments.py       # Downstream classification training
+│   │   └── run_experiments.py   # CLI: run classification experiments
+│   └── testing/                 # (future) unit tests
+├── tests/                       # Test suite
+├── CHANGELOG.md
+├── pyproject.toml
+├── setup.py
+└── README.md
+```
+
+---
+
+## Conditioning modes
+
+text2glioma supports flexible conditioning at inference:
+
+| Mode | `guidance_scale_text` | `guidance_scale_mask` | Mask input |
+|------|----------------------|----------------------|------------|
+| Text-only | 7.5 | 0.0 | None |
+| Text + mask | 7.5 | 3.0 | Segmentation NIfTI |
+| Mask-only | 0.0 | 3.0 | Segmentation NIfTI |
+| Unconditional | 0.0 | 0.0 | None |
+
+During training, both text and mask are independently dropped out (default
+20 % each) to learn all four conditioning modes simultaneously.
+
+---
+
+## Citation
+
+If you use this work, please cite:
+
+```bibtex
+@software{text2glioma2026,
+  author = {Koussis, Nikitas},
+  title  = {text2glioma: Text- and Mask-Conditioned 3D Latent Diffusion for Synthetic Glioma MRI},
+  year   = {2026},
+  url    = {https://github.com/nk233/text2glioma},
+}
+```
+
+## License
+
+[MIT](LICENSE) © 2025 Nikitas Koussis
 

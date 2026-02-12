@@ -47,6 +47,8 @@ def parse_args():
     parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for models and tokenizers.")
     parser.add_argument("--scale_factor", type=float, default=1.0, help="Scale factor for input images.")
     parser.add_argument("--train_spec", type=str, default="impression", metavar=["impression", "findings"], help="Which version of training to run.")
+    parser.add_argument("--mask_dropout_p", type=float, default=None, help="Override mask dropout probability (default: from config).")
+    parser.add_argument("--text_dropout_p", type=float, default=None, help="Override text dropout probability (default: from config).")
 
     return parser.parse_args()
 
@@ -261,9 +263,12 @@ def main():
         start_epoch=start_epoch,
         text_field=args.train_spec,
         val_interval=args.val_interval,
-        dropout_p=config["conditioning"].get("dropout_p", 0.2),
+        dropout_p=args.text_dropout_p if args.text_dropout_p is not None else config["conditioning"].get("dropout_p", 0.2),
         run_dir=run_dir,
         scale_factor=args.scale_factor,
+        num_mask_classes=config.get("mask", {}).get("num_classes", 4),
+        mask_dropout_p=args.mask_dropout_p if args.mask_dropout_p is not None else config.get("mask", {}).get("dropout_p", 0.2),
+        latent_channels=config.get("model", {}).get("latent_channels", 3),
     )
 
     print(f"Training completed, final validation loss: {val_loss:0.5f}")

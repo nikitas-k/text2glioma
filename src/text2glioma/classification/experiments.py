@@ -91,12 +91,15 @@ def run_experiment(run_dir, config, experiment_name, exp_type, debug=False, resu
     
     if resume and Path(model_dir / "checkpoint.pth").exists():
         print(f"Resuming from checkpoint in {run_dir}")
-        model = torch.load(model_dir / "checkpoint.pth", map_location="cpu")
+        checkpoint = torch.load(model_dir / "checkpoint.pth", map_location="cpu")
+        model_type = model_cfg.get("name", "densenet121")
+        model = getattr(nets, model_type)(**model_cfg.get("params", {}))
+        model.load_state_dict(checkpoint)
     else:
         print(f"No checkpoint found in {model_dir}. Starting fresh training.")
         resume = False
-        model = get_model(model_cfg)
-        model = model(**config["params"])      
+        model_type = model_cfg.get("name", "densenet121")
+        model = getattr(nets, model_type)(**model_cfg.get("params", {}))      
     
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
@@ -168,7 +171,7 @@ def run_experiment(run_dir, config, experiment_name, exp_type, debug=False, resu
 
     writer.close()
     model_save_path = model_dir / "final_model.pth"
-    torch.save(model.state_dict, model_save_path)
+    torch.save(model.state_dict(), model_save_path)
 
     print(f"Model saved to {model_save_path}")
     print("Experiment completed.")
