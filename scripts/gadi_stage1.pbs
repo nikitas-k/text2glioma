@@ -30,7 +30,7 @@ torchrun_nccl.sh \
     --run_dir "$RUN_DIR" \
     --data_dir "$DATA_DIR" \
     --batch_size 4 \
-    --num_epochs 300 \
+    --num_epochs 500 \
     --val_interval 5 \
     --pin_memory \
     2>&1 > "${HOME}/job_logs/${PBS_JOBID}.log"
