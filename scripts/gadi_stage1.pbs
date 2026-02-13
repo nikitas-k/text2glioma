@@ -31,6 +31,12 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 #   python -c "from monai.apps import DecathlonDataset; \
 #     DecathlonDataset('${DATA_DIR}', 'Task01_BrainTumour', download=True, section='training')"
 #
+# Also pre-cache the MedicalNet perceptual-loss weights (torch.hub):
+#
+#   TORCH_HOME=${RUN_DIR}/cache python -c \
+#     "import torch; torch.hub.load('Warvito/MedicalNet-models', \
+#      model='medicalnet_resnet50_23datasets', verbose=True)"
+#
 # ── Option B: Custom datalist (JSON) ────────────────────────────────
 # Generate a datalist from your own NIfTIs:
 #   python scripts/make_datalist.py \
@@ -41,7 +47,8 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 DATALIST=""  # e.g. ${HOME}/text2glioma/datalist.json
 
 # ── Pre-flight ──────────────────────────────────────────────────────
-mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
+export TORCH_HOME=${RUN_DIR}/cache
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
 
 if [ -z "$DATALIST" ]; then
     # Using DecathlonDataset — verify it exists
