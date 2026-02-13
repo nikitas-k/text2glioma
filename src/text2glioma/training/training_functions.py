@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from generative.losses import PatchAdversarialLoss
 
+torch.autograd.set_detect_anomaly(True)
+
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning
 
 @torch.no_grad()
