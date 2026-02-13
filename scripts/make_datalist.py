@@ -17,34 +17,50 @@ The output JSON has the format expected by ``train_stage1_ddp --datalist``::
       "validation": [{"image": "...", "label": "..."}, ...]
     }
 
-Image–label matching is done by extracting a numeric case ID from each
-filename.  Override with ``--image_pattern`` / ``--label_pattern`` if
-your naming convention differs.
+Image–label matching is done by deriving a *subject ID* from each
+filename: NIfTI extensions are stripped (``.nii.gz``, ``.nii``), then
+image files have ``_full`` removed.  For example::
+
+    nnUNetv2-00001_full.nii   →  nnUNetv2-00001
+    nnUNetv2-00001.nii.gz     →  nnUNetv2-00001
+
+Override with ``--image_suffix`` / ``--label_suffix`` if your naming
+convention differs.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import numpy as np
 
 
-def extract_case_id(path: Path, pattern: str) -> str:
-    """Extract case ID from filename using a regex pattern.
+def _strip_nifti_ext(name: str) -> str:
+    """Remove .nii.gz or .nii extension from a filename."""
+    if name.endswith(".nii.gz"):
+        return name[: -len(".nii.gz")]
+    if name.endswith(".nii"):
+        return name[: -len(".nii")]
+    return name
 
-    When the default ``(\d+)`` pattern is used, returns the **longest**
-    digit group so that version numbers like ``2`` in ``nnUNetv2`` are
-    skipped in favour of the actual case ID (e.g. ``00001``).
+
+def subject_id(path: Path, suffix: str = "") -> str:
+    """Derive a subject ID from a NIfTI path.
+
+    1. Strip ``.nii.gz`` / ``.nii``.
+    2. If *suffix* is non-empty, strip that trailing string as well.
+
+    Examples (suffix="_full")::
+
+        nnUNetv2-00001_full.nii  →  nnUNetv2-00001
+        nnUNetv2-00001.nii.gz   →  nnUNetv2-00001
     """
-    matches = re.findall(pattern, path.name)
-    if not matches:
-        raise ValueError(f"Could not extract case ID from {path.name} "
-                         f"with pattern {pattern!r}")
-    # Return the longest match — most likely the zero-padded case ID
-    return max(matches, key=len)
+    stem = _strip_nifti_ext(path.name)
+    if suffix and stem.endswith(suffix):
+        stem = stem[: -len(suffix)]
+    return stem
 
 
 def main():
@@ -55,11 +71,12 @@ def main():
                    help="Glob pattern for image files (quote it!).")
     p.add_argument("--labels", type=str, default=None,
                    help="Glob pattern for label files (optional; omit for stage-1 only).")
-    p.add_argument("--image_id_pattern", type=str, default=r"(\d+)",
-                   help="Regex to extract numeric case ID from image filename "
-                        "(default: first numeric group).")
-    p.add_argument("--label_id_pattern", type=str, default=r"(\d+)",
-                   help="Regex to extract numeric case ID from label filename.")
+    p.add_argument("--image_suffix", type=str, default="_full",
+                   help="Suffix to strip from image stems before matching "
+                        "(default: '_full').  Set to '' to disable.")
+    p.add_argument("--label_suffix", type=str, default="",
+                   help="Suffix to strip from label stems before matching "
+                        "(default: none).")
     p.add_argument("--val_frac", type=float, default=0.2,
                    help="Fraction of cases for validation (default: 0.2).")
     p.add_argument("--seed", type=int, default=42, help="Random seed for split.")
@@ -84,13 +101,13 @@ def main():
         # Build ID → path maps
         img_by_id = {}
         for p_img in image_paths:
-            cid = extract_case_id(Path(p_img), args.image_id_pattern)
-            img_by_id[cid] = p_img
+            sid = subject_id(Path(p_img), args.image_suffix)
+            img_by_id[sid] = p_img
 
         lbl_by_id = {}
         for p_lbl in label_paths:
-            cid = extract_case_id(Path(p_lbl), args.label_id_pattern)
-            lbl_by_id[cid] = p_lbl
+            sid = subject_id(Path(p_lbl), args.label_suffix)
+            lbl_by_id[sid] = p_lbl
 
         # Show sample IDs for debugging
         sample_img = list(img_by_id.items())[:3]
