@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F_torch
 import numpy as np
 
-from text2glioma.utils import masks_to_onehot, downsample_mask_to_latent
+from text2glioma.utils import masks_to_onehot, downsample_mask_to_latent, get_text_encoder_hidden_states
 
 
 @torch.no_grad()
@@ -16,8 +16,9 @@ def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
         truncation=True,
         return_tensors="pt",
     )
+    tokens = {key: value.to(device) for key, value in tokens.items()}
     out = text_encoder(**tokens)
-    return out.last_hidden_state.to(device)
+    return get_text_encoder_hidden_states(out).to(device)
 
 def get_uncond(tokenizer, text_encoder, batch_size, device):
     return encode_text(tokenizer, text_encoder, [""] * batch_size, device=device)

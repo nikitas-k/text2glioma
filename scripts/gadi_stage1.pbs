@@ -37,6 +37,18 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 #     "import torch; torch.hub.load('Warvito/MedicalNet-models', \
 #      model='medicalnet_resnet50_23datasets', verbose=True)"
 #
+# Pre-cache the text encoder (SD 2.1 CLIP *or* RadBERT) — pick one:
+#
+#   # SD 2.1 CLIP (default ldm.yaml):
+#   python -c "from transformers import AutoTokenizer, CLIPTextModel; \
+#     AutoTokenizer.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='tokenizer'); \
+#     CLIPTextModel.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='text_encoder')"
+#
+#   # RadBERT (ldm_radbert.yaml):
+#   python -c "from transformers import AutoTokenizer, AutoModel; \
+#     AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
+#     AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+#
 # ── Option B: Custom datalist (JSON) ────────────────────────────────
 # Generate a datalist from your own NIfTIs:
 #   python scripts/make_datalist.py \

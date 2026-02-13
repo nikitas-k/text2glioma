@@ -373,12 +373,17 @@ def main():
     # ------------------------------------------------------------------
     # Text encoder + tokenizer (frozen)
     # ------------------------------------------------------------------
-    print0("Loading CLIP text encoder …", rank)
+    print0("Loading text encoder …", rank)
     tokenizer, text_encoder = load_text_encoder_and_tokenizer(
         config["conditioning"],
         cache_dir=args.cache_dir,
         local_files_only=True,
     )
+    # Override model_max_length if config specifies it (avoids wasteful
+    # 512-token padding for BERT-family encoders)
+    cfg_max_len = config["conditioning"].get("max_length")
+    if cfg_max_len is not None:
+        tokenizer.model_max_length = cfg_max_len
     text_encoder = text_encoder.to(device)
     text_encoder.eval()
     for param in text_encoder.parameters():

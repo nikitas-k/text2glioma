@@ -7,10 +7,9 @@ import nibabel as nib
 import numpy as np
 import torch
 from monai.config import print_config
-from text2glioma.utils import print_gpu_memory_report, get_model, load_config, stage1_ify, batchify
+from text2glioma.utils import print_gpu_memory_report, get_model, load_config, stage1_ify, batchify, load_text_encoder_and_tokenizer
 from text2glioma.inference.inference_functions import GenericSampler
 from text2glioma.inference.saver import NiftiSaver
-from transformers import AutoTokenizer, CLIPTextModel
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate samples from a trained diffusion model.")
@@ -102,17 +101,19 @@ def main():
     model.eval()
     print(f"Loaded model from {model_ckpt}")
 
-    tokenizer = config["conditioning"].get("tokenizer", "stabilityai/stable-diffusion-2-1-base")
-    text_encoder = config["conditioning"].get("text_encoder", "stabilityai/stable-diffusion-2-1-base")
     if verbose:
-        print(f"Using tokenizer: {tokenizer}")
-        print(f"Using text encoder: {text_encoder}")
-    
-    if tokenizer and text_encoder:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer, subfolder="tokenizer", cache_dir=args.cache_dir, local_files_only=True)
-        text_encoder = CLIPTextModel.from_pretrained(text_encoder, subfolder="text_encoder", cache_dir=args.cache_dir, local_files_only=True)
-    else:
-        raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
+        print(f"Using tokenizer: {config['conditioning'].get('tokenizer')}")
+        print(f"Using text encoder: {config['conditioning'].get('text_encoder')}")
+
+    tokenizer, text_encoder = load_text_encoder_and_tokenizer(
+        config["conditioning"],
+        cache_dir=args.cache_dir,
+        local_files_only=True,
+    )
+    # Override model_max_length if config specifies it
+    cfg_max_len = config["conditioning"].get("max_length")
+    if cfg_max_len is not None:
+        tokenizer.model_max_length = cfg_max_len
 
     from generative.networks.schedulers import DDIMScheduler
     scheduler = DDIMScheduler(**config["scheduler"].get("params", {}))

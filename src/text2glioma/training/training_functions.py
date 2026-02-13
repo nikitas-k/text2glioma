@@ -47,8 +47,8 @@ def train_autoencoder(
     val_loader,
     optimizer_g: torch.optim.Optimizer,
     optimizer_d: torch.optim.Optimizer,
-    scaler_g: torch.cuda.amp.GradScaler,
-    scaler_d: torch.cuda.amp.GradScaler,
+    scaler_g: torch.amp.GradScaler,
+    scaler_d: torch.amp.GradScaler,
     device: torch.device,
     n_epochs: int,
     start_epoch: int = 0,
@@ -155,15 +155,28 @@ def train_epoch_autoencoder(
     model.train()
     discriminator.train()
 
+    # Underlying module (bypasses DDP wrapper when computing adversarial
+    # loss in the generator step — avoids DDP gradient-sync hooks and
+    # the in-place version-tracking errors introduced in PyTorch ≥ 2.6).
+    disc_module = getattr(discriminator, "module", discriminator)
+
     adv_loss = PatchAdversarialLoss(criterion="least_squares", no_activation_leastsq=True)
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
         images = x["image"].to(device)
 
-        # GENERATOR
+        # ------- GENERATOR -------
+        # Freeze discriminator: prevents autograd from tracking its
+        # parameters, which eliminates the in-place version mismatch
+        # on BatchNorm weight/bias tensors between the two
+        # discriminator forward passes.  Also faster (no unnecessary
+        # gradient computation for discriminator params).
+        for p in disc_module.parameters():
+            p.requires_grad_(False)
+
         optimizer_g.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.amp.autocast("cuda"):
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
             # MedicalNet perceptual loss expects single-channel → average over channels
@@ -180,7 +193,7 @@ def train_epoch_autoencoder(
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
             if adversarial_weight > 0:
-                logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+                logits_fake = disc_module(reconstruction.contiguous().float())[-1]
                 generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
@@ -207,11 +220,15 @@ def train_epoch_autoencoder(
         scaler_g.step(optimizer_g)
         scaler_g.update()
 
-        # DISCRIMINATOR
+        # ------- DISCRIMINATOR -------
+        # Unfreeze discriminator for its own training step.
+        for p in disc_module.parameters():
+            p.requires_grad_(True)
+
         if adversarial_weight > 0:
             optimizer_d.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=True):
+            with torch.amp.autocast("cuda"):
                 logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
                 loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
                 logits_real = discriminator(images.contiguous().detach())[-1]
@@ -271,7 +288,7 @@ def eval_autoencoder(
     for x in loader:
         images = x["image"].to(device)
 
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.amp.autocast("cuda"):
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
@@ -352,7 +369,7 @@ def train_ldm(
     train_loader: Any,
     val_loader: Any,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: torch.amp.GradScaler,
     device: str,
     n_epochs: int,
     text_field: str = "impression",
@@ -466,7 +483,7 @@ def train_epoch_ldm(
     device: torch.device,
     epoch: int,
     writer: SummaryWriter,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: torch.amp.GradScaler,
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
@@ -481,7 +498,7 @@ def train_epoch_ldm(
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.amp.autocast("cuda"):
             with torch.no_grad():
                 e = stage1(images) * scale_factor
                 latent_spatial = e.shape[2:]  # (D', H', W')
@@ -552,7 +569,7 @@ def eval_ldm(
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.amp.autocast("cuda"):
             e = stage1(images) * scale_factor
             latent_spatial = e.shape[2:]
 

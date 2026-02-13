@@ -354,6 +354,66 @@ You can also write the JSON manually — just follow this schema:
 
 ---
 
+## Using RadBERT instead of CLIP for text conditioning
+
+The default LDM config (`configs/ldm.yaml`) uses the CLIP text encoder
+from Stable Diffusion 2.1 (`cross_attention_dim=1024`).  For radiology
+report conditioning, a domain-specific encoder produces better embeddings.
+
+**`configs/ldm_radbert.yaml`** is a drop-in replacement that uses
+[RadBERT](https://huggingface.co/StanfordAIML/RadBERT)
+(`cross_attention_dim=768`), pre-trained on radiology reports.
+
+### 1. Pre-cache on login node
+
+```bash
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+python -c "from transformers import AutoTokenizer, AutoModel; \
+  AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
+  AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+```
+
+### 2. Switch the config
+
+In `gadi_stage2.pbs`, change the `CONFIG` line:
+
+```bash
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+```
+
+Everything else (datalist, PBS resources, etc.) stays the same.
+
+### 3. Alternative: PubMedBERT
+
+If you prefer a broader biomedical encoder, edit `ldm_radbert.yaml`:
+
+```yaml
+conditioning:
+  tokenizer: "microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext"
+  text_encoder: "microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext"
+  text_encoder_class: "AutoModel"
+  tokenizer_subfolder: ""
+  text_encoder_subfolder: ""
+  max_length: 128
+  projection_dim: 768
+  dropout_p: 0.2
+```
+
+Pre-cache on login node:
+
+```bash
+python -c "from transformers import AutoTokenizer, AutoModel; \
+  AutoTokenizer.from_pretrained('microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext'); \
+  AutoModel.from_pretrained('microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext')"
+```
+
+> **Note:** Switching text encoder changes `cross_attention_dim`, so
+> Stage-2 checkpoints are **not** interchangeable between CLIP and
+> RadBERT configs.  Stage-1 (VAE) checkpoints are unaffected.
+
+---
+
 ## Troubleshooting
 
 | Issue | Fix |
@@ -364,3 +424,4 @@ You can also write the JSON manually — just follow this schema:
 | Checkpoint corrupt after timeout | Delete `checkpoint.pth`, restart, or use `best_model.pth` |
 | `torchrun_nccl.sh: command not found` | Ensure `module load NCI-ai-ml/23.05` is in the PBS script |
 | BraTS download hangs | Download on login node first: `python -c "from monai.apps import DecathlonDataset; DecathlonDataset('./data', 'Task01_BrainTumour', download=True)"` |
+| `Network is unreachable` (torch.hub / HuggingFace) | Pre-cache models on login node (see sections above) |

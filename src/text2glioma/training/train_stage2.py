@@ -241,7 +241,7 @@ def main():
         else:
             ldm = torch.nn.parallel.DistributedDataParallel(ldm, find_unused_parameters=False)
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
     
     if is_main_process:
         print("Starting training...")

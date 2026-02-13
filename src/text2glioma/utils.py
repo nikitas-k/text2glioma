@@ -29,6 +29,12 @@ except ImportError:
 import gdown
 from transformers import AutoModel, AutoTokenizer, CLIPModel, CLIPTextModel, CLIPTextModelWithProjection
 
+try:
+    from transformers import AutoModelForMaskedLM
+    _HAS_AUTO_MLM = True
+except ImportError:
+    _HAS_AUTO_MLM = False
+
 class Stage1Wrapper(nn.Module):
     """Wraps the stage 1 model to bypass DataParallel issues."""
     
@@ -554,9 +560,14 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
         "CLIPModel": CLIPModel,
         "AutoModel": AutoModel,
     }
+    if _HAS_AUTO_MLM:
+        encoder_classes["AutoModelForMaskedLM"] = AutoModelForMaskedLM
     encoder_cls = encoder_classes.get(text_encoder_class)
     if encoder_cls is None:
-        raise ValueError(f"Unsupported text encoder class: {text_encoder_class}")
+        raise ValueError(
+            f"Unsupported text encoder class: {text_encoder_class}. "
+            f"Supported: {list(encoder_classes.keys())}"
+        )
 
     text_encoder = encoder_cls.from_pretrained(
         text_encoder_name,
@@ -590,9 +601,14 @@ def log_ldm_sample_unconditioned(
     mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
     model_input = torch.cat([latent, mask_cond], dim=1)
 
-    prompt_embeds = torch.cat((49406 * torch.ones(1, 1), 49407 * torch.ones(1, 76)), 1).long()
-    prompt_embeds = text_encoder(prompt_embeds.squeeze(1).to(device))
-    prompt_embeds = prompt_embeds[0]
+    # Build unconditional prompt embedding using the tokenizer
+    empty_tokens = tokenizer(
+        [""], padding="max_length",
+        max_length=tokenizer.model_max_length,
+        truncation=True, return_tensors="pt",
+    )
+    empty_tokens = {k: v.to(device) for k, v in empty_tokens.items()}
+    prompt_embeds = get_text_encoder_hidden_states(text_encoder(**empty_tokens))
 
     for t in tqdm(scheduler.timesteps, ncols=70):
         noise_pred = model(x=model_input, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)

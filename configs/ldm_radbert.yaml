@@ -1,0 +1,59 @@
+# LDM config with RadBERT text encoder (radiology-specific)
+#
+# RadBERT hidden_size = 768  →  cross_attention_dim = 768
+# BERT max_position_embeddings = 512, but we cap at 128 (radiology
+# reports rarely exceed that; saves memory & compute).
+#
+# To use PubMedBERT instead, change the conditioning section:
+#   tokenizer: "microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext"
+#   text_encoder: "microsoft/BioNLP-PubMedBERT-base-uncased-abstract-fulltext"
+#
+# Pre-cache on login node (Gadi has no internet on compute nodes):
+#   python -c "from transformers import AutoTokenizer, AutoModel; \
+#     AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
+#     AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+
+model:
+  name: "DiffusionModelUNet"
+  base_lr: 0.000025
+  latent_channels: 3       # channels from VAE latent (must match stage1 latent_channels)
+  params:
+    spatial_dims: 3
+    in_channels: 7           # 3 latent + 4 one-hot mask channels
+    out_channels: 3           # predict noise/velocity in latent space only
+    num_res_blocks: 2
+    num_channels: [256, 512, 768]
+    attention_levels: [False, True, True]
+    with_conditioning: True
+    resblock_updown: True
+    cross_attention_dim: 768   # RadBERT hidden_size
+    num_head_channels: [0, 256, 768]
+    upcast_attention: True
+    use_flash_attention: False
+    transformer_num_layers: 1
+    norm_num_groups: 32
+    norm_eps: 1.0e-6
+
+scheduler:
+  name: "DDIMScheduler"
+  params:
+    schedule: "scaled_linear_beta"
+    num_train_timesteps: 1000
+    beta_start: 0.0015
+    beta_end: 0.0205
+    prediction_type: "v_prediction"
+
+conditioning:
+  tokenizer: "StanfordAIML/RadBERT"
+  text_encoder: "StanfordAIML/RadBERT"
+  text_encoder_class: "AutoModel"      # BERT-style (not CLIP)
+  tokenizer_subfolder: ""              # no subfolder — standalone model
+  text_encoder_subfolder: ""
+  max_length: 128                      # radiology reports fit in 128 tokens
+  projection_dim: 768
+  dropout_p: 0.2
+
+mask:
+  num_classes: 4              # background(0), non-enhancing(1), edema(2), enhancing(3)
+  dropout_p: 0.2              # independent mask dropout for CFG
+  spatial_size: [160, 224, 160]  # full-resolution size before downsampling to latent

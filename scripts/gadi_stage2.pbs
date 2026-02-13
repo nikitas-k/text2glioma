@@ -19,6 +19,7 @@ module load python3/3.9.2
 source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 # ── Paths (edit these) ──────────────────────────────────────────────
+# For RadBERT, change CONFIG to configs/ldm_radbert.yaml
 CONFIG=${HOME}/text2glioma/configs/ldm.yaml
 STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
 STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/text2glioma/autoencoder_stage1/output/models/best_model.pth
@@ -29,7 +30,8 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 DATALIST=""  # e.g. ${HOME}/text2glioma/datalist_task03.json
 
 # ── Pre-flight ──────────────────────────────────────────────────────
-mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
+export TORCH_HOME=${RUN_DIR}/cache
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
 
 if [ -z "$DATALIST" ]; then
     if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then

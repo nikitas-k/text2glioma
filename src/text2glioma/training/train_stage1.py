@@ -167,8 +167,8 @@ def main():
     optimizer_g = optim.AdamW(model.parameters(), lr=config["model"]["lr"])
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
 
-    scaler_g = torch.cuda.amp.GradScaler()
-    scaler_d = torch.cuda.amp.GradScaler()
+    scaler_g = torch.amp.GradScaler()
+    scaler_d = torch.amp.GradScaler()
 
     # get checkpoint to resume
     best_loss = float("inf")
