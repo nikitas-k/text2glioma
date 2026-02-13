@@ -23,8 +23,10 @@ CONFIG=${HOME}/text2glioma/configs/stage1.yaml
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Launch via custom torchrun wrapper (activates venv on each node) ─
-${HOME}/text2glioma/scripts/gadi_torchrun.sh \
+# ── Launch single-node DDP (4 GPUs) ─────────────────────────────────
+mkdir -p "${HOME}/job_logs"
+
+torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
@@ -33,4 +35,4 @@ ${HOME}/text2glioma/scripts/gadi_torchrun.sh \
     --num_epochs 500 \
     --val_interval 5 \
     --pin_memory \
-    2>&1 > "${HOME}/job_logs/${PBS_JOBID}.log"
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"
