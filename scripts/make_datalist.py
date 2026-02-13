@@ -33,12 +33,18 @@ import numpy as np
 
 
 def extract_case_id(path: Path, pattern: str) -> str:
-    """Extract case ID from filename using a regex pattern."""
-    m = re.search(pattern, path.name)
-    if m is None:
+    """Extract case ID from filename using a regex pattern.
+
+    When the default ``(\d+)`` pattern is used, returns the **longest**
+    digit group so that version numbers like ``2`` in ``nnUNetv2`` are
+    skipped in favour of the actual case ID (e.g. ``00001``).
+    """
+    matches = re.findall(pattern, path.name)
+    if not matches:
         raise ValueError(f"Could not extract case ID from {path.name} "
                          f"with pattern {pattern!r}")
-    return m.group(1)
+    # Return the longest match — most likely the zero-padded case ID
+    return max(matches, key=len)
 
 
 def main():
@@ -85,6 +91,13 @@ def main():
         for p_lbl in label_paths:
             cid = extract_case_id(Path(p_lbl), args.label_id_pattern)
             lbl_by_id[cid] = p_lbl
+
+        # Show sample IDs for debugging
+        sample_img = list(img_by_id.items())[:3]
+        sample_lbl = list(lbl_by_id.items())[:3]
+        print(f"  Sample image IDs: {sample_img}")
+        print(f"  Sample label IDs: {sample_lbl}")
+        print(f"  Unique image IDs: {len(img_by_id)}, unique label IDs: {len(lbl_by_id)}")
 
         # Match
         common_ids = sorted(set(img_by_id) & set(lbl_by_id))
