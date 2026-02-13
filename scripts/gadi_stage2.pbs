@@ -25,13 +25,25 @@ STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/text2glioma/autoencoder_sta
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Pre-flight: ensure dirs exist & dataset downloaded ──────────────
+# ── Option B: Custom datalist (set to path, or leave empty for DecathlonDataset)
+DATALIST=""  # e.g. ${HOME}/text2glioma/datalist_task03.json
+
+# ── Pre-flight ──────────────────────────────────────────────────────
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
 
-if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
-    echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
-    echo "Download it on a login node first (see gadi_stage1.pbs comments)."
-    exit 1
+if [ -z "$DATALIST" ]; then
+    if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
+        echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
+        echo "Download it on a login node first (see gadi_stage1.pbs comments)."
+        exit 1
+    fi
+    EXTRA_ARGS="--data_dir $DATA_DIR"
+else
+    if [ ! -f "$DATALIST" ]; then
+        echo "ERROR: Datalist not found at ${DATALIST}"
+        exit 1
+    fi
+    EXTRA_ARGS="--datalist $DATALIST --no_channel_reorder"
 fi
 
 if [ ! -f "${STAGE1_URI}" ]; then
@@ -46,7 +58,7 @@ torchrun --standalone --nproc_per_node=4 \
     --stage1_config "$STAGE1_CONFIG" \
     --stage1_uri   "$STAGE1_URI" \
     --run_dir      "$RUN_DIR" \
-    --data_dir     "$DATA_DIR" \
+    $EXTRA_ARGS \
     --batch_size 4 \
     --num_epochs 1500 \
     --val_interval 10 \

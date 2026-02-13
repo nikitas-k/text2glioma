@@ -280,6 +280,80 @@ ssh -L 6006:localhost:6006 nk9793@gadi.nci.org.au
 
 ---
 
+## Using a custom dataset (JSON datalist)
+
+If your data is not the MSD BraTS `DecathlonDataset`, you can point the
+training scripts at any set of 4-channel NIfTI images + segmentation
+labels via a **JSON datalist**.
+
+### 1. Generate the datalist
+
+Use the helper script on a login node:
+
+```bash
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+python scripts/make_datalist.py \
+    --images '/g/data/hl36/mhf/monai/Task03_BrainTumourDx/imagesTr/nnUNetv2-*_full.nii' \
+    --labels '/g/data/hl36/mhf/monai/Task03_BrainTumourDx/labelsTr/nnUNetv2-*.nii.gz' \
+    --val_frac 0.2 \
+    -o datalist_task03.json
+```
+
+The resulting JSON looks like:
+
+```json
+{
+  "training": [
+    {"image": "/g/data/.../nnUNetv2-00001_full.nii", "label": "/g/data/.../nnUNetv2-00001.nii.gz"},
+    ...
+  ],
+  "validation": [...]
+}
+```
+
+### 2. Update the PBS scripts
+
+In `gadi_stage1.pbs` / `gadi_stage2.pbs`, set the `DATALIST` variable:
+
+```bash
+DATALIST=${HOME}/text2glioma/datalist_task03.json
+```
+
+The script will automatically pass `--datalist` and `--no_channel_reorder`
+instead of `--data_dir`.
+
+### 3. Channel ordering
+
+| Flag | Behaviour |
+|------|-----------|
+| *(default)* | Reorders channels from MSD order (FLAIR/T1/T1CE/T2) → pipeline order (T1/T1CE/T2/FLAIR) |
+| `--no_channel_reorder` | Skips reorder — use this when your NIfTIs are **not** in MSD order |
+
+If your custom data already has channels in the order T1 / T1CE / T2 / FLAIR,
+add `--no_channel_reorder`.  If your data follows MSD ordering, omit the flag.
+
+### 4. Writing your own datalist by hand
+
+You can also write the JSON manually — just follow this schema:
+
+```json
+{
+  "training": [
+    {"image": "/absolute/path/to/img1.nii.gz", "label": "/absolute/path/to/seg1.nii.gz"},
+    {"image": "/absolute/path/to/img2.nii.gz", "label": "/absolute/path/to/seg2.nii.gz"}
+  ],
+  "validation": [
+    {"image": "/absolute/path/to/img3.nii.gz", "label": "/absolute/path/to/seg3.nii.gz"}
+  ]
+}
+```
+
+> **Stage 1** only reads the `"image"` key; `"label"` is ignored but
+> harmless. **Stage 2** uses both `"image"` and `"label"`.
+
+---
+
 ## Troubleshooting
 
 | Issue | Fix |

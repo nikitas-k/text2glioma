@@ -23,27 +23,48 @@ CONFIG=${HOME}/text2glioma/configs/stage1.yaml
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Pre-flight: ensure dirs exist & dataset downloaded ──────────────
+# ── Option A: DecathlonDataset (BraTS MSD) ──────────────────────────
 # Gadi compute nodes have NO internet access.  Download BraTS once on
 # a login node BEFORE submitting this job:
 #
 #   source /g/data/hl36/nk9793/venv/monai/bin/activate
 #   python -c "from monai.apps import DecathlonDataset; \
-#     DecathlonDataset('${DATA_DIR}', 'Task01_BrainTumour', download=True)"
+#     DecathlonDataset('${DATA_DIR}', 'Task01_BrainTumour', download=True, section='training')"
 #
+# ── Option B: Custom datalist (JSON) ────────────────────────────────
+# Generate a datalist from your own NIfTIs:
+#   python scripts/make_datalist.py \
+#       --images '/g/data/hl36/mhf/monai/Task03_BrainTumourDx/imagesTr/nnUNetv2-*_full.nii' \
+#       --labels '/g/data/hl36/mhf/monai/Task03_BrainTumourDx/labelsTr/nnUNetv2-*.nii.gz' \
+#       -o datalist_task03.json
+# Then set DATALIST below and uncomment "--datalist" / "--no_channel_reorder".
+DATALIST=""  # e.g. ${HOME}/text2glioma/datalist_task03.json
+
+# ── Pre-flight ──────────────────────────────────────────────────────
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
 
-if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
-    echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
-    echo "Download it on a login node first (see comments in this script)."
-    exit 1
+if [ -z "$DATALIST" ]; then
+    # Using DecathlonDataset — verify it exists
+    if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
+        echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
+        echo "Download it on a login node first (see comments in this script)."
+        exit 1
+    fi
+    EXTRA_ARGS="--data_dir $DATA_DIR"
+else
+    # Using custom datalist
+    if [ ! -f "$DATALIST" ]; then
+        echo "ERROR: Datalist not found at ${DATALIST}"
+        exit 1
+    fi
+    EXTRA_ARGS="--datalist $DATALIST --no_channel_reorder"
 fi
 
 torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
-    --data_dir "$DATA_DIR" \
+    $EXTRA_ARGS \
     --batch_size 4 \
     --num_epochs 500 \
     --val_interval 5 \

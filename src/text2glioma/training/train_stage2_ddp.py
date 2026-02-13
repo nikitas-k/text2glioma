@@ -1,26 +1,25 @@
-"""DDP-aware LDM (stage 2) training using MONAI DecathlonDataset (BraTS).
+"""DDP-aware LDM (stage 2) training using MONAI DecathlonDataset or custom datalist.
 
 Requires a pre-trained Stage-1 VAE checkpoint (``--stage1_uri``).
 
-Launch with ``torchrun``::
+With DecathlonDataset::
 
     torchrun --nproc_per_node=4 -m text2glioma.training.train_stage2_ddp \
         --config configs/ldm.yaml --stage1_config configs/stage1.yaml \
-        --stage1_uri /runs/text2glioma/autoencoder_stage1/output/models/best_model.pth \
-        --run_dir /runs/ --num_epochs 250
+        --stage1_uri /path/to/best_model.pth --run_dir /runs/
 
-On a PBS cluster::
+With a custom datalist::
 
-    qsub scripts/torchrun_hpc.sh \
-        -v TRAIN_ARGS="--nproc_per_node 4 \
-            -m text2glioma.training.train_stage2_ddp \
-            --config configs/ldm.yaml --stage1_config configs/stage1.yaml \
-            --stage1_uri /path/to/best_model.pth --run_dir /scratch/runs/"
+    torchrun --nproc_per_node=4 -m text2glioma.training.train_stage2_ddp \
+        --config configs/ldm.yaml --stage1_config configs/stage1.yaml \
+        --stage1_uri /path/to/best_model.pth --run_dir /runs/ \
+        --datalist datalist_task03.json --no_channel_reorder
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import warnings
 from pathlib import Path
@@ -32,7 +31,7 @@ from generative.networks.schedulers import DDIMScheduler, DDPMScheduler
 from monai import transforms as T
 from monai.apps import DecathlonDataset
 from monai.config import print_config
-from monai.data import DataLoader
+from monai.data import DataLoader, Dataset
 from monai.utils import set_determinism
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -58,7 +57,7 @@ MSD_TO_T2G = [1, 2, 3, 0]
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train Stage-2 LDM with DDP on BraTS DecathlonDataset",
+        description="Train Stage-2 LDM with DDP on BraTS or a custom datalist",
     )
     p.add_argument("--config", type=str, required=True,
                     help="LDM (stage 2) YAML config (e.g. configs/ldm.yaml).")
@@ -70,6 +69,12 @@ def parse_args() -> argparse.Namespace:
                     help="Root output directory.")
     p.add_argument("--data_dir", type=str, default="./data",
                     help="Root for DecathlonDataset download / cache.")
+    p.add_argument("--datalist", type=str, default=None,
+                    help="Path to a JSON datalist (overrides --data_dir / DecathlonDataset). "
+                         "JSON must have 'training' and 'validation' keys, each a list of "
+                         "dicts with 'image' and 'label' paths.")
+    p.add_argument("--no_channel_reorder", action="store_true", default=False,
+                    help="Skip MSD→pipeline channel reorder (use for non-MSD data).")
     p.add_argument("--val_frac", type=float, default=0.2,
                     help="Fraction of training set reserved for validation.")
     p.add_argument("--batch_size", type=int, default=2)
@@ -143,13 +148,17 @@ def print0(msg: str, rank: int):
 # Transforms  (image + label for mask conditioning)
 # ---------------------------------------------------------------------------
 
-def get_train_transform() -> T.Compose:
+def get_train_transform(channel_reorder: bool = True) -> T.Compose:
     """Training transforms for 4-ch BraTS images + segmentation labels."""
-    return T.Compose([
+    xforms = [
+        T.LoadImaged(keys=["image", "label"]) if channel_reorder is False else None,
         # Image: (H,W,D,4) → (4,H,W,D)
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
-        T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]),
+    ]
+    if channel_reorder:
+        xforms.append(T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]))
+    xforms.extend([
         # Label: (H,W,D,1) → (1,H,W,D) or already channel-first
         T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
         T.EnsureTyped(keys=["label"], dtype=torch.float32),
@@ -181,14 +190,19 @@ def get_train_transform() -> T.Compose:
         T.RandAdjustContrastd(keys=["image"], prob=0.1, gamma=(0.97, 1.03)),
         T.ToTensord(keys=["image", "label"]),
     ])
+    return T.Compose([x for x in xforms if x is not None])
 
 
-def get_val_transform() -> T.Compose:
+def get_val_transform(channel_reorder: bool = True) -> T.Compose:
     """Validation transforms (deterministic)."""
-    return T.Compose([
+    xforms = [
+        T.LoadImaged(keys=["image", "label"]) if channel_reorder is False else None,
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
-        T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]),
+    ]
+    if channel_reorder:
+        xforms.append(T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]))
+    xforms.extend([
         T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
         T.EnsureTyped(keys=["label"], dtype=torch.float32),
         T.Orientationd(keys=["image", "label"], axcodes="LPS"),
@@ -205,6 +219,7 @@ def get_val_transform() -> T.Compose:
         ),
         T.ToTensord(keys=["image", "label"]),
     ])
+    return T.Compose([x for x in xforms if x is not None])
 
 
 # ---------------------------------------------------------------------------
@@ -229,41 +244,55 @@ def main():
     stage1_config = load_config(args.stage1_config)
 
     # ------------------------------------------------------------------
-    # Dataset: download on login node first if compute nodes lack internet
-    #   python -c "from monai.apps import DecathlonDataset; \
-    #     DecathlonDataset('/path/to/data', 'Task01_BrainTumour', download=True)"
     # ------------------------------------------------------------------
-    if is_main(rank):
-        Path(args.data_dir).mkdir(parents=True, exist_ok=True)
-    task_dir = Path(args.data_dir) / "Task01_BrainTumour"
-    need_download = not task_dir.is_dir()
-    download = need_download and is_main(rank)
-    if distributed:
-        dist.barrier()  # other ranks wait for download
+    # Dataset
+    # ------------------------------------------------------------------
+    channel_reorder = not args.no_channel_reorder
 
-    train_ds = DecathlonDataset(
-        root_dir=args.data_dir,
-        task="Task01_BrainTumour",
-        section="training",
-        download=download,
-        seed=args.seed,
-        val_frac=args.val_frac,
-        transform=get_train_transform(),
-        num_workers=args.num_workers,
-    )
-    if distributed:
-        dist.barrier()
+    if args.datalist:
+        # ── Custom JSON datalist ─────────────────────────────────────
+        print0(f"Loading datalist from {args.datalist}", rank)
+        with open(args.datalist) as f:
+            datalist = json.load(f)
+        train_data = datalist["training"]
+        val_data = datalist["validation"]
+        print0(f"  {len(train_data)} training, {len(val_data)} validation entries", rank)
 
-    val_ds = DecathlonDataset(
-        root_dir=args.data_dir,
-        task="Task01_BrainTumour",
-        section="validation",
-        download=False,
-        seed=args.seed,
-        val_frac=args.val_frac,
-        transform=get_val_transform(),
-        num_workers=args.num_workers,
-    )
+        train_ds = Dataset(data=train_data, transform=get_train_transform(channel_reorder))
+        val_ds = Dataset(data=val_data, transform=get_val_transform(channel_reorder))
+    else:
+        # ── DecathlonDataset (BraTS) ─────────────────────────────────
+        if is_main(rank):
+            Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+        task_dir = Path(args.data_dir) / "Task01_BrainTumour"
+        need_download = not task_dir.is_dir()
+        download = need_download and is_main(rank)
+        if distributed:
+            dist.barrier()
+
+        train_ds = DecathlonDataset(
+            root_dir=args.data_dir,
+            task="Task01_BrainTumour",
+            section="training",
+            download=download,
+            seed=args.seed,
+            val_frac=args.val_frac,
+            transform=get_train_transform(channel_reorder),
+            num_workers=args.num_workers,
+        )
+        if distributed:
+            dist.barrier()
+
+        val_ds = DecathlonDataset(
+            root_dir=args.data_dir,
+            task="Task01_BrainTumour",
+            section="validation",
+            download=False,
+            seed=args.seed,
+            val_frac=args.val_frac,
+            transform=get_val_transform(channel_reorder),
+            num_workers=args.num_workers,
+        )
 
     # Samplers
     train_sampler = (
