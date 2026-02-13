@@ -25,7 +25,7 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
 # ── Launch via NCI torchrun wrapper ─────────────────────────────────
 torchrun_nccl.sh \
-    -m text2glioma.training.train_stage1_ddp \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
     --data_dir "$DATA_DIR" \
