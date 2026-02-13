@@ -23,8 +23,21 @@ CONFIG=${HOME}/text2glioma/configs/stage1.yaml
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Launch single-node DDP (4 GPUs) ─────────────────────────────────
+# ── Pre-flight: ensure dirs exist & dataset downloaded ──────────────
+# Gadi compute nodes have NO internet access.  Download BraTS once on
+# a login node BEFORE submitting this job:
+#
+#   source /g/data/hl36/nk9793/venv/monai/bin/activate
+#   python -c "from monai.apps import DecathlonDataset; \
+#     DecathlonDataset('${DATA_DIR}', 'Task01_BrainTumour', download=True)"
+#
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
+
+if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
+    echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
+    echo "Download it on a login node first (see comments in this script)."
+    exit 1
+fi
 
 torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \

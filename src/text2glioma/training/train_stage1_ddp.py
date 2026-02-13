@@ -181,11 +181,15 @@ def main():
         print_config()
 
     # ------------------------------------------------------------------
-    # Dataset: DecathlonDataset handles download on rank 0 automatically
+    # Dataset: download on login node first if compute nodes lack internet
+    #   python -c "from monai.apps import DecathlonDataset; \
+    #     DecathlonDataset('/path/to/data', 'Task01_BrainTumour', download=True)"
     # ------------------------------------------------------------------
     if is_main(rank):
         Path(args.data_dir).mkdir(parents=True, exist_ok=True)
-    download = is_main(rank)  # only rank 0 downloads
+    task_dir = Path(args.data_dir) / "Task01_BrainTumour"
+    need_download = not task_dir.is_dir()
+    download = need_download and is_main(rank)
     if distributed:
         dist.barrier()  # other ranks wait for download
 

@@ -25,8 +25,20 @@ STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/text2glioma/autoencoder_sta
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Launch single-node DDP (4 GPUs) ─────────────────────────────────
+# ── Pre-flight: ensure dirs exist & dataset downloaded ──────────────
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
+
+if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
+    echo "ERROR: BraTS dataset not found at ${DATA_DIR}/Task01_BrainTumour"
+    echo "Download it on a login node first (see gadi_stage1.pbs comments)."
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    echo "Train stage 1 first: qsub scripts/gadi_stage1.pbs"
+    exit 1
+fi
 
 torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
