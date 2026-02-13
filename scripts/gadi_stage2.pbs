@@ -25,8 +25,8 @@ STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/text2glioma/autoencoder_sta
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Launch via NCI torchrun wrapper ─────────────────────────────────
-torchrun_nccl.sh \
+# ── Launch via custom torchrun wrapper (activates venv on each node) ─
+${HOME}/text2glioma/scripts/gadi_torchrun.sh \
     ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
     --config       "$CONFIG" \
     --stage1_config "$STAGE1_CONFIG" \

@@ -23,8 +23,8 @@ CONFIG=${HOME}/text2glioma/configs/stage1.yaml
 RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
-# ── Launch via NCI torchrun wrapper ─────────────────────────────────
-torchrun_nccl.sh \
+# ── Launch via custom torchrun wrapper (activates venv on each node) ─
+${HOME}/text2glioma/scripts/gadi_torchrun.sh \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
