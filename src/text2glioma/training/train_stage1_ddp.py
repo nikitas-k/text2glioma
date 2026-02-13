@@ -183,6 +183,8 @@ def main():
     # ------------------------------------------------------------------
     # Dataset: DecathlonDataset handles download on rank 0 automatically
     # ------------------------------------------------------------------
+    if is_main(rank):
+        Path(args.data_dir).mkdir(parents=True, exist_ok=True)
     download = is_main(rank)  # only rank 0 downloads
     if distributed:
         dist.barrier()  # other ranks wait for download

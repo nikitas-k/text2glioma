@@ -24,7 +24,7 @@ RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
 DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 
 # ── Launch single-node DDP (4 GPUs) ─────────────────────────────────
-mkdir -p "${HOME}/job_logs"
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs"
 
 torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
