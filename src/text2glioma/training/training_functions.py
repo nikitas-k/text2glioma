@@ -157,9 +157,9 @@ def train_epoch_autoencoder(
     model.train()
     discriminator.train()
 
-    # Underlying module (bypasses DDP wrapper when computing adversarial
-    # loss in the generator step — avoids DDP gradient-sync hooks and
-    # the in-place version-tracking errors introduced in PyTorch ≥ 2.6).
+    # Underlying module (bypasses DDP wrapper for the generator's
+    # adversarial-loss forward — avoids DDP gradient-sync hooks and
+    # the in-place buffer-version errors introduced in PyTorch ≥ 2.6).
     disc_module = getattr(discriminator, "module", discriminator)
 
     adv_loss = PatchAdversarialLoss(criterion="least_squares", no_activation_leastsq=True)
@@ -168,18 +168,47 @@ def train_epoch_autoencoder(
     for step, x in pbar:
         images = x["image"].to(device)
 
-        # ------- GENERATOR -------
-        # Freeze discriminator: prevents autograd from tracking its
-        # parameters, which eliminates the in-place version mismatch
-        # on BatchNorm weight/bias tensors between the two
-        # discriminator forward passes.  Also faster (no unnecessary
-        # gradient computation for discriminator params).
+        # Shared forward pass — kept in the graph so the generator
+        # backward can reach the autoencoder parameters.
+        with torch.amp.autocast("cuda"):
+            reconstruction, z_mu, z_sigma = model(x=images)
+
+        # -------- DISCRIMINATOR (trained first) --------
+        # Training the discriminator first keeps its forward and
+        # backward adjacent with no intervening in-place buffer
+        # modifications, which prevents the version-counter mismatch
+        # that PyTorch ≥ 2.6 detects on BatchNorm running stats.
+        if adversarial_weight > 0:
+            optimizer_d.zero_grad(set_to_none=True)
+
+            with torch.amp.autocast("cuda"):
+                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+                loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
+                logits_real = discriminator(images.contiguous().detach())[-1]
+                loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
+                discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
+
+                d_loss = adversarial_weight * discriminator_loss
+                d_loss = d_loss.mean()
+
+            scaler_d.scale(d_loss).backward()
+            scaler_d.unscale_(optimizer_d)
+            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
+            scaler_d.step(optimizer_d)
+            scaler_d.update()
+        else:
+            discriminator_loss = torch.tensor([0.0]).to(device)
+
+        # -------- GENERATOR (trained second) --------
+        # Freeze discriminator so autograd does not version-check its
+        # BatchNorm buffers/params during the generator backward, and
+        # use the unwrapped module to skip DDP's in-place buffer
+        # broadcast.
         for p in disc_module.parameters():
             p.requires_grad_(False)
 
         optimizer_g.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda"):
-            reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
             # MedicalNet perceptual loss expects single-channel → average over channels
             n_ch = images.shape[1]
@@ -222,31 +251,9 @@ def train_epoch_autoencoder(
         scaler_g.step(optimizer_g)
         scaler_g.update()
 
-        # ------- DISCRIMINATOR -------
-        # Unfreeze discriminator for its own training step.
+        # Unfreeze discriminator for the next iteration.
         for p in disc_module.parameters():
             p.requires_grad_(True)
-
-        if adversarial_weight > 0:
-            optimizer_d.zero_grad(set_to_none=True)
-
-            with torch.amp.autocast("cuda"):
-                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
-                loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-                logits_real = discriminator(images.contiguous().detach())[-1]
-                loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
-                discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
-
-                d_loss = adversarial_weight * discriminator_loss
-                d_loss = d_loss.mean()
-
-            scaler_d.scale(d_loss).backward()
-            scaler_d.unscale_(optimizer_d)
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
-        else:
-            discriminator_loss = torch.tensor([0.0]).to(device)
 
         losses["d_loss"] = discriminator_loss
 
