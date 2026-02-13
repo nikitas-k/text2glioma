@@ -151,7 +151,7 @@ def print0(msg: str, rank: int):
 def get_train_transform(channel_reorder: bool = True) -> T.Compose:
     """Training transforms for 4-ch BraTS images + segmentation labels."""
     xforms = [
-        T.LoadImaged(keys=["image", "label"]) if channel_reorder is False else None,
+        T.LoadImaged(keys=["image", "label"]),
         # Image: (H,W,D,4) → (4,H,W,D)
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
@@ -196,7 +196,7 @@ def get_train_transform(channel_reorder: bool = True) -> T.Compose:
 def get_val_transform(channel_reorder: bool = True) -> T.Compose:
     """Validation transforms (deterministic)."""
     xforms = [
-        T.LoadImaged(keys=["image", "label"]) if channel_reorder is False else None,
+        T.LoadImaged(keys=["image", "label"]),
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
     ]
