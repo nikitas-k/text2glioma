@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from generative.losses import PatchAdversarialLoss
 
-torch.autograd.set_detect_anomaly(True)
-
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning
 
 @torch.no_grad()
@@ -173,23 +171,30 @@ def train_epoch_autoencoder(
         with torch.amp.autocast("cuda"):
             reconstruction, z_mu, z_sigma = model(x=images)
 
-        # -------- DISCRIMINATOR (trained first) --------
-        # Training the discriminator first keeps its forward and
-        # backward adjacent with no intervening in-place buffer
-        # modifications, which prevents the version-counter mismatch
-        # that PyTorch ≥ 2.6 detects on BatchNorm running stats.
+        # -------- DISCRIMINATOR --------
+        # Concatenate fake + real into one batch for a SINGLE
+        # discriminator forward.  This avoids the PyTorch ≥ 2.6
+        # in-place version-mismatch error: BatchNorm updates
+        # running_mean/running_var in-place during forward, so two
+        # separate forwards through the same BN layer create two
+        # saved-variable versions and the second backward fails.
+        # One forward = one BN update = no conflict.
         if adversarial_weight > 0:
             optimizer_d.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda"):
-                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+                disc_input = torch.cat(
+                    [reconstruction.contiguous().detach(),
+                     images.contiguous().detach()],
+                    dim=0,
+                )
+                logits_all = discriminator(disc_input.float())[-1]
+                logits_fake, logits_real = torch.chunk(logits_all, 2, dim=0)
+
                 loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-                logits_real = discriminator(images.contiguous().detach())[-1]
                 loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
                 discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
-
-                d_loss = adversarial_weight * discriminator_loss
-                d_loss = d_loss.mean()
+                d_loss = (adversarial_weight * discriminator_loss).mean()
 
             scaler_d.scale(d_loss).backward()
             scaler_d.unscale_(optimizer_d)
@@ -199,11 +204,10 @@ def train_epoch_autoencoder(
         else:
             discriminator_loss = torch.tensor([0.0]).to(device)
 
-        # -------- GENERATOR (trained second) --------
-        # Freeze discriminator so autograd does not version-check its
-        # BatchNorm buffers/params during the generator backward, and
-        # use the unwrapped module to skip DDP's in-place buffer
-        # broadcast.
+        # -------- GENERATOR --------
+        # Freeze discriminator — no need to track its params/buffers
+        # during the generator backward pass.  Use unwrapped module
+        # to bypass DDP's in-place buffer broadcast.
         for p in disc_module.parameters():
             p.requires_grad_(False)
 
@@ -224,8 +228,8 @@ def train_epoch_autoencoder(
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
             if adversarial_weight > 0:
-                logits_fake = disc_module(reconstruction.contiguous().float())[-1]
-                generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
+                logits_fake_g = disc_module(reconstruction.contiguous().float())[-1]
+                generator_loss = adv_loss(logits_fake_g, target_is_real=True, for_discriminator=False)
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
 
