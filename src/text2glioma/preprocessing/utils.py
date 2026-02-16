@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import nibabel as nib
 import numpy as np
 from nibabel.orientations import aff2axcodes, axcodes2ornt, ornt_transform, apply_orientation
