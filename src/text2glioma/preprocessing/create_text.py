@@ -59,14 +59,18 @@ def _discover_subjects(directory, file_extension):
     ext = file_extension
     stems = set()
     for f in directory.iterdir():
-        if f.is_file() and f.name.endswith(ext):
-            # Handle double extensions like .nii.gz
-            name = f.name
-            if name.endswith(".nii.gz"):
-                stem = name[: -len(".nii.gz")]
-            else:
-                stem = f.stem
-            stems.add(stem)
+        if not f.is_file() or not f.name.endswith(ext):
+            continue
+        # Skip macOS resource fork files (._*)
+        if f.name.startswith("._"):
+            continue
+        # Handle double extensions like .nii.gz
+        name = f.name
+        if name.endswith(".nii.gz"):
+            stem = name[: -len(".nii.gz")]
+        else:
+            stem = f.stem
+        stems.add(stem)
     return sorted(stems)
 
 
