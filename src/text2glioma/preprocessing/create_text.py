@@ -275,7 +275,7 @@ def main(args=None):
     # Save datalist to JSON
     out_path = output_dir / "datalist.json"
     with open(out_path, "w") as f:
-        json.dump(datalist, f, indent=4)
+        json.dump(datalist, f, indent=4, ensure_ascii=False)
     print(f"Datalist saved to {out_path}")
 
 if __name__ == "__main__":
