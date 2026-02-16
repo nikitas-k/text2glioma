@@ -40,6 +40,7 @@ dependencies = [
     "scikit-learn",
     "scikit-image",
     "scipy",
+    "seaborn<=0.13.2",
     "tensorboard",
     "torch>=1.10.0",
     "torchvision",
