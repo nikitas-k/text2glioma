@@ -538,6 +538,13 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
     if not tokenizer_name or not text_encoder_name:
         raise ValueError("Tokenizer and text encoder must be specified in the configuration file.")
 
+    # Force offline mode at the env-var level as well — some transformers
+    # versions still make network requests inside has_file() even when
+    # local_files_only=True.
+    if local_files_only:
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
     tokenizer_subfolder = conditioning_config.get("tokenizer_subfolder", "tokenizer")
     text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
     text_encoder_class = conditioning_config.get("text_encoder_class", "CLIPTextModel")
