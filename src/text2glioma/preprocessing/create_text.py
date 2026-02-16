@@ -46,7 +46,9 @@ def parse_args():
 
     return parser.parse_args()
 
-def main(args):
+def main(args=None):
+    if args is None:
+        args = parse_args()
     rng = check_random_state(args.seed)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
