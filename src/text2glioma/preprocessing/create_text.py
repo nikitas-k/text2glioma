@@ -15,7 +15,7 @@ from .utils import compose_radiology_prompts
 _ATLAS_DIR_DEFAULT = str(Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks")))
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Create datalist and prompts.", help="Create datalist and prompts. Assumes flat directory structure with images in input_dir and labels are in label_dir or input_dir if label_dir is not given.")
+    parser = argparse.ArgumentParser(description="Create datalist and prompts. Assumes flat directory structure with images in input_dir and labels are in label_dir or input_dir if label_dir is not given.")
     
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing image files.")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the output prompts.")
