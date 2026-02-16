@@ -532,6 +532,32 @@ def get_text_encoder_hidden_states(encoder_output: Any) -> torch.Tensor:
         return encoder_output[0]
     raise ValueError("Unsupported text encoder output; unable to extract hidden states.")
 
+def _resolve_hf_local(name_or_path: str, cache_dir: str = None, subfolder: str = "") -> str:
+    """Resolve a HuggingFace hub identifier to its local cache snapshot path.
+
+    If *name_or_path* is already a local directory it is returned as-is.
+    Otherwise we look up the cached snapshot via ``huggingface_hub``.
+    Returning a real directory path prevents ``transformers`` from making
+    network requests inside ``has_file()`` (a bug in some versions).
+    """
+    path = os.path.join(name_or_path, subfolder) if subfolder else name_or_path
+    if os.path.isdir(path):
+        return name_or_path
+
+    try:
+        from huggingface_hub import snapshot_download
+        local = snapshot_download(
+            name_or_path,
+            cache_dir=cache_dir,
+            local_files_only=True,
+        )
+        return local
+    except Exception:
+        # Cache miss or huggingface_hub not installed — fall back to the
+        # original name and let transformers handle it.
+        return name_or_path
+
+
 def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = None, local_files_only: bool = True):
     tokenizer_name = conditioning_config.get("tokenizer")
     text_encoder_name = conditioning_config.get("text_encoder")
@@ -542,8 +568,8 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
     # versions still make network requests inside has_file() even when
     # local_files_only=True.
     if local_files_only:
-        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
 
     tokenizer_subfolder = conditioning_config.get("tokenizer_subfolder", "tokenizer")
     text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
@@ -554,9 +580,18 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
             return ""
         return str(subfolder_value)
 
+    tok_sub = normalize_subfolder(tokenizer_subfolder)
+    enc_sub = normalize_subfolder(text_encoder_subfolder)
+
+    # Resolve hub names to local cache snapshot directories so that
+    # from_pretrained never attempts a network call.
+    if local_files_only:
+        tokenizer_name = _resolve_hf_local(tokenizer_name, cache_dir, tok_sub)
+        text_encoder_name = _resolve_hf_local(text_encoder_name, cache_dir, enc_sub)
+
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name,
-        subfolder=normalize_subfolder(tokenizer_subfolder),
+        subfolder=tok_sub,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
     )
@@ -578,7 +613,7 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
 
     text_encoder = encoder_cls.from_pretrained(
         text_encoder_name,
-        subfolder=normalize_subfolder(text_encoder_subfolder),
+        subfolder=enc_sub,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
     )
