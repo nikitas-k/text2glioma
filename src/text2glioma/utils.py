@@ -542,10 +542,10 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
     text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
     text_encoder_class = conditioning_config.get("text_encoder_class", "CLIPTextModel")
 
-    def normalize_subfolder(subfolder_value: Any) -> Any:
-        if subfolder_value in ("", None):
-            return None
-        return subfolder_value
+    def normalize_subfolder(subfolder_value: Any) -> str:
+        if not subfolder_value:
+            return ""
+        return str(subfolder_value)
 
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name,
