@@ -12,7 +12,9 @@ from sklearn.model_selection import train_test_split
 from .utils import compose_radiology_prompts
 
 # Resolve the atlas_masks directory shipped inside the installed package.
-_ATLAS_DIR_DEFAULT = str(Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks")))
+_ATLAS_PKG_DIR = Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks"))
+_ATLAS_SPACES = {"sri24": str(_ATLAS_PKG_DIR / "sri24"), "mni152": str(_ATLAS_PKG_DIR / "mni152")}
+_ATLAS_DIR_DEFAULT = _ATLAS_SPACES["sri24"]
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -32,7 +34,8 @@ def parse_args():
     parser.add_argument("--subject_prefix", type=str, required=False, default="subj", help="Prefix for subject IDs (default: 'subj').")
     parser.add_argument("--start_index", type=int, required=False, default=0, help="Starting index for subject IDs (default: 0).")
     parser.add_argument("--file_extension", type=str, required=False, default=".nii.gz", help="File extension to look for (default: .nii.gz).")
-    parser.add_argument("--atlas_dir", type=str, required=False, default=_ATLAS_DIR_DEFAULT, help="Directory containing atlas masks. Defaults to the copy installed with the package.")
+    parser.add_argument("--atlas_space", type=str, required=False, default="sri24", choices=["sri24", "mni152"], help="Atlas space to use. BraTS data uses 'sri24'. MNI152-registered data uses 'mni152'. (default: sri24)")
+    parser.add_argument("--atlas_dir", type=str, required=False, default=None, help="Explicit directory containing atlas masks. Overrides --atlas_space. Defaults to the copy installed with the package.")
     parser.add_argument("--enhancing_label", type=int, required=False, default=3, help="Label value for enhancing tumor (default: 3).")
     parser.add_argument("--nonenhancing_label", type=int, required=False, default=1, help="Label value for non-enhancing tumor (default: 1).")
     parser.add_argument("--oedema_label", type=int, required=False, default=2, help="Label value for oedema (default: 2).")
@@ -134,7 +137,11 @@ def main(args=None):
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     label_dir = Path(args.label_dir) if args.label_dir else input_dir
-    atlas_dir = Path(args.atlas_dir) if args.atlas_dir else None
+    if args.atlas_dir:
+        atlas_dir = Path(args.atlas_dir)
+    else:
+        atlas_dir = Path(_ATLAS_SPACES.get(args.atlas_space, _ATLAS_DIR_DEFAULT))
+    print(f"Using atlas space: {args.atlas_space}  →  {atlas_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Discover training subjects ----

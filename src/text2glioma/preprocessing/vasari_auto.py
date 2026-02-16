@@ -35,7 +35,15 @@ pd.set_option('display.max_rows', 500)
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 # Resolve the atlas_masks directory shipped inside the installed package.
-_ATLAS_DIR_DEFAULT = str(Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks"))) + "/"
+_ATLAS_PKG_DIR = Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks"))
+_ATLAS_DIR_DEFAULT = str(_ATLAS_PKG_DIR / "sri24") + "/"
+
+
+def _load_atlas(path, _seg_nii=None):
+    """Load a pre-registered atlas mask NIfTI."""
+    nii = nib.load(path)
+    arr = np.asanyarray(nii.dataobj)
+    return arr, int(np.sum(arr))
 
 def get_vasari_features(
         file,
@@ -90,63 +98,20 @@ def get_vasari_features(
         print('')
 
     ##derive anatomy masks - this is for automated location (F1)
-    brainstem = atlases+'brainstem.nii.gz'
-    brainstem = nib.load(brainstem)
-    brainstem_array = np.asanyarray(brainstem.dataobj)
-    brainstem_vol = np.sum(brainstem_array)
-    
-    frontal_lobe = atlases+'frontal_lobe.nii.gz'
-    frontal_lobe = nib.load(frontal_lobe)
-    frontal_lobe_array = np.asanyarray(frontal_lobe.dataobj)
-    frontal_lobe_vol = np.sum(frontal_lobe_array)
-    
-    insula = atlases+'insula.nii.gz'
-    insula = nib.load(insula)
-    insula_array = np.asanyarray(insula.dataobj)
-    insula_vol = np.sum(insula_array)
-    
-    occipital = atlases+'occipital.nii.gz'
-    occipital = nib.load(occipital)
-    occipital_array = np.asanyarray(occipital.dataobj)
-    occipital_vol = np.sum(occipital_array)
-    
-    parietal = atlases+'parietal.nii.gz'
-    parietal = nib.load(parietal)
-    parietal_array = np.asanyarray(parietal.dataobj)
-    parietal_vol = np.sum(parietal_array)
-    
-    temporal = atlases+'temporal.nii.gz'
-    temporal = nib.load(temporal)
-    temporal_array = np.asanyarray(temporal.dataobj)
-    temporal_vol = np.sum(temporal_array)
-    
-    thalamus = atlases+'thalamus.nii.gz'
-    thalamus = nib.load(thalamus)
-    thalamus_array = np.asanyarray(thalamus.dataobj)
-    thalamus_vol = np.sum(thalamus_array)
-    
-    corpus_callosum = atlases+'corpus_callosum.nii.gz'
-    corpus_callosum = nib.load(corpus_callosum)
-    corpus_callosum_array = np.asanyarray(corpus_callosum.dataobj)
-    corpus_callosum_vol = np.sum(corpus_callosum_array)
-    
-    ventricles = atlases+'ventricles.nii.gz'
-    ventricles = nib.load(ventricles)
-    ventricles_array = np.asanyarray(ventricles.dataobj)
-    ventricles_vol = np.sum(ventricles_array)
-    
-    internal_capsule = atlases+'internal_capsule.nii.gz'
-    internal_capsule = nib.load(internal_capsule)
-    internal_capsule_array = np.asanyarray(internal_capsule.dataobj)
-    internal_capsule_vol = np.sum(internal_capsule_array)
-    
-    cortex = atlases+'cortex.nii.gz'
-    cortex = nib.load(cortex)
-    cortex_array = np.asanyarray(cortex.dataobj)
-    cortex_vol = np.sum(cortex_array)
-    
     segmentation = nib.load(file)
     segmentation_array = np.asanyarray(segmentation.dataobj)
+
+    brainstem_array, brainstem_vol = _load_atlas(atlases+'brainstem.nii.gz', segmentation)
+    frontal_lobe_array, frontal_lobe_vol = _load_atlas(atlases+'frontal_lobe.nii.gz', segmentation)
+    insula_array, insula_vol = _load_atlas(atlases+'insula.nii.gz', segmentation)
+    occipital_array, occipital_vol = _load_atlas(atlases+'occipital.nii.gz', segmentation)
+    parietal_array, parietal_vol = _load_atlas(atlases+'parietal.nii.gz', segmentation)
+    temporal_array, temporal_vol = _load_atlas(atlases+'temporal.nii.gz', segmentation)
+    thalamus_array, thalamus_vol = _load_atlas(atlases+'thalamus.nii.gz', segmentation)
+    corpus_callosum_array, corpus_callosum_vol = _load_atlas(atlases+'corpus_callosum.nii.gz', segmentation)
+    ventricles_array, ventricles_vol = _load_atlas(atlases+'ventricles.nii.gz', segmentation)
+    internal_capsule_array, internal_capsule_vol = _load_atlas(atlases+'internal_capsule.nii.gz', segmentation)
+    cortex_array, cortex_vol = _load_atlas(atlases+'cortex.nii.gz', segmentation)
     
     if verbose:
         print('Running voxel quantification per tissue class')
@@ -412,7 +377,10 @@ def get_vasari_features(
            'F20 Cortical involvement', 'F21 Deep WM invasion', 
                  'F22 nCET Crosses Midline', 'F23 CET Crosses midline',
                  'F24 satellites',
-           'F25 Calvarial modelling', 'COMMENTS']
+           'F25 Calvarial modelling', 'COMMENTS',
+           'prop_brainstem', 'prop_frontal', 'prop_insula',
+           'prop_occipital', 'prop_parietal', 'prop_temporal',
+           'prop_thalamus', 'prop_corpus_callosum']
         
 
     result = pd.DataFrame(columns=col_names)
@@ -443,6 +411,14 @@ def get_vasari_features(
                                'F23 CET Crosses midline':CET_cross_midline_f,
                                'F24 satellites':num_components_cet_f, 
                                'F25 Calvarial modelling':np.nan, #unsupported in current version
-                               'COMMENTS':'Please note that this software is in beta and utilises only irrevocably anonymised lesion masks. VASARI features that require source data shall not be derived and return NaN'
+                               'COMMENTS':'Please note that this software is in beta and utilises only irrevocably anonymised lesion masks. VASARI features that require source data shall not be derived and return NaN',
+                               'prop_brainstem': prop_in_brainstem,
+                               'prop_frontal': prop_in_frontal_lobe,
+                               'prop_insula': prop_in_insula,
+                               'prop_occipital': prop_in_occipital,
+                               'prop_parietal': prop_in_parietal,
+                               'prop_temporal': prop_in_temporal,
+                               'prop_thalamus': prop_in_thalamus,
+                               'prop_corpus_callosum': prop_in_cc,
                               }
     return result
