@@ -361,7 +361,7 @@ from Stable Diffusion 2.1 (`cross_attention_dim=1024`).  For radiology
 report conditioning, a domain-specific encoder produces better embeddings.
 
 **`configs/ldm_radbert.yaml`** is a drop-in replacement that uses
-[RadBERT](https://huggingface.co/StanfordAIML/RadBERT)
+[RadBERT](https://huggingface.co/StanfordAIMI/RadBERT)
 (`cross_attention_dim=768`), pre-trained on radiology reports.
 
 ### 1. Pre-cache on login node
@@ -370,8 +370,8 @@ report conditioning, a domain-specific encoder produces better embeddings.
 source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 python -c "from transformers import AutoTokenizer, AutoModel; \
-  AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
-  AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+  AutoTokenizer.from_pretrained('StanfordAIMI/RadBERT'); \
+  AutoModel.from_pretrained('StanfordAIMI/RadBERT')"
 ```
 
 ### 2. Switch the config

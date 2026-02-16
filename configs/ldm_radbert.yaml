@@ -10,8 +10,8 @@
 #
 # Pre-cache on login node (Gadi has no internet on compute nodes):
 #   python -c "from transformers import AutoTokenizer, AutoModel; \
-#     AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
-#     AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+#     AutoTokenizer.from_pretrained('StanfordAIMI/RadBERT'); \
+#     AutoModel.from_pretrained('StanfordAIMI/RadBERT')"
 
 model:
   name: "DiffusionModelUNet"
@@ -44,8 +44,8 @@ scheduler:
     prediction_type: "v_prediction"
 
 conditioning:
-  tokenizer: "StanfordAIML/RadBERT"
-  text_encoder: "StanfordAIML/RadBERT"
+  tokenizer: "StanfordAIMI/RadBERT"
+  text_encoder: "StanfordAIMI/RadBERT"
   text_encoder_class: "AutoModel"      # BERT-style (not CLIP)
   tokenizer_subfolder: ""              # no subfolder — standalone model
   text_encoder_subfolder: ""

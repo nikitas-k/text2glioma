@@ -15,6 +15,144 @@ available out of the box.
 
 ---
 
+## Pre-caching models for HPC (no internet on compute nodes)
+
+Most HPC clusters (e.g. NCI Gadi) block outbound internet access on
+compute nodes.  All external model weights must be downloaded **on a
+login node** before submitting batch jobs.  The commands below populate
+the HuggingFace cache (`~/.cache/huggingface/hub` by default) so that
+training and inference scripts can load models with
+`local_files_only=True`, which is already the default in text2glioma.
+
+### Set a shared cache directory (recommended)
+
+Point the HuggingFace cache at a location on your scratch or project
+filesystem so that all jobs (and all nodes in multi-node runs) share the
+same cache:
+
+```bash
+# Add to your ~/.bashrc or PBS job script
+export HF_HOME=/scratch/$USER/hf_cache
+mkdir -p "$HF_HOME"
+```
+
+> All `from_pretrained` calls in text2glioma honour `HF_HOME`.
+> You can also pass `--cache_dir /scratch/$USER/hf_cache` to the
+> Stage 2 training and inference CLIs.
+
+### CLIP (Stable Diffusion 2.1 — default text encoder)
+
+Required by **Stage 2 training** and **inference** when using
+`configs/ldm.yaml`:
+
+```bash
+python -c "
+from transformers import AutoTokenizer, CLIPTextModel
+AutoTokenizer.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='tokenizer')
+CLIPTextModel.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='text_encoder')
+print('CLIP tokenizer + text encoder cached ✓')
+"
+```
+
+### RadBERT (radiology-specific text encoder)
+
+Required by **Stage 2 training** and **inference** when using
+`configs/ldm_radbert.yaml`:
+
+```bash
+python -c "
+from transformers import AutoTokenizer, AutoModel
+AutoTokenizer.from_pretrained('StanfordAIMI/RadBERT')
+AutoModel.from_pretrained('StanfordAIMI/RadBERT')
+print('RadBERT tokenizer + model cached ✓')
+"
+```
+
+### MedicalNet (perceptual loss — Stage 1)
+
+The `PerceptualLoss` from monai-generative downloads
+**MedicalNet ResNet-50** weights on first use.  Pre-cache by running a
+throwaway forward pass on the login node:
+
+```bash
+python -c "
+from generative.losses.perceptual import PerceptualLoss
+import torch
+p = PerceptualLoss(spatial_dims=3, network_type='medicalnet_resnet50_23datasets', is_fake_3d=False)
+_ = p(torch.randn(1,1,32,32,32), torch.randn(1,1,32,32,32))
+print('MedicalNet perceptual loss cached ✓')
+"
+```
+
+### BraTS dataset (MONAI DecathlonDataset)
+
+If you are using `DecathlonDataset` for DDP training (Step 2 / Step 3),
+pre-download the data on the login node:
+
+```bash
+python -c "
+from monai.apps import DecathlonDataset
+DecathlonDataset(root_dir='/scratch/$USER/data', task='Task01_BrainTumour', section='training', download=True, transform=())
+print('BraTS downloaded ✓')
+"
+```
+
+### One-shot cache script
+
+For convenience, you can cache everything in one go:
+
+```bash
+#!/usr/bin/env bash
+# cache_models.sh — run on the login node before submitting jobs
+set -euo pipefail
+
+export HF_HOME="${HF_HOME:-/scratch/$USER/hf_cache}"
+mkdir -p "$HF_HOME"
+
+python - <<'EOF'
+from transformers import AutoTokenizer, AutoModel, CLIPTextModel
+from generative.losses.perceptual import PerceptualLoss
+import torch
+
+# ---- CLIP (default LDM encoder) ----
+AutoTokenizer.from_pretrained("stabilityai/stable-diffusion-2-1-base", subfolder="tokenizer")
+CLIPTextModel.from_pretrained("stabilityai/stable-diffusion-2-1-base", subfolder="text_encoder")
+print("[1/3] CLIP cached ✓")
+
+# ---- RadBERT (optional radiology encoder) ----
+AutoTokenizer.from_pretrained("StanfordAIMI/RadBERT")
+AutoModel.from_pretrained("StanfordAIMI/RadBERT")
+print("[2/3] RadBERT cached ✓")
+
+# ---- MedicalNet perceptual loss (Stage 1) ----
+p = PerceptualLoss(spatial_dims=3, network_type="medicalnet_resnet50_23datasets", is_fake_3d=False)
+_ = p(torch.randn(1, 1, 32, 32, 32), torch.randn(1, 1, 32, 32, 32))
+print("[3/3] MedicalNet cached ✓")
+EOF
+
+echo "All models pre-cached in $HF_HOME"
+```
+
+### Verifying the cache works offline
+
+Set `HF_HUB_OFFLINE=1` to simulate a compute-node environment, then try
+loading the models:
+
+```bash
+HF_HUB_OFFLINE=1 python -c "
+from transformers import AutoTokenizer, CLIPTextModel, AutoModel
+AutoTokenizer.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='tokenizer')
+CLIPTextModel.from_pretrained('stabilityai/stable-diffusion-2-1-base', subfolder='text_encoder')
+AutoTokenizer.from_pretrained('StanfordAIMI/RadBERT')
+AutoModel.from_pretrained('StanfordAIMI/RadBERT')
+print('Offline load OK ✓')
+"
+```
+
+If this succeeds, your PBS jobs will work without internet.
+
+---
+
 ## Step 0 — Download BraTS via MONAI DecathlonDataset
 
 `DecathlonDataset` downloads and extracts **Task01_BrainTumour**

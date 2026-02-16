@@ -46,8 +46,8 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 #
 #   # RadBERT (ldm_radbert.yaml):
 #   python -c "from transformers import AutoTokenizer, AutoModel; \
-#     AutoTokenizer.from_pretrained('StanfordAIML/RadBERT'); \
-#     AutoModel.from_pretrained('StanfordAIML/RadBERT')"
+#     AutoTokenizer.from_pretrained('StanfordAIMI/RadBERT'); \
+#     AutoModel.from_pretrained('StanfordAIMI/RadBERT')"
 #
 # ── Option B: Custom datalist (JSON) ────────────────────────────────
 # Generate a datalist from your own NIfTIs:
