@@ -25,8 +25,10 @@ def parse_args():
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing training image files.")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the output datalist.json.")
     parser.add_argument("--label_dir", type=str, required=False, default=None, help="Directory containing label files (optional, defaults to input_dir).")
-    parser.add_argument("--test_input_dir", type=str, required=False, default=None, help="Directory containing test image files (e.g. imagesTs). If given, these are added to the 'testing' split.")
+    parser.add_argument("--test_input_dir", type=str, required=False, default=None, help="Directory containing test image files (e.g. imagesTs). If given, these are added to the 'testing' split. Also forces train_split=1.0 unless --val_input_dir is given.")
     parser.add_argument("--test_label_dir", type=str, required=False, default=None, help="Directory containing test label files (e.g. labelsTs). Defaults to test_input_dir.")
+    parser.add_argument("--val_input_dir", type=str, required=False, default=None, help="Directory containing validation image files. If given, validation subjects come from this directory instead of splitting from input_dir.")
+    parser.add_argument("--val_label_dir", type=str, required=False, default=None, help="Directory containing validation label files. Defaults to val_input_dir.")
     parser.add_argument("--subject_prefix", type=str, required=False, default="subj", help="Prefix for subject IDs (default: 'subj').")
     parser.add_argument("--start_index", type=int, required=False, default=0, help="Starting index for subject IDs (default: 0).")
     parser.add_argument("--file_extension", type=str, required=False, default=".nii.gz", help="File extension to look for (default: .nii.gz).")
@@ -142,6 +144,23 @@ def main(args=None):
             f"No files with extension '{args.file_extension}' found in {input_dir}"
         )
 
+    # ---- Resolve explicit val / test directories ----
+    val_input_dir = Path(args.val_input_dir) if args.val_input_dir else None
+    val_label_dir = Path(args.val_label_dir) if args.val_label_dir else val_input_dir
+    test_input_dir = Path(args.test_input_dir) if args.test_input_dir else None
+    test_label_dir = Path(args.test_label_dir) if args.test_label_dir else test_input_dir
+
+    # When separate directories define the splits, override train_split so
+    # all subjects discovered in input_dir go to training.
+    if test_input_dir or val_input_dir:
+        if args.train_split < 1.0:
+            print(
+                f"Note: --test_input_dir / --val_input_dir provided; "
+                f"overriding train_split from {args.train_split} to 1.0 "
+                f"(all input_dir subjects go to training)."
+            )
+            args.train_split = 1.0
+
     # ---- Train / validation split ----
     if args.train_split >= 1.0:
         subjects_tr = subjects
@@ -151,25 +170,30 @@ def main(args=None):
             subjects, train_size=args.train_split, random_state=rng
         )
 
-    print(f"Found {len(subjects)} subjects: {len(subjects_tr)} training, {len(subjects_val)} validation")
+    print(f"Found {len(subjects)} subjects in input_dir: {len(subjects_tr)} training, {len(subjects_val)} validation")
 
     # ---- Process training subjects ----
     train_entries, next_idx = _process_subjects(
         subjects_tr, input_dir, label_dir, atlas_dir, args, rng, args.start_index
     )
 
-    # ---- Process validation subjects ----
-    val_entries, next_idx = _process_subjects(
-        subjects_val, input_dir, label_dir, atlas_dir, args, rng, next_idx
-    )
+    # ---- Process validation subjects (explicit dir or split) ----
+    if val_input_dir:
+        val_subjects = _discover_subjects(val_input_dir, args.file_extension)
+        print(f"Found {len(val_subjects)} validation subjects in val_input_dir")
+        val_entries, next_idx = _process_subjects(
+            val_subjects, val_input_dir, val_label_dir, atlas_dir, args, rng, next_idx
+        )
+    else:
+        val_entries, next_idx = _process_subjects(
+            subjects_val, input_dir, label_dir, atlas_dir, args, rng, next_idx
+        )
 
     # ---- Process test subjects (optional, for Decathlon-style datasets) ----
     test_entries = []
-    if args.test_input_dir:
-        test_input_dir = Path(args.test_input_dir)
-        test_label_dir = Path(args.test_label_dir) if args.test_label_dir else test_input_dir
+    if test_input_dir:
         test_subjects = _discover_subjects(test_input_dir, args.file_extension)
-        print(f"Found {len(test_subjects)} test subjects")
+        print(f"Found {len(test_subjects)} test subjects in test_input_dir")
         test_entries, next_idx = _process_subjects(
             test_subjects, test_input_dir, test_label_dir, atlas_dir, args, rng, next_idx
         )
