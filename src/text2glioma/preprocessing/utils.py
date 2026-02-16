@@ -31,7 +31,23 @@ def load_nifti_LPS(path):
         vox = tuple(z[i] for i in order)
     else:
         vox = img.header.get_zooms()[:3]
-    return arr, vox  # arr shape (X,Y,Z) in LPS; vox = (vx,vy,vz) mm
+    return arr, vox  # arr shape (X,Y,Z) or (C,X,Y,Z) in LPS; vox = (vx,vy,vz) mm
+
+
+def _to_3d(arr):
+    """Reduce a 4-D array to 3-D by taking the first channel.
+
+    Handles both channel-first (C, X, Y, Z) and channel-last (X, Y, Z, C)
+    layouts.  If already 3-D, returns as-is.
+    """
+    if arr.ndim == 3:
+        return arr
+    if arr.ndim == 4:
+        # Heuristic: channel axis is the one with the smallest extent.
+        if arr.shape[0] <= arr.shape[-1]:
+            return arr[0]          # channel-first
+        return arr[..., 0]         # channel-last
+    return arr
 
 def voxel_volume_ml(vox):  # mm^3 -> mL
     vx, vy, vz = map(float, vox)
@@ -104,6 +120,7 @@ def edema_severity_from_labels(label_path, edema_label=2, brain_volume_ml=None):
 # Optional: rough brain volume estimate (if no brain mask) from T2/FLAIR by simple threshold
 def estimate_brain_vol(image_path, lower_pct=15, upper_pct=99):
     img, vox = load_nifti_LPS(image_path)
+    img = _to_3d(img)
     prc = np.percentile(img, [lower_pct, upper_pct])
     brain = (img > prc[0]) & (img < prc[1])  # crude intracranial proxy
     return brain.sum() * voxel_volume_ml(vox)
@@ -167,7 +184,9 @@ def location_from_label_LPS(label_path, nonenh_label=1, enh_label=3, bilateral_f
 # ---------- midline shift (reuse your symmetry-based estimator) ----------
 def estimate_midline_shift_mm(image_path, label_path, tumour_label_any=(1,2,4), search_vox=15):
     img, vox = load_nifti_LPS(image_path)
+    img = _to_3d(img)
     lab, _   = load_nifti_LPS(label_path)
+    lab = _to_3d(lab)
     X, Y, Z = img.shape; vx = float(vox[0])
     tumour = np.isin(lab, tumour_label_any)
     if not tumour.any(): return 0.0, "none", None
