@@ -1,4 +1,5 @@
 import argparse
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 import json
 from typing import List, Dict
@@ -8,7 +9,10 @@ import numpy as np
 from sklearn.utils.validation import check_random_state
 from sklearn.model_selection import train_test_split
 
-from text2glioma.utils import compose_radiology_prompts
+from .utils import compose_radiology_prompts
+
+# Resolve the atlas_masks directory shipped inside the installed package.
+_ATLAS_DIR_DEFAULT = str(Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks")))
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Create datalist and prompts.", help="Create datalist and prompts. Assumes flat directory structure with images in input_dir and labels are in label_dir or input_dir if label_dir is not given.")
@@ -19,7 +23,7 @@ def parse_args():
     parser.add_argument("--subject_prefix", type=str, required=False, default="subj", help="Prefix for subject IDs (default: 'subj'). The subject ID will be formed as {subject_prefix}{index}.")
     parser.add_argument("--start_index", type=int, required=False, default=0, help="Starting index for subject IDs (default: 0).")
     parser.add_argument("--file_extension", type=str, required=False, default=".nii.gz", help="File extension to look for (default is .nii.gz).")
-    parser.add_argument("--atlas_dir", type=str, required=False, default="/atlas_masks/", help="Directory containing atlas masks (optional).")
+    parser.add_argument("--atlas_dir", type=str, required=False, default=_ATLAS_DIR_DEFAULT, help="Directory containing atlas masks. Defaults to the copy installed with the package.")
     parser.add_argument("--enhancing_label", type=int, required=False, default=3, help="Label value for enhancing tumor (default: 3).")
     parser.add_argument("--nonenhancing_label", type=int, required=False, default=1, help="Label value for non-enhancing tumor (default: 1).")
     parser.add_argument("--oedema_label", type=int, required=False, default=2, help="Label value for edema (default: 2).")

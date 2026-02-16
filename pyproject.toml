@@ -61,6 +61,9 @@ Repository = "https://github.com/nk233/text2glioma"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"text2glioma.preprocessing" = ["atlas_masks/*.nii.gz"]
+
 [project.scripts]
 train_stage1 = "text2glioma.training.train_stage1:main"
 train_stage2 = "text2glioma.training.train_stage2:main"

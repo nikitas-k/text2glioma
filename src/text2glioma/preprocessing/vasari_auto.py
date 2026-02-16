@@ -12,6 +12,8 @@
 import glob
 import numpy as np
 import os
+from importlib.resources import files as _pkg_files
+from pathlib import Path
 import pandas as pd
 import shutil
 import errno
@@ -32,9 +34,12 @@ from scipy import stats
 pd.set_option('display.max_rows', 500)
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
+# Resolve the atlas_masks directory shipped inside the installed package.
+_ATLAS_DIR_DEFAULT = str(Path(_pkg_files("text2glioma.preprocessing").joinpath("atlas_masks"))) + "/"
+
 def get_vasari_features(
         file,
-        atlases='/atlas_masks/',
+        atlases=_ATLAS_DIR_DEFAULT,
         verbose=False,
         enhancing_label=3,
         nonenhancing_label=1,
