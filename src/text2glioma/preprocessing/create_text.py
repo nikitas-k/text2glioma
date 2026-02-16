@@ -1,8 +1,11 @@
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 import numpy as np
 
@@ -55,6 +58,9 @@ def parse_args():
     parser.add_argument("--shuffle_prompt_order", action='store_true', help="Whether to shuffle the order of prompts (default: False).")
     parser.add_argument("--seed", type=int, required=False, default=42, help="Random seed for reproducibility (default: 42).")
     parser.add_argument("--verbose", action='store_true', help="Whether to print outputs sometimes (default: False).")
+    parser.add_argument("-j", "--num_workers", type=int, required=False, default=0,
+                        help="Number of parallel workers for prompt generation. "
+                             "0 = automatic (all CPUs), 1 = serial (default: 0).")
 
     return parser.parse_args()
 
@@ -79,55 +85,106 @@ def _discover_subjects(directory, file_extension):
     return sorted(stems)
 
 
+# Top-level function so it can be pickled by multiprocessing.
+def _process_one(
+    subject: str,
+    subject_id: str,
+    image_path: str,
+    label_path: str,
+    atlas_dir: str,
+    kwargs: dict,
+) -> Optional[dict]:
+    """Process a single subject and return its entry dict (or *None* on skip)."""
+    if not Path(image_path).exists():
+        print(f"Warning: Image file {image_path} does not exist. Skipping {subject}.")
+        return None
+    if not Path(label_path).exists():
+        print(f"Warning: Label file {label_path} does not exist. Skipping {subject}.")
+        return None
+
+    prompt = compose_radiology_prompts(
+        image_path=image_path,
+        label_path=label_path,
+        atlas_dir=atlas_dir,
+        **kwargs,
+    )
+    return {
+        "image": image_path,
+        "label": label_path,
+        "subject_id": subject_id,
+        "impression": prompt["short"],
+        "findings": prompt["long"],
+    }
+
+
 def _process_subjects(subjects, input_dir, label_dir, atlas_dir, args, rng, start_idx):
-    """Run prompt composer on a list of subjects, returning (entries, next_idx)."""
-    entries = []
-    idx = start_idx
-    for subject in tqdm(subjects, desc="Processing subjects"):
-        subject_id = f"{args.subject_prefix}{idx}"
-        image_path = input_dir / f"{subject}{args.file_extension}"
-        label_path = label_dir / f"{subject}{args.file_extension}"
+    """Run prompt composer on a list of subjects, returning (entries, next_idx).
 
-        if not image_path.exists():
-            print(f"Warning: Image file {image_path} does not exist. Skipping subject {subject}.")
-            continue
-        if not label_path.exists():
-            print(f"Warning: Label file {label_path} does not exist. Skipping subject {subject}.")
-            continue
+    When ``args.num_workers != 1`` the subjects are processed in parallel
+    using a :class:`~concurrent.futures.ProcessPoolExecutor`.
+    """
+    # Pre-build per-subject arguments so indices are deterministic.
+    jobs: list[tuple[str, str, str, str]] = []  # (subject, subject_id, image, label)
+    for i, subject in enumerate(subjects):
+        sid = f"{args.subject_prefix}{start_idx + i}"
+        img = str(input_dir / f"{subject}{args.file_extension}")
+        lbl = str(label_dir / f"{subject}{args.file_extension}")
+        jobs.append((subject, sid, img, lbl))
 
-        prompt = compose_radiology_prompts(
-            image_path=image_path,
-            label_path=label_path,
-            atlas_dir=atlas_dir,
-            enhancing_label=args.enhancing_label,
-            nonenhancing_label=args.nonenhancing_label,
-            edema_label=args.oedema_label,
-            z_dim=args.z_dim,
-            cf=args.cf,
-            t_ependymal=args.t_ependymal,
-            t_wm=args.t_wm,
-            resolution=args.resolution,
-            midline_thresh=args.midline_thresh,
-            enh_quality_thresh=args.enh_quality_thresh,
-            cyst_thresh=args.cyst_thresh,
-            cortical_thresh=args.cortical_thresh,
-            focus_thresh=args.focus_thresh,
-            num_components_bin_thresh=args.num_components_bin_thresh,
-            num_components_cet_thresh=args.num_components_cet_thresh,
-            shuffle_order=args.shuffle_prompt_order,
-            seed=args.seed,
-            verbose=args.verbose,
-        )
+    # Shared keyword arguments forwarded to compose_radiology_prompts.
+    prompt_kwargs = dict(
+        enhancing_label=args.enhancing_label,
+        nonenhancing_label=args.nonenhancing_label,
+        edema_label=args.oedema_label,
+        z_dim=args.z_dim,
+        cf=args.cf,
+        t_ependymal=args.t_ependymal,
+        t_wm=args.t_wm,
+        resolution=args.resolution,
+        midline_thresh=args.midline_thresh,
+        enh_quality_thresh=args.enh_quality_thresh,
+        cyst_thresh=args.cyst_thresh,
+        cortical_thresh=args.cortical_thresh,
+        focus_thresh=args.focus_thresh,
+        num_components_bin_thresh=args.num_components_bin_thresh,
+        num_components_cet_thresh=args.num_components_cet_thresh,
+        shuffle_order=args.shuffle_prompt_order,
+        seed=args.seed,
+        verbose=args.verbose,
+    )
 
-        entries.append({
-            "image": str(image_path),
-            "label": str(label_path),
-            "subject_id": subject_id,
-            "impression": prompt["short"],
-            "findings": prompt["long"],
-        })
-        idx += 1
-    return entries, idx
+    n_workers = args.num_workers
+    if n_workers == 0:
+        n_workers = os.cpu_count() or 1
+
+    entries: list[Optional[dict]] = [None] * len(jobs)
+
+    if n_workers == 1:
+        # ── serial path (simpler, easier to debug) ──────────────────────
+        for pos, (subj, sid, img, lbl) in enumerate(tqdm(jobs, desc="Processing subjects")):
+            entries[pos] = _process_one(subj, sid, img, lbl, str(atlas_dir), prompt_kwargs)
+    else:
+        # ── parallel path ────────────────────────────────────────────────
+        atlas_str = str(atlas_dir)
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            future_to_pos = {
+                pool.submit(_process_one, subj, sid, img, lbl, atlas_str, prompt_kwargs): pos
+                for pos, (subj, sid, img, lbl) in enumerate(jobs)
+            }
+            with tqdm(total=len(jobs), desc=f"Processing subjects ({n_workers} workers)") as pbar:
+                for future in as_completed(future_to_pos):
+                    pos = future_to_pos[future]
+                    try:
+                        entries[pos] = future.result()
+                    except Exception as exc:
+                        subj = jobs[pos][0]
+                        print(f"Warning: {subj} failed: {exc}")
+                    pbar.update(1)
+
+    # Filter out skipped / failed subjects, preserving order.
+    entries = [e for e in entries if e is not None]
+    next_idx = start_idx + len(entries)
+    return entries, next_idx
 
 
 def main(args=None):
