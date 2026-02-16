@@ -31,7 +31,8 @@ DATALIST=""  # e.g. ${HOME}/text2glioma/datalist_task03.json
 
 # ── Pre-flight ──────────────────────────────────────────────────────
 export TORCH_HOME=${RUN_DIR}/cache
-mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
 
 if [ -z "$DATALIST" ]; then
     if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
