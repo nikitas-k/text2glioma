@@ -48,6 +48,10 @@ class Stage1Wrapper(nn.Module):
 
         return z
 
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent back to image space (delegates to inner model)."""
+        return self.model.decode(z)
+
 # ── Mask conditioning utilities ──────────────────────────────────────────────
 
 def masks_to_onehot(labels: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
@@ -570,6 +574,7 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
     if local_files_only:
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     tokenizer_subfolder = conditioning_config.get("tokenizer_subfolder", "tokenizer")
     text_encoder_subfolder = conditioning_config.get("text_encoder_subfolder", "text_encoder")
