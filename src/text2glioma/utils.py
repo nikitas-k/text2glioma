@@ -640,6 +640,9 @@ def log_ldm_sample_unconditioned(
     latent_channels: int = 3,
     num_mask_classes: int = 4,
 ) -> None:
+    # Only rank 0 has a writer; skip the expensive sampling on other ranks.
+    if writer is None:
+        return
     latent_spatial = spatial_shape[1:]  # strip channel dim → (D', H', W')
     latent = torch.randn((1, latent_channels) + latent_spatial)
     latent = latent.to(device)
