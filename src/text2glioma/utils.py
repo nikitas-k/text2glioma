@@ -532,7 +532,7 @@ def _get_rank() -> int:
         return dist.get_rank()
     return 0
 
-def print_gpu_memory_report(rank: int | None = None):
+def print_gpu_memory_report(rank: Optional[int] = None):
     """Print GPU memory utilisation.  Only prints on rank 0 (or when rank is explicitly 0)."""
     if rank is None:
         rank = _get_rank()
