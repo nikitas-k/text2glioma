@@ -526,34 +526,49 @@ def get_model(model_type, config, pretrained=False, from_file=None):
     
     return model
 
-def print_gpu_memory_report():
+def _get_rank() -> int:
+    """Return the current distributed rank, or 0 if not distributed."""
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+def print_gpu_memory_report(rank: int | None = None):
+    """Print GPU memory utilisation.  Only prints on rank 0 (or when rank is explicitly 0)."""
+    if rank is None:
+        rank = _get_rank()
+    if rank != 0:
+        return
     if torch.cuda.is_available() and _HAS_PYNVML:
         nvsmi = nvidia_smi.getInstance()
         data = nvsmi.DeviceQuery("memory.used, memory.total, utilization.gpu")["gpu"]
-        print("Memory report")
+        print(f"[rank-{rank}] [INFO] Memory report")
         for i, data_by_rank in enumerate(data):
             mem_report = data_by_rank["fb_memory_usage"]
-            print(f"gpu:{i} mem(%) {int(mem_report['used'] * 100.0 / mem_report['total'])}")
+            print(f"[rank-{rank}] [INFO] gpu:{i} mem(%) {int(mem_report['used'] * 100.0 / mem_report['total'])}")
     elif torch.cuda.is_available():
+        print(f"[rank-{rank}] [INFO] Memory report")
         for i in range(torch.cuda.device_count()):
             vram_used = torch.cuda.memory_allocated(i) // (1024**2)
             vram_total = torch.cuda.get_device_properties(i).total_mem // (1024**2)
-            print(f"gpu:{i} mem(%) {int(vram_used * 100.0 / max(vram_total, 1))}")
+            print(f"[rank-{rank}] [INFO] gpu:{i} mem(%) {int(vram_used * 100.0 / max(vram_total, 1))}")
 
 def print_resource_usage(epoch: int = None):
+    rank = _get_rank()
+    if rank != 0:
+        return
     if epoch:
-        print(f"Epoch: {epoch}")
-    print("--- Resource Usage ---")
+        print(f"[rank-0] [INFO] Epoch: {epoch}")
+    print("[rank-0] [INFO] --- Resource Usage ---")
     cpu_percent = psutil.cpu_percent()
     ram = psutil.virtual_memory()
-    print(f"CPU Usage: {cpu_percent:0.2f}% | RAM Usage: {ram.percent:0.2f}% ({ram.used // (1024**2):0.3f}MB/{ram.total // (1024**2):0.3f}MB)")
+    print(f"[rank-0] [INFO] CPU Usage: {cpu_percent:0.2f}% | RAM Usage: {ram.percent:0.2f}% ({ram.used // (1024**2):0.3f}MB/{ram.total // (1024**2):0.3f}MB)")
     if torch.cuda.is_available():
         cuda_device_list = []
         for i in range(torch.cuda.device_count()):
             gpu_name = torch.cuda.get_device_name(i)
             vram_used = torch.cuda.memory_allocated(i) // (1024**2)
             vram_total = torch.cuda.get_device_properties(i).total_memory // (1024**2)
-            print(f"GPU {i}: {gpu_name} | VRAM Usage: {vram_used:0.2f}MB/{vram_total:0.2f}MB")
+            print(f"[rank-0] [INFO] GPU {i}: {gpu_name} | VRAM Usage: {vram_used:0.2f}MB/{vram_total:0.2f}MB")
             cuda_device_list.append({
                 'device': gpu_name,
                 "vram_used": vram_used,

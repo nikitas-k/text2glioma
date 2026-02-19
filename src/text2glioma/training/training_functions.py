@@ -131,8 +131,8 @@ def train_autoencoder(
                 print(f"New best val loss {val_loss}")
                 best_loss = val_loss
 
-    print(f"Training finished!")
-    print(f"Saving final model...")
+    print(f"[rank-0] [INFO] Training finished!")
+    print(f"[rank-0] [INFO] Saving final model...")
     torch.save(raw_model.state_dict(), str(run_dir / "final_model.pth"))
 
     return val_loss
@@ -441,7 +441,11 @@ def train_ldm(
         num_mask_classes=num_mask_classes,
         latent_channels=latent_channels,
     )
-    print(f"epoch {start_epoch} val loss: {val_loss:.4f}")
+
+    # Determine rank for gated printing
+    _is_main = writer_train is not None  # only rank 0 has a writer
+    if _is_main:
+        print(f"[rank-0] [INFO] epoch {start_epoch} val loss: {val_loss:.4f}")
 
     for epoch in range(start_epoch, n_epochs):
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
@@ -484,7 +488,8 @@ def train_ldm(
                 latent_channels=latent_channels,
             )
 
-            print(f"epoch {epoch + 1} val loss: {val_loss:.4f}")
+            if _is_main:
+                print(f"[rank-0] [INFO] epoch {epoch + 1} val loss: {val_loss:.4f}")
             print_gpu_memory_report()
 
             # Save checkpoint
@@ -500,8 +505,9 @@ def train_ldm(
                 best_loss = val_loss
                 torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
 
-    print(f"Training finished!")
-    print(f"Saving final model...")
+    if _is_main:
+        print(f"[rank-0] [INFO] Training finished!")
+        print(f"[rank-0] [INFO] Saving final model...")
     torch.save(raw_model.state_dict(), str(run_dir / "final_model.pth"))
 
     return val_loss
@@ -531,6 +537,7 @@ def train_epoch_ldm(
 
     # Only show progress bar on rank 0 to avoid interleaved output
     is_main = not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+    rank = 0 if not (torch.distributed.is_available() and torch.distributed.is_initialized()) else torch.distributed.get_rank()
     pbar = tqdm(enumerate(loader), total=len(loader), disable=not is_main)
     for step, x in pbar:
         images = x["image"].to(device)
