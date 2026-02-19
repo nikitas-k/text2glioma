@@ -230,16 +230,6 @@ def main():
     ldm = ldm.to(device)
     stage1 = stage1.to(device)
 
-    if distributed:
-        if device.type == "cuda":
-            ldm = torch.nn.parallel.DistributedDataParallel(
-                ldm,
-                device_ids=[device.index],
-                output_device=device.index,
-                find_unused_parameters=False,
-            )
-        else:
-            ldm = torch.nn.parallel.DistributedDataParallel(ldm, find_unused_parameters=False)
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
     scaler = torch.amp.GradScaler()
     

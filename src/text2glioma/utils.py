@@ -196,6 +196,43 @@ def stage1_ify(stage1 : Any) -> Any:
         stage1 = Stage1Wrapper(stage1)
     return stage1
 
+@torch.no_grad()
+def compute_scale_factor(
+    stage1: nn.Module,
+    loader,
+    device: torch.device,
+    max_batches: int = 50,
+) -> float:
+    """Compute 1 / std(latents) over a subset of the training set.
+
+    This normalises the VAE latent space to approximately unit variance so
+    the diffusion noise schedule works correctly.  Analogous to the
+    ``scale_factor = 0.18215`` constant in Stable Diffusion.
+
+    Args:
+        stage1: Frozen Stage-1 VAE (or Stage1Wrapper).
+        loader: Training DataLoader.
+        device: Device to run on.
+        max_batches: Number of batches to estimate from (default 50).
+
+    Returns:
+        Scalar scale factor ``1 / std(z)``.
+    """
+    stage1.eval()
+    all_z = []
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        images = batch["image"].to(device)
+        z = stage1(images)  # [B, C, D', H', W']
+        all_z.append(z.flatten())
+    all_z = torch.cat(all_z)
+    std = all_z.std().item()
+    scale_factor = 1.0 / std
+    print(f"[scale_factor] latent std = {std:.4f}  →  scale_factor = {scale_factor:.4f}")
+    return scale_factor
+
+
 def load_config(config_path):
     
     with open(config_path, 'r') as f:
@@ -659,6 +696,12 @@ def log_ldm_sample_unconditioned(
     )
     empty_tokens = {k: v.to(device) for k, v in empty_tokens.items()}
     prompt_embeds = get_text_encoder_hidden_states(text_encoder(**empty_tokens))
+
+    # CRITICAL: configure the scheduler for inference (sets internal
+    # timestep spacing based on num_inference_steps). Without this,
+    # scheduler.timesteps and scheduler.step() are not properly initialised.
+    num_inference_steps = min(200, scheduler.num_train_timesteps)
+    scheduler.set_timesteps(num_inference_steps)
 
     for t in tqdm(scheduler.timesteps, ncols=70):
         noise_pred = model(x=model_input, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)

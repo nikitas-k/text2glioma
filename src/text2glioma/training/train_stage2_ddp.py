@@ -39,6 +39,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from text2glioma.training.training_functions import train_ldm
 from text2glioma.utils import (
+    compute_scale_factor,
     get_model,
     load_config,
     load_text_encoder_and_tokenizer,
@@ -90,8 +91,9 @@ def parse_args() -> argparse.Namespace:
                     help="Distributed backend (nccl for GPU, gloo for CPU/fallback).")
     p.add_argument("--find_unused_parameters", action="store_true", default=False,
                     help="Pass find_unused_parameters=True to DDP.")
-    p.add_argument("--scale_factor", type=float, default=1.0,
-                    help="Latent scale factor (default 1.0).")
+    p.add_argument("--scale_factor", type=float, default=None,
+                    help="Latent scale factor. If omitted, auto-computed as "
+                         "1/std(latents) over training data (recommended).")
     p.add_argument("--train_spec", type=str, default="impression",
                     choices=["impression", "findings"],
                     help="Text field used for conditioning.")
@@ -396,6 +398,19 @@ def main():
     scaler = torch.amp.GradScaler()
 
     # ------------------------------------------------------------------
+    # Latent scale factor
+    # ------------------------------------------------------------------
+    if args.scale_factor is not None:
+        scale_factor = args.scale_factor
+        print0(f"Using user-specified scale_factor = {scale_factor:.4f}", rank)
+    else:
+        print0("Auto-computing latent scale_factor from training data …", rank)
+        scale_factor = compute_scale_factor(
+            stage1, train_loader, device, max_batches=50,
+        )
+        print0(f"Computed scale_factor = {scale_factor:.4f}", rank)
+
+    # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
     run_dir = Path(args.run_dir) / "text2glioma" / "ldm_stage2"
@@ -468,7 +483,7 @@ def main():
         writer_train=writer_train,
         writer_val=writer_val,
         run_dir=run_dir,
-        scale_factor=args.scale_factor,
+        scale_factor=scale_factor,
         num_mask_classes=config.get("mask", {}).get("num_classes", 4),
         mask_dropout_p=mask_dropout,
         latent_channels=config.get("model", {}).get("latent_channels", 3),

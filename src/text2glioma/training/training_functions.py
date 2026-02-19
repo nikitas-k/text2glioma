@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 from collections import OrderedDict
+import math
 
 from tqdm import tqdm
 
@@ -397,10 +398,29 @@ def train_ldm(
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
     latent_channels: int = 3,
+    warmup_epochs: int = 10,
 ) -> float:
     raw_model = model.module if hasattr(model, "module") else model
 
     best_loss = float("inf")
+
+    # ── LR schedule: linear warmup → cosine decay ────────────────────
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * n_epochs
+    warmup_steps = steps_per_epoch * warmup_epochs
+    base_lr = optimizer.param_groups[0]["lr"]
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # Fast-forward scheduler if resuming
+    if start_epoch > 0:
+        for _ in range(start_epoch * steps_per_epoch):
+            lr_scheduler.step()
 
     val_loss = eval_ldm(
         model=model,
@@ -440,6 +460,7 @@ def train_ldm(
             scale_factor=scale_factor,
             num_mask_classes=num_mask_classes,
             mask_dropout_p=mask_dropout_p,
+            lr_scheduler=lr_scheduler,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -500,6 +521,8 @@ def train_epoch_ldm(
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
+    max_grad_norm: float = 1.0,
+    lr_scheduler: Any = None,
 ) -> None:
     model.train()
 
@@ -544,8 +567,13 @@ def train_epoch_ldm(
         losses = OrderedDict(loss=loss)
 
         scaler.scale(losses["loss"]).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
+
+        if lr_scheduler is not None:
+            lr_scheduler.step()
 
         if writer is not None:
             writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)
