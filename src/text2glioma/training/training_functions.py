@@ -299,6 +299,7 @@ def eval_autoencoder(
 
     adv_loss = PatchAdversarialLoss(criterion="least_squares", no_activation_leastsq=True)
     total_losses = OrderedDict()
+    n_samples = 0
     for x in loader:
         images = x["image"].to(device)
 
@@ -355,8 +356,10 @@ def eval_autoencoder(
         for k, v in losses.items():
             total_losses[k] = total_losses.get(k, 0) + v.item() * images.shape[0]
 
+        n_samples += images.shape[0]
+
     for k in total_losses.keys():
-        total_losses[k] /= len(loader.dataset)
+        total_losses[k] /= max(n_samples, 1)
 
     if writer is not None:
         for k, v in total_losses.items():
@@ -526,7 +529,9 @@ def train_epoch_ldm(
 ) -> None:
     model.train()
 
-    pbar = tqdm(enumerate(loader), total=len(loader))
+    # Only show progress bar on rank 0 to avoid interleaved output
+    is_main = not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+    pbar = tqdm(enumerate(loader), total=len(loader), disable=not is_main)
     for step, x in pbar:
         images = x["image"].to(device)
         labels = x["label"].to(device)
@@ -603,6 +608,7 @@ def eval_ldm(
 ) -> float:
     model.eval()
     total_losses = OrderedDict()
+    n_samples = 0
 
     for x in loader:
         images = x["image"].to(device)
@@ -641,11 +647,14 @@ def eval_ldm(
         loss = loss.mean()
         losses = OrderedDict(loss=loss)
 
+        n_samples += images.shape[0]
         for k, v in losses.items():
             total_losses[k] = total_losses.get(k, 0) + v.item() * images.shape[0]
 
+    # Normalise by samples this rank actually processed (not full dataset
+    # size, which over-counts under DDP sharded loaders).
     for k in total_losses.keys():
-        total_losses[k] /= len(loader.dataset)
+        total_losses[k] /= max(n_samples, 1)
 
     if writer is not None:
         for k, v in total_losses.items():

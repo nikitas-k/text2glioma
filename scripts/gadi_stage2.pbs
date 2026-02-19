@@ -62,7 +62,7 @@ torchrun --standalone --nproc_per_node=4 \
     --stage1_uri   "$STAGE1_URI" \
     --run_dir      "$RUN_DIR" \
     $EXTRA_ARGS \
-    --batch_size 4 \
+    --batch_size 2 \
     --num_epochs 1500 \
     --val_interval 10 \
     --pin_memory \
