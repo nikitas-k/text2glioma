@@ -139,7 +139,8 @@ def get_train_transform(channel_reorder: bool = True) -> T.Compose:
     xforms.extend([
         T.Orientationd(keys=["image"], axcodes="LPS"),
         T.CropForegroundd(keys=["image"], source_key="image"),
-        T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+        T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+        T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
         T.ScaleIntensityRangePercentilesd(
             keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
             channel_wise=True,
@@ -171,7 +172,8 @@ def get_val_transform(channel_reorder: bool = True) -> T.Compose:
     xforms.extend([
         T.Orientationd(keys=["image"], axcodes="LPS"),
         T.CropForegroundd(keys=["image"], source_key="image"),
-        T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+        T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+        T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
         T.ScaleIntensityRangePercentilesd(
             keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
             channel_wise=True,

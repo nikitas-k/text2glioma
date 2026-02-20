@@ -264,7 +264,8 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+                T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+                T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
                     channel_wise=True,
@@ -299,8 +300,8 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["label"], dtype=torch.float32),
                 T.Orientationd(keys=["image", "label"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image", "label"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
-                T.Resized(keys=["label"], spatial_size=(160, 224, 160), mode="nearest"),
+                T.SpatialPadd(keys=["image", "label"], spatial_size=(160, 224, 160), mode="constant"),
+                T.CenterSpatialCropd(keys=["image", "label"], roi_size=(160, 224, 160)),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
                     channel_wise=True,
@@ -339,8 +340,8 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["label"], dtype=torch.float32),
                 T.Orientationd(keys=["image", "label"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image", "label"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
-                T.Resized(keys=["label"], spatial_size=(160, 224, 160), mode="nearest"),
+                T.SpatialPadd(keys=["image", "label"], spatial_size=(160, 224, 160), mode="constant"),
+                T.CenterSpatialCropd(keys=["image", "label"], roi_size=(160, 224, 160)),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
                     channel_wise=True,
@@ -356,7 +357,8 @@ def get_dataloaders(
                 T.EnsureTyped(keys=["image"], dtype=torch.float32),
                 T.Orientationd(keys=["image"], axcodes="LPS"),
                 T.CropForegroundd(keys=["image"], source_key="image"),
-                T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+                T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+                T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
                 T.ScaleIntensityRangePercentilesd(
                     keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
                     channel_wise=True,
@@ -434,7 +436,8 @@ def get_experiment_dataloaders(
             T.EnsureTyped(keys=["image"], dtype=torch.float32),
             T.Orientationd(keys=["image"], axcodes="LPS"),
             T.CropForegroundd(keys=["image"], source_key="image"),
-            T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+            T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+            T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
             T.ScaleIntensityRangePercentilesd(
                 keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
             ),
@@ -464,7 +467,8 @@ def get_experiment_dataloaders(
             T.EnsureTyped(keys=["image"], dtype=torch.float32),
             T.Orientationd(keys=["image"], axcodes="LPS"),
             T.CropForegroundd(keys=["image"], source_key="image"),
-            T.Resized(keys=["image"], spatial_size=(160, 224, 160), mode="trilinear"),
+            T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
+            T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
             T.ScaleIntensityRangePercentilesd(
                 keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1
             ),
