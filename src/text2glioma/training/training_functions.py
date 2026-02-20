@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 from collections import OrderedDict
+from copy import deepcopy
 import math
 
 from tqdm import tqdm
@@ -402,22 +403,47 @@ def train_ldm(
     mask_dropout_p: float = 0.2,
     latent_channels: int = 3,
     warmup_epochs: int = 10,
+    ema_decay: float = 0.9999,
+    ema_state_dict: dict = None,
+    snr_gamma: float = 5.0,
 ) -> float:
     raw_model = model.module if hasattr(model, "module") else model
 
     best_loss = float("inf")
 
-    # ── LR schedule: linear warmup → cosine decay ────────────────────
+    # ── EMA (exponential moving average) ─────────────────────────────
+    ema_model = deepcopy(raw_model).eval()
+    for p in ema_model.parameters():
+        p.requires_grad_(False)
+    if ema_state_dict is not None:
+        ema_model.load_state_dict(ema_state_dict)
+        if _is_main:
+            print("[rank-0] [INFO] Loaded EMA state from checkpoint.")
+
+    # ── Pre-compute min-SNR weights (Hang et al., 2023) ────────────
+    # SNR(t) = alpha_bar(t) / (1 - alpha_bar(t))
+    # For v-prediction the per-timestep weight is:
+    #   w(t) = min(SNR(t), gamma) / SNR(t)  where gamma = snr_gamma (typically 5)
+    # This down-weights high-noise timesteps that produce noisy gradients.
+    alphas_cumprod = scheduler.alphas_cumprod.to(device)     # [T]
+    snr = alphas_cumprod / (1.0 - alphas_cumprod)            # [T]
+    # For v-prediction: weight = min(SNR, gamma) / SNR
+    # For epsilon-prediction: weight = min(SNR, gamma) / SNR
+    # (both reduce to clamping the effective weight at high-noise steps)
+    min_snr_weights = torch.clamp(snr, max=snr_gamma) / snr  # [T]
+    # ── LR schedule: linear warmup → cosine decay with min_lr floor ──
     steps_per_epoch = len(train_loader)
     total_steps = steps_per_epoch * n_epochs
     warmup_steps = steps_per_epoch * warmup_epochs
     base_lr = optimizer.param_groups[0]["lr"]
+    min_lr_ratio = 0.01  # LR never drops below 1% of base_lr
 
     def lr_lambda(current_step: int) -> float:
         if current_step < warmup_steps:
             return current_step / max(1, warmup_steps)
         progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return max(min_lr_ratio, cosine)
 
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     # Fast-forward scheduler if resuming
@@ -468,6 +494,9 @@ def train_ldm(
             num_mask_classes=num_mask_classes,
             mask_dropout_p=mask_dropout_p,
             lr_scheduler=lr_scheduler,
+            ema_model=ema_model,
+            ema_decay=ema_decay,
+            min_snr_weights=min_snr_weights,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -496,6 +525,7 @@ def train_ldm(
             checkpoint = {
                 "epoch": epoch + 1,
                 "diffusion": raw_model.state_dict(),
+                "ema": ema_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "best_loss": best_loss,
             }
@@ -504,11 +534,13 @@ def train_ldm(
             if val_loss <= best_loss:
                 best_loss = val_loss
                 torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
+                torch.save(ema_model.state_dict(), str(run_dir / "best_model_ema.pth"))
 
     if _is_main:
         print(f"[rank-0] [INFO] Training finished!")
         print(f"[rank-0] [INFO] Saving final model...")
     torch.save(raw_model.state_dict(), str(run_dir / "final_model.pth"))
+    torch.save(ema_model.state_dict(), str(run_dir / "final_model_ema.pth"))
 
     return val_loss
 
@@ -532,8 +564,12 @@ def train_epoch_ldm(
     mask_dropout_p: float = 0.2,
     max_grad_norm: float = 1.0,
     lr_scheduler: Any = None,
+    ema_model: Any = None,
+    ema_decay: float = 0.9999,
+    min_snr_weights: torch.Tensor = None,
 ) -> None:
     model.train()
+    raw_model = model.module if hasattr(model, "module") else model
 
     # Only show progress bar on rank 0 to avoid interleaved output
     is_main = not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
@@ -574,7 +610,18 @@ def train_epoch_ldm(
                 target = scheduler.get_velocity(e, noise, timesteps)
             elif scheduler.prediction_type == "epsilon":
                 target = noise
-            loss = F.mse_loss(noise_pred.float(), target.float())
+
+            # Per-sample MSE (reduce over all dims except batch)
+            mse = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+            mse = mse.mean(dim=list(range(1, mse.ndim)))  # [B]
+
+            # Min-SNR-γ weighting (Hang et al., 2023) — down-weights
+            # high-noise timesteps that produce noisy, unhelpful gradients.
+            if min_snr_weights is not None:
+                snr_w = min_snr_weights[timesteps]  # [B]
+                loss = (mse * snr_w).mean()
+            else:
+                loss = mse.mean()
 
         losses = OrderedDict(loss=loss)
 
@@ -586,6 +633,12 @@ def train_epoch_ldm(
 
         if lr_scheduler is not None:
             lr_scheduler.step()
+
+        # EMA update
+        if ema_model is not None:
+            with torch.no_grad():
+                for ema_p, model_p in zip(ema_model.parameters(), raw_model.parameters()):
+                    ema_p.data.mul_(ema_decay).add_(model_p.data, alpha=1.0 - ema_decay)
 
         if writer is not None:
             writer.add_scalar("lr", get_lr(optimizer), epoch * len(loader) + step)

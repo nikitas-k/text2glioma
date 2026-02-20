@@ -352,6 +352,19 @@ def main():
     print0("Initialising LDM …", rank)
     model_type = config["model"].get("name", "DiffusionModelUNet")
     ldm = get_model(model_type, config)
+
+    # ── Zero-init mask channels in the first conv layer ──────────────
+    # The UNet's conv_in accepts [latent_ch + mask_ch] channels.  With
+    # random init the mask channels inject noise that the model must
+    # first learn to suppress, slowing convergence dramatically.  By
+    # zeroing the mask-channel weights the model starts as if it were
+    # a latent-only model and *gradually* learns to use the mask.
+    latent_ch = config["model"].get("latent_channels", 3)
+    with torch.no_grad():
+        first_conv = ldm.conv_in.conv  # nn.Conv3d(7, 256, 3)
+        first_conv.weight[:, latent_ch:].zero_()
+        print0(f"Zero-initialised conv_in mask channels [{latent_ch}:{first_conv.weight.shape[1]}]", rank)
+
     ldm = ldm.to(device)
 
     if distributed:
@@ -432,6 +445,7 @@ def main():
     start_epoch = 0
     ckpt_path = run_dir / "checkpoint.pth"
 
+    ema_state_dict = None
     if args.resume and ckpt_path.exists():
         print0(f"Resuming from {ckpt_path}", rank)
         ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -441,6 +455,9 @@ def main():
         ldm.load_state_dict(ldm_state)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"]
+        ema_state_dict = ckpt.get("ema")
+        if ema_state_dict is not None:
+            print0("  Loaded EMA state from checkpoint.", rank)
         print0(f"Resumed at epoch {start_epoch}", rank)
     else:
         print0("Starting fresh training.", rank)
@@ -487,6 +504,7 @@ def main():
         num_mask_classes=config.get("mask", {}).get("num_classes", 4),
         mask_dropout_p=mask_dropout,
         latent_channels=config.get("model", {}).get("latent_channels", 3),
+        ema_state_dict=ema_state_dict,
     )
 
     print0(f"Training finished.  Final val loss: {val_loss:.4f}", rank)

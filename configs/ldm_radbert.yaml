@@ -15,7 +15,7 @@
 
 model:
   name: "DiffusionModelUNet"
-  base_lr: 0.0001
+  base_lr: 0.00025
   latent_channels: 3       # channels from VAE latent (must match stage1 latent_channels)
   params:
     spatial_dims: 3
