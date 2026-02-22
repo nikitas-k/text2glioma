@@ -8,7 +8,8 @@ Reports per-subject:
   - Brain bounding box after foreground crop (voxels)
   - Per-channel spectral sharpness (high-freq energy ratio) — detects upsampled data
   - Per-channel Laplacian variance — proxy for edge sharpness
-  - Flags outliers (resolution, dimensions, low effective resolution)
+  - Per-channel FWHM (mm) — same algorithm as wb_command -volume-estimate-fwhm
+  - Flags outliers (resolution, dimensions, low effective resolution, high FWHM)
 
 Usage (on Gadi or wherever the NIfTIs live)::
 
@@ -18,6 +19,10 @@ Usage (on Gadi or wherever the NIfTIs live)::
 
     # Full sharpness audit with CSV output:
     python scripts/audit_datalist.py --datalist datalist_N1511.json --sharpness --csv audit.csv
+
+    # FWHM estimation (same algorithm as wb_command -volume-estimate-fwhm):
+    python scripts/audit_datalist.py --datalist datalist_N1511.json --fwhm --csv audit.csv
+    python scripts/audit_datalist.py --datalist datalist_N1511.json --fwhm --fwhm-threshold 3.5
 """
 
 from __future__ import annotations
@@ -137,10 +142,86 @@ def per_channel_sharpness(data: np.ndarray) -> list[dict]:
     return results
 
 
+def estimate_fwhm(vol: np.ndarray, pixdim: np.ndarray) -> list[float]:
+    """Estimate FWHM (mm) per spatial axis via normalised autocorrelation.
+
+    Implements the same algorithm as ``wb_command -volume-estimate-fwhm``
+    (Forman et al., 1995).  Higher FWHM → smoother / lower effective resolution.
+
+    Parameters
+    ----------
+    vol : 3-D array (single channel, already loaded).
+    pixdim : array-like, length 3 — voxel sizes in mm.
+
+    Returns
+    -------
+    [fwhm_x, fwhm_y, fwhm_z] in mm.  0.0 if estimation fails on an axis.
+    """
+    mask = vol != 0
+    if mask.sum() < 100:
+        return [0.0, 0.0, 0.0]
+
+    d = vol.astype(np.float64)
+    d -= d[mask].mean()
+    d[~mask] = 0.0
+
+    fwhm: list[float] = []
+    for ax in range(3):
+        s1 = [slice(None)] * 3
+        s2 = [slice(None)] * 3
+        s1[ax] = slice(None, -1)
+        s2[ax] = slice(1, None)
+
+        pair_mask = mask[tuple(s1)] & mask[tuple(s2)]
+        v1 = d[tuple(s1)][pair_mask]
+        v2 = d[tuple(s2)][pair_mask]
+
+        denom = np.sum(v1 ** 2)
+        if denom == 0 or len(v1) == 0:
+            fwhm.append(0.0)
+            continue
+
+        rho = float(np.sum(v1 * v2) / denom)
+        if rho <= 0.0 or rho >= 1.0:
+            fwhm.append(0.0)
+            continue
+
+        fwhm_vox = np.sqrt(-4.0 * np.log(2.0) / np.log(rho))
+        fwhm.append(float(fwhm_vox * pixdim[ax]))
+
+    return fwhm
+
+
+def per_channel_fwhm(data: np.ndarray, pixdim: np.ndarray) -> list[dict]:
+    """Estimate FWHM (mm) for each channel in a 3-D or 4-D volume.
+
+    Returns list of dicts with keys:
+        modality, fwhm_x, fwhm_y, fwhm_z, fwhm_mean.
+    """
+    if data.ndim == 3:
+        data = data[..., np.newaxis]
+
+    results = []
+    for ch in range(min(data.shape[-1], 4)):
+        mod = MODALITY_NAMES[ch] if ch < len(MODALITY_NAMES) else f"ch{ch}"
+        fwhm_xyz = estimate_fwhm(data[:, :, :, ch], pixdim)
+        nonzero = [f for f in fwhm_xyz if f > 0]
+        fwhm_mean = float(np.mean(nonzero)) if nonzero else 0.0
+        results.append({
+            "modality": mod,
+            "fwhm_x": fwhm_xyz[0],
+            "fwhm_y": fwhm_xyz[1],
+            "fwhm_z": fwhm_xyz[2],
+            "fwhm_mean": fwhm_mean,
+        })
+    return results
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
-               include_labels: bool) -> dict:
+               include_labels: bool, do_fwhm: bool = False,
+               fwhm_threshold: float = 4.0) -> dict:
     """Process a single datalist entry. Must be picklable for multiprocessing."""
     img_path = item["image"]
     subj_id = item.get("subject_id", Path(img_path).stem)
@@ -178,6 +259,12 @@ def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
         ch_sharp = per_channel_sharpness(data)
         result["ch_sharp"] = ch_sharp
 
+    # --- Per-channel FWHM ---
+    ch_fwhm = []
+    if do_fwhm:
+        ch_fwhm = per_channel_fwhm(data, np.array(pixdim))
+        result["ch_fwhm"] = ch_fwhm
+
     # --- Flags ---
     subj_flags = []
 
@@ -204,6 +291,12 @@ def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
         for cs in ch_sharp:
             if cs["hf_ratio"] < 0.35:
                 subj_flags.append(f"LOW_HF_{cs['modality']}({cs['hf_ratio']:.3f})")
+
+    if ch_fwhm:
+        for cf in ch_fwhm:
+            if cf["fwhm_mean"] > fwhm_threshold:
+                subj_flags.append(
+                    f"HIGH_FWHM_{cf['modality']}({cf['fwhm_mean']:.1f}mm)")
 
     result["flags"] = subj_flags
     result["flag_str"] = ", ".join(subj_flags) if subj_flags else "ok"
@@ -239,6 +332,14 @@ def main():
     parser.add_argument("--sharpness", action="store_true", default=False,
                         help="Compute per-channel spectral sharpness and Laplacian "
                              "variance (slower — loads full image data for FFT).")
+    parser.add_argument("--fwhm", action="store_true", default=False,
+                        help="Estimate per-channel FWHM (mm) via normalised spatial "
+                             "autocorrelation (same algorithm as wb_command "
+                             "-volume-estimate-fwhm).  Flags subjects exceeding "
+                             "--fwhm-threshold.")
+    parser.add_argument("--fwhm-threshold", type=float, default=4.0,
+                        help="Mean FWHM (mm) above which a channel is flagged as "
+                             "HIGH_FWHM (default: 4.0).")
     parser.add_argument("--workers", "-j", type=int, default=8,
                         help="Number of parallel workers (default: 8).")
     args = parser.parse_args()
@@ -274,7 +375,8 @@ def main():
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         future_to_idx = {
             pool.submit(_audit_one, entry, crop_target, args.sharpness,
-                        args.include_labels): idx
+                        args.include_labels, args.fwhm,
+                        args.fwhm_threshold): idx
             for idx, entry in enumerate(entries)
         }
         for future in as_completed(future_to_idx):
@@ -297,6 +399,7 @@ def main():
     all_shapes = []
     all_bbox_extents = []
     all_sharpness = []
+    all_fwhm = []
     csv_rows = []
     flags: List[str] = []
 
@@ -319,6 +422,10 @@ def main():
         if ch_sharp:
             all_sharpness.append(ch_sharp)
 
+        ch_fwhm = r.get("ch_fwhm", [])
+        if ch_fwhm:
+            all_fwhm.append(ch_fwhm)
+
         subj_flags = r["flags"]
         flag_str = r["flag_str"]
         if subj_flags:
@@ -331,10 +438,17 @@ def main():
                 for cs in ch_sharp
             )
 
+        fwhm_str = ""
+        if ch_fwhm:
+            fwhm_str = "  " + "  ".join(
+                f"{cf['modality']}:fwhm={cf['fwhm_mean']:.1f}mm"
+                for cf in ch_fwhm
+            )
+
         print(
             f"{i+1:5d}  {subj_id:<20s}  {split:<10s}  "
             f"{r['shape']:>20s}  {r['pixdim_str']:>18s}  "
-            f"{r['bbox_str']:>20s}  {flag_str}{sharp_str}"
+            f"{r['bbox_str']:>20s}  {flag_str}{sharp_str}{fwhm_str}"
         )
 
         # CSV row
@@ -356,6 +470,12 @@ def main():
                 for cs in ch_sharp:
                     csv_row[f"{cs['modality']}_hf_ratio"] = f"{cs['hf_ratio']:.4f}"
                     csv_row[f"{cs['modality']}_lap_var"] = f"{cs['lap_var']:.4f}"
+            if ch_fwhm:
+                for cf in ch_fwhm:
+                    csv_row[f"{cf['modality']}_fwhm_x"] = f"{cf['fwhm_x']:.3f}"
+                    csv_row[f"{cf['modality']}_fwhm_y"] = f"{cf['fwhm_y']:.3f}"
+                    csv_row[f"{cf['modality']}_fwhm_z"] = f"{cf['fwhm_z']:.3f}"
+                    csv_row[f"{cf['modality']}_fwhm_mean"] = f"{cf['fwhm_mean']:.3f}"
             csv_rows.append(csv_row)
 
         # Label bbox
@@ -441,6 +561,26 @@ def main():
                 print(f"    Lap var:   min={lv_arr.min():.2f}  P25={np.percentile(lv_arr,25):.2f}  "
                       f"median={np.median(lv_arr):.2f}  P75={np.percentile(lv_arr,75):.2f}  "
                       f"max={lv_arr.max():.2f}")
+
+    # FWHM summary
+    if all_fwhm:
+        fwhm_thresh = args.fwhm_threshold
+        print(f"\nPer-channel FWHM statistics (mm)  [threshold={fwhm_thresh}]:")
+        for ch_idx, mod in enumerate(MODALITY_NAMES):
+            mean_vals = [s[ch_idx]["fwhm_mean"] for s in all_fwhm if ch_idx < len(s)]
+            x_vals = [s[ch_idx]["fwhm_x"] for s in all_fwhm if ch_idx < len(s)]
+            y_vals = [s[ch_idx]["fwhm_y"] for s in all_fwhm if ch_idx < len(s)]
+            z_vals = [s[ch_idx]["fwhm_z"] for s in all_fwhm if ch_idx < len(s)]
+            if mean_vals:
+                m_arr = np.array(mean_vals)
+                n_high = int(np.sum(m_arr > fwhm_thresh))
+                print(f"  {mod}:")
+                print(f"    Mean:  min={m_arr.min():.2f}  P25={np.percentile(m_arr,25):.2f}  "
+                      f"median={np.median(m_arr):.2f}  P75={np.percentile(m_arr,75):.2f}  "
+                      f"max={m_arr.max():.2f}  high(>{fwhm_thresh})={n_high}")
+                print(f"    X:     min={min(x_vals):.2f}  median={np.median(x_vals):.2f}  max={max(x_vals):.2f}")
+                print(f"    Y:     min={min(y_vals):.2f}  median={np.median(y_vals):.2f}  max={max(y_vals):.2f}")
+                print(f"    Z:     min={min(z_vals):.2f}  median={np.median(z_vals):.2f}  max={max(z_vals):.2f}")
 
     # Write CSV
     if args.csv and csv_rows:
