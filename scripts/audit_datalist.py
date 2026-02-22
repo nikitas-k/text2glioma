@@ -8,7 +8,7 @@ Reports per-subject:
   - Brain bounding box after foreground crop (voxels)
   - Per-channel spectral sharpness (high-freq energy ratio) — detects upsampled data
   - Per-channel Laplacian variance — proxy for edge sharpness
-  - Per-channel FWHM (mm) — same algorithm as wb_command -volume-estimate-fwhm
+  - Per-channel FWHM (mm) — via wb_command -volume-estimate-fwhm
   - Flags outliers (resolution, dimensions, low effective resolution, high FWHM)
 
 Usage (on Gadi or wherever the NIfTIs live)::
@@ -20,7 +20,7 @@ Usage (on Gadi or wherever the NIfTIs live)::
     # Full sharpness audit with CSV output:
     python scripts/audit_datalist.py --datalist datalist_N1511.json --sharpness --csv audit.csv
 
-    # FWHM estimation (same algorithm as wb_command -volume-estimate-fwhm):
+    # FWHM estimation (requires wb_command from Connectome Workbench):
     python scripts/audit_datalist.py --datalist datalist_N1511.json --fwhm --csv audit.csv
     python scripts/audit_datalist.py --datalist datalist_N1511.json --fwhm --fwhm-threshold 3.5
 """
@@ -30,6 +30,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
+import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -142,69 +144,57 @@ def per_channel_sharpness(data: np.ndarray) -> list[dict]:
     return results
 
 
-def estimate_fwhm(vol: np.ndarray, pixdim: np.ndarray) -> list[float]:
-    """Estimate FWHM (mm) per spatial axis via normalised autocorrelation.
+def _parse_wb_fwhm(stdout: str) -> list[float]:
+    """Parse ``wb_command -volume-estimate-fwhm`` stdout into [x, y, z].
 
-    Implements the same algorithm as ``wb_command -volume-estimate-fwhm``
-    (Forman et al., 1995).  Higher FWHM → smoother / lower effective resolution.
+    wb_command prints lines like::
+
+        FWHM: 2.345, 2.456, 3.567
+
+    or three separate numbers, depending on version.  This function handles
+    both formats and returns [0.0, 0.0, 0.0] on parse failure.
+    """
+    nums: list[float] = []
+    for token in stdout.replace(",", " ").split():
+        try:
+            nums.append(float(token))
+        except ValueError:
+            continue
+    if len(nums) >= 3:
+        return nums[:3]
+    return [0.0, 0.0, 0.0]
+
+
+def per_channel_fwhm(img_path: str, n_channels: int = 4,
+                     wb_cmd: str = "wb_command") -> list[dict]:
+    """Estimate FWHM (mm) per channel using ``wb_command -volume-estimate-fwhm``.
 
     Parameters
     ----------
-    vol : 3-D array (single channel, already loaded).
-    pixdim : array-like, length 3 — voxel sizes in mm.
+    img_path : path to a 3-D or 4-D NIfTI file.
+    n_channels : number of channels (subvolumes) to estimate (default 4).
+    wb_cmd : path or name of the wb_command binary.
 
     Returns
     -------
-    [fwhm_x, fwhm_y, fwhm_z] in mm.  0.0 if estimation fails on an axis.
-    """
-    mask = vol != 0
-    if mask.sum() < 100:
-        return [0.0, 0.0, 0.0]
-
-    d = vol.astype(np.float64)
-    d -= d[mask].mean()
-    d[~mask] = 0.0
-
-    fwhm: list[float] = []
-    for ax in range(3):
-        s1 = [slice(None)] * 3
-        s2 = [slice(None)] * 3
-        s1[ax] = slice(None, -1)
-        s2[ax] = slice(1, None)
-
-        pair_mask = mask[tuple(s1)] & mask[tuple(s2)]
-        v1 = d[tuple(s1)][pair_mask]
-        v2 = d[tuple(s2)][pair_mask]
-
-        denom = np.sum(v1 ** 2)
-        if denom == 0 or len(v1) == 0:
-            fwhm.append(0.0)
-            continue
-
-        rho = float(np.sum(v1 * v2) / denom)
-        if rho <= 0.0 or rho >= 1.0:
-            fwhm.append(0.0)
-            continue
-
-        fwhm_vox = np.sqrt(-4.0 * np.log(2.0) / np.log(rho))
-        fwhm.append(float(fwhm_vox * pixdim[ax]))
-
-    return fwhm
-
-
-def per_channel_fwhm(data: np.ndarray, pixdim: np.ndarray) -> list[dict]:
-    """Estimate FWHM (mm) for each channel in a 3-D or 4-D volume.
-
-    Returns list of dicts with keys:
+    List of dicts with keys:
         modality, fwhm_x, fwhm_y, fwhm_z, fwhm_mean.
     """
-    if data.ndim == 3:
-        data = data[..., np.newaxis]
-
     results = []
-    for ch in range(min(data.shape[-1], 4)):
+    for ch in range(min(n_channels, 4)):
         mod = MODALITY_NAMES[ch] if ch < len(MODALITY_NAMES) else f"ch{ch}"
-        fwhm_xyz = estimate_fwhm(data[:, :, :, ch], pixdim)
+        cmd = [
+            wb_cmd, "-volume-estimate-fwhm", str(img_path),
+            "-subvolume", str(ch + 1),   # wb_command is 1-indexed
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+            )
+            fwhm_xyz = _parse_wb_fwhm(proc.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            fwhm_xyz = [0.0, 0.0, 0.0]
+
         nonzero = [f for f in fwhm_xyz if f > 0]
         fwhm_mean = float(np.mean(nonzero)) if nonzero else 0.0
         results.append({
@@ -221,7 +211,8 @@ def per_channel_fwhm(data: np.ndarray, pixdim: np.ndarray) -> list[dict]:
 
 def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
                include_labels: bool, do_fwhm: bool = False,
-               fwhm_threshold: float = 4.0) -> dict:
+               fwhm_threshold: float = 4.0,
+               wb_cmd: str = "wb_command") -> dict:
     """Process a single datalist entry. Must be picklable for multiprocessing."""
     img_path = item["image"]
     subj_id = item.get("subject_id", Path(img_path).stem)
@@ -259,10 +250,11 @@ def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
         ch_sharp = per_channel_sharpness(data)
         result["ch_sharp"] = ch_sharp
 
-    # --- Per-channel FWHM ---
+    # --- Per-channel FWHM (via wb_command) ---
     ch_fwhm = []
     if do_fwhm:
-        ch_fwhm = per_channel_fwhm(data, np.array(pixdim))
+        n_ch = nii.shape[3] if len(nii.shape) > 3 else 1
+        ch_fwhm = per_channel_fwhm(img_path, n_channels=n_ch, wb_cmd=wb_cmd)
         result["ch_fwhm"] = ch_fwhm
 
     # --- Flags ---
@@ -333,10 +325,13 @@ def main():
                         help="Compute per-channel spectral sharpness and Laplacian "
                              "variance (slower — loads full image data for FFT).")
     parser.add_argument("--fwhm", action="store_true", default=False,
-                        help="Estimate per-channel FWHM (mm) via normalised spatial "
-                             "autocorrelation (same algorithm as wb_command "
-                             "-volume-estimate-fwhm).  Flags subjects exceeding "
-                             "--fwhm-threshold.")
+                        help="Estimate per-channel FWHM (mm) by calling "
+                             "wb_command -volume-estimate-fwhm (Connectome "
+                             "Workbench must be on PATH).  Flags subjects "
+                             "exceeding --fwhm-threshold.")
+    parser.add_argument("--wb-cmd", type=str, default="wb_command",
+                        help="Path to the wb_command binary (default: wb_command "
+                             "on PATH).")
     parser.add_argument("--fwhm-threshold", type=float, default=4.0,
                         help="Mean FWHM (mm) above which a channel is flagged as "
                              "HIGH_FWHM (default: 4.0).")
@@ -345,6 +340,20 @@ def main():
     args = parser.parse_args()
 
     crop_target = np.array(args.crop_target)
+
+    # Check wb_command availability if --fwhm requested
+    if args.fwhm:
+        wb_path = shutil.which(args.wb_cmd)
+        if wb_path is None:
+            print(f"ERROR: --fwhm requires '{args.wb_cmd}' but it was not found "
+                  f"on PATH.\nInstall Connectome Workbench: "
+                  f"https://www.humanconnectome.org/software/get-connectome-workbench",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"Using wb_command: {wb_path}")
+        wb_cmd = wb_path
+    else:
+        wb_cmd = args.wb_cmd
 
     with open(args.datalist) as f:
         datalist = json.load(f)
@@ -376,7 +385,7 @@ def main():
         future_to_idx = {
             pool.submit(_audit_one, entry, crop_target, args.sharpness,
                         args.include_labels, args.fwhm,
-                        args.fwhm_threshold): idx
+                        args.fwhm_threshold, wb_cmd): idx
             for idx, entry in enumerate(entries)
         }
         for future in as_completed(future_to_idx):
