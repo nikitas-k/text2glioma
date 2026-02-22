@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""Audit spatial metadata for every image in a datalist JSON.
+"""Audit spatial metadata and effective resolution for every image in a datalist JSON.
 
 Reports per-subject:
   - Voxel resolution (mm)
   - Volume dimensions (voxels)
   - Slice thickness (if anisotropic)
   - Brain bounding box after foreground crop (voxels)
-  - Flags outliers (resolution != 1mm iso, unusual dimensions, tight/large brain bbox)
+  - Per-channel spectral sharpness (high-freq energy ratio) — detects upsampled data
+  - Per-channel Laplacian variance — proxy for edge sharpness
+  - Flags outliers (resolution, dimensions, low effective resolution)
 
-Usage (on Gadi or wherever the NIfTIs live):
+Usage (on Gadi or wherever the NIfTIs live)::
+
     python scripts/audit_datalist.py --datalist datalist_N1511.json
     python scripts/audit_datalist.py --datalist datalist_N1511.json --split training
     python scripts/audit_datalist.py --datalist datalist_N1511.json --max-subjects 50
+
+    # Full sharpness audit with CSV output:
+    python scripts/audit_datalist.py --datalist datalist_N1511.json --sharpness --csv audit.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -24,6 +31,7 @@ from typing import List, Tuple
 
 import nibabel as nib
 import numpy as np
+from scipy.ndimage import laplace
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -66,6 +74,68 @@ def is_anisotropic(pixdim: np.ndarray, tol: float = 0.05) -> bool:
     return bool(np.ptp(pixdim[:3]) > tol)
 
 
+MODALITY_NAMES = ["T1", "T1CE", "T2", "FLAIR"]
+
+
+def spectral_sharpness(vol: np.ndarray) -> float:
+    """Ratio of high-frequency to total energy in 3D FFT.
+
+    A genuinely high-resolution volume has more high-frequency energy.
+    Upsampled (interpolated) volumes concentrate energy near DC.
+
+    Returns a scalar in [0, 1]; higher = sharper.
+    """
+    fft = np.fft.fftn(vol)
+    fft_shift = np.fft.fftshift(fft)
+    mag = np.abs(fft_shift)
+
+    shape = np.array(vol.shape)
+    centre = shape // 2
+    lf_frac = 0.15  # fraction of each axis counted as "low frequency"
+    slices = tuple(
+        slice(int(c - lf_frac * s), int(c + lf_frac * s))
+        for c, s in zip(centre, shape)
+    )
+    total = np.sum(mag ** 2)
+    if total == 0:
+        return 0.0
+    lf_mask = np.zeros_like(mag)
+    lf_mask[slices] = 1.0
+    hf_energy = np.sum((mag * (1 - lf_mask)) ** 2)
+    return float(hf_energy / total)
+
+
+def laplacian_variance(vol: np.ndarray) -> float:
+    """Variance of the Laplacian — higher = sharper edges."""
+    lap = laplace(vol.astype(np.float32))
+    return float(np.var(lap))
+
+
+def per_channel_sharpness(data: np.ndarray) -> list[dict]:
+    """Compute spectral sharpness and Laplacian variance per channel.
+
+    Parameters
+    ----------
+    data : array, shape (X, Y, Z, C) or (X, Y, Z)
+
+    Returns
+    -------
+    List of dicts with keys: modality, hf_ratio, lap_var.
+    """
+    if data.ndim == 3:
+        data = data[..., np.newaxis]
+
+    n_ch = data.shape[-1]
+    results = []
+    for ch in range(min(n_ch, 4)):
+        vol = data[:, :, :, ch]
+        mod = MODALITY_NAMES[ch] if ch < len(MODALITY_NAMES) else f"ch{ch}"
+        hf = spectral_sharpness(vol)
+        lv = laplacian_variance(vol)
+        results.append({"modality": mod, "hf_ratio": hf, "lap_var": lv})
+    return results
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -81,6 +151,11 @@ def main():
                         help="Target crop size for flagging (default: 160 224 160).")
     parser.add_argument("--include-labels", action="store_true",
                         help="Also report label bounding box (tumour extent).")
+    parser.add_argument("--csv", type=str, default=None,
+                        help="Write per-subject CSV with all metrics.")
+    parser.add_argument("--sharpness", action="store_true", default=False,
+                        help="Compute per-channel spectral sharpness and Laplacian "
+                             "variance (slower — loads full image data for FFT).")
     args = parser.parse_args()
 
     crop_target = np.array(args.crop_target)
@@ -111,6 +186,8 @@ def main():
     all_pixdims = []
     all_shapes = []
     all_bbox_extents = []
+    all_sharpness = []  # list of per-subject channel sharpness dicts
+    csv_rows = []
     flags: List[str] = []
 
     # Per-subject header
@@ -149,6 +226,12 @@ def main():
         all_shapes.append(shape)
         all_bbox_extents.append(bbox_ext)
 
+        # --- Per-channel sharpness (optional, slower) ---
+        ch_sharp = []
+        if args.sharpness:
+            ch_sharp = per_channel_sharpness(data)
+            all_sharpness.append(ch_sharp)
+
         # --- Flag outliers ---
         subj_flags = []
 
@@ -177,6 +260,13 @@ def main():
         if np.all(bbox_ext == 0):
             subj_flags.append("EMPTY_VOLUME")
 
+        # Effective resolution (spectral sharpness)
+        if ch_sharp:
+            for cs in ch_sharp:
+                if cs["hf_ratio"] < 0.35:
+                    subj_flags.append(
+                        f"LOW_HF_{cs['modality']}({cs['hf_ratio']:.3f})")
+
         flag_str = ", ".join(subj_flags) if subj_flags else "ok"
         if subj_flags:
             flags.extend(subj_flags)
@@ -184,11 +274,39 @@ def main():
         pixdim_str = f"{pixdim[0]:.3f}x{pixdim[1]:.3f}x{pixdim[2]:.3f}"
         bbox_str = "x".join(str(e) for e in bbox_ext)
 
+        sharp_str = ""
+        if ch_sharp:
+            sharp_str = "  " + "  ".join(
+                f"{cs['modality']}:hf={cs['hf_ratio']:.3f},lap={cs['lap_var']:.1f}"
+                for cs in ch_sharp
+            )
+
         print(
             f"{i+1:5d}  {subj_id:<20s}  {split:<10s}  "
             f"{full_shape_str:>20s}  {pixdim_str:>18s}  "
-            f"{bbox_str:>20s}  {flag_str}"
+            f"{bbox_str:>20s}  {flag_str}{sharp_str}"
         )
+
+        # Accumulate for CSV
+        if args.csv:
+            csv_row = {
+                "subject_id": subj_id,
+                "split": split,
+                "image": img_path,
+                "shape": full_shape_str,
+                "spacing_x": f"{pixdim[0]:.4f}",
+                "spacing_y": f"{pixdim[1]:.4f}",
+                "spacing_z": f"{pixdim[2]:.4f}",
+                "bbox_LR": bbox_ext[0],
+                "bbox_AP": bbox_ext[1],
+                "bbox_SI": bbox_ext[2],
+                "flag": flag_str,
+            }
+            if ch_sharp:
+                for cs in ch_sharp:
+                    csv_row[f"{cs['modality']}_hf_ratio"] = f"{cs['hf_ratio']:.4f}"
+                    csv_row[f"{cs['modality']}_lap_var"] = f"{cs['lap_var']:.4f}"
+            csv_rows.append(csv_row)
 
         # Optional: label bbox (tumour extent)
         if args.include_labels and "label" in item:
@@ -258,6 +376,43 @@ def main():
             print(f"  {k}: {v}")
     else:
         print(f"\nNo flags raised — all subjects look standard.")
+
+    # Sharpness summary
+    if all_sharpness:
+        print(f"\nPer-channel sharpness statistics:")
+        for ch_idx, mod in enumerate(MODALITY_NAMES):
+            hf_vals = [s[ch_idx]["hf_ratio"] for s in all_sharpness if ch_idx < len(s)]
+            lv_vals = [s[ch_idx]["lap_var"] for s in all_sharpness if ch_idx < len(s)]
+            if hf_vals:
+                hf_arr = np.array(hf_vals)
+                lv_arr = np.array(lv_vals)
+                n_low = int(np.sum(hf_arr < 0.35))
+                print(f"  {mod}:")
+                print(f"    HF ratio:  min={hf_arr.min():.4f}  P25={np.percentile(hf_arr,25):.4f}  "
+                      f"median={np.median(hf_arr):.4f}  P75={np.percentile(hf_arr,75):.4f}  "
+                      f"max={hf_arr.max():.4f}  low(<0.35)={n_low}")
+                print(f"    Lap var:   min={lv_arr.min():.2f}  P25={np.percentile(lv_arr,25):.2f}  "
+                      f"median={np.median(lv_arr):.2f}  P75={np.percentile(lv_arr,75):.2f}  "
+                      f"max={lv_arr.max():.2f}")
+
+    # Write CSV
+    if args.csv and csv_rows:
+        all_keys = set()
+        for r in csv_rows:
+            all_keys.update(r.keys())
+        base_cols = ["subject_id", "split", "image", "shape",
+                     "spacing_x", "spacing_y", "spacing_z",
+                     "bbox_LR", "bbox_AP", "bbox_SI"]
+        mod_cols = sorted(k for k in all_keys
+                          if any(k.startswith(m + "_") for m in MODALITY_NAMES))
+        other_cols = ["flag"]
+        columns = [c for c in base_cols + mod_cols + other_cols if c in all_keys]
+
+        with open(args.csv, "w", newline="") as csvf:
+            writer = csv.DictWriter(csvf, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(csv_rows)
+        print(f"\nCSV written to: {args.csv}")
 
     print()
 
