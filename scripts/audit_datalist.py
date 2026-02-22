@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
@@ -138,6 +139,88 @@ def per_channel_sharpness(data: np.ndarray) -> list[dict]:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def _audit_one(item: dict, crop_target: np.ndarray, do_sharpness: bool,
+               include_labels: bool) -> dict:
+    """Process a single datalist entry. Must be picklable for multiprocessing."""
+    img_path = item["image"]
+    subj_id = item.get("subject_id", Path(img_path).stem)
+    split = item.get("_split", "")
+
+    result: dict = {"subject_id": subj_id, "split": split, "image": img_path}
+
+    # --- Load NIfTI ---
+    try:
+        nii = nib.load(img_path)
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    hdr = nii.header
+    shape = np.array(nii.shape[:3])
+    pixdim = np.abs(hdr.get_zooms()[:3])
+    full_shape_str = "x".join(str(s) for s in nii.shape)
+
+    data = np.asarray(nii.dataobj)
+    _, _, bbox_ext = brain_bbox(data)
+
+    result.update({
+        "shape": full_shape_str,
+        "shape_arr": shape,
+        "pixdim": pixdim,
+        "pixdim_str": f"{pixdim[0]:.3f}x{pixdim[1]:.3f}x{pixdim[2]:.3f}",
+        "bbox_ext": bbox_ext,
+        "bbox_str": "x".join(str(e) for e in bbox_ext),
+    })
+
+    # --- Per-channel sharpness ---
+    ch_sharp = []
+    if do_sharpness:
+        ch_sharp = per_channel_sharpness(data)
+        result["ch_sharp"] = ch_sharp
+
+    # --- Flags ---
+    subj_flags = []
+
+    if is_outlier_resolution(pixdim):
+        subj_flags.append(f"RESOLUTION({pixdim[0]:.3f},{pixdim[1]:.3f},{pixdim[2]:.3f})")
+    if is_anisotropic(pixdim):
+        subj_flags.append("ANISOTROPIC")
+    if np.any(shape[:2] != 240) or shape[2] != 155:
+        subj_flags.append(f"NON_STANDARD_DIM({full_shape_str})")
+
+    for ax, (ext, tgt, ax_name) in enumerate(
+        zip(bbox_ext, crop_target, ["LR", "AP", "SI"])
+    ):
+        if ext > tgt:
+            excess = ext - tgt
+            subj_flags.append(f"BRAIN_EXCEEDS_{ax_name}({ext}>{tgt}, clip={excess}vox)")
+        elif ext < tgt * 0.6:
+            subj_flags.append(f"SMALL_BRAIN_{ax_name}({ext}<{int(tgt * 0.6)})")
+
+    if np.all(bbox_ext == 0):
+        subj_flags.append("EMPTY_VOLUME")
+
+    if ch_sharp:
+        for cs in ch_sharp:
+            if cs["hf_ratio"] < 0.35:
+                subj_flags.append(f"LOW_HF_{cs['modality']}({cs['hf_ratio']:.3f})")
+
+    result["flags"] = subj_flags
+    result["flag_str"] = ", ".join(subj_flags) if subj_flags else "ok"
+
+    # --- Label bbox (optional) ---
+    if include_labels and "label" in item:
+        try:
+            lbl_nii = nib.load(item["label"])
+            lbl_data = np.asarray(lbl_nii.dataobj)
+            _, _, lbl_ext = brain_bbox(lbl_data)
+            result["label_bbox"] = "x".join(str(e) for e in lbl_ext)
+        except Exception as exc:
+            result["label_error"] = str(exc)
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Audit spatial metadata of datalist images.")
     parser.add_argument("--datalist", type=str, required=True, help="Path to datalist JSON.")
@@ -156,6 +239,8 @@ def main():
     parser.add_argument("--sharpness", action="store_true", default=False,
                         help="Compute per-channel spectral sharpness and Laplacian "
                              "variance (slower — loads full image data for FFT).")
+    parser.add_argument("--workers", "-j", type=int, default=8,
+                        help="Number of parallel workers (default: 8).")
     args = parser.parse_args()
 
     crop_target = np.array(args.crop_target)
@@ -180,17 +265,26 @@ def main():
         entries = entries[: args.max_subjects]
 
     n = len(entries)
-    print(f"Auditing {n} subjects across {splits} ...\n")
+    print(f"Auditing {n} subjects across {splits} with {args.workers} workers ...\n")
 
-    # Storage for summary statistics
-    all_pixdims = []
-    all_shapes = []
-    all_bbox_extents = []
-    all_sharpness = []  # list of per-subject channel sharpness dicts
-    csv_rows = []
-    flags: List[str] = []
+    # ── Parallel dispatch ────────────────────────────────────────────────
+    results: List[dict] = [None] * n  # type: ignore[list-item]
+    done = 0
 
-    # Per-subject header
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        future_to_idx = {
+            pool.submit(_audit_one, entry, crop_target, args.sharpness,
+                        args.include_labels): idx
+            for idx, entry in enumerate(entries)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            results[idx] = future.result()
+            done += 1
+            if done % 100 == 0 or done == n:
+                print(f"  [{done}/{n}]", file=sys.stderr, flush=True)
+
+    # ── Print table (in original order) ──────────────────────────────────
     header = (
         f"{'#':>5s}  {'subject_id':<20s}  {'split':<10s}  "
         f"{'shape':>20s}  {'pixdim (mm)':>18s}  "
@@ -199,80 +293,36 @@ def main():
     print(header)
     print("-" * len(header))
 
-    for i, item in enumerate(entries):
-        img_path = item["image"]
-        subj_id = item.get("subject_id", Path(img_path).stem)
-        split = item["_split"]
+    all_pixdims = []
+    all_shapes = []
+    all_bbox_extents = []
+    all_sharpness = []
+    csv_rows = []
+    flags: List[str] = []
 
-        # --- Load header only first (fast) ---
-        try:
-            nii = nib.load(img_path)
-        except Exception as exc:
-            flag_str = f"LOAD_ERROR: {exc}"
+    for i, r in enumerate(results):
+        subj_id = r["subject_id"]
+        split = r["split"]
+
+        if r.get("error"):
+            flag_str = f"LOAD_ERROR: {r['error']}"
             flags.append(flag_str)
-            print(f"{i+1:5d}  {subj_id:<20s}  {split:<10s}  {'---':>20s}  {'---':>18s}  {'---':>20s}  {flag_str}")
+            print(f"{i+1:5d}  {subj_id:<20s}  {split:<10s}  "
+                  f"{'---':>20s}  {'---':>18s}  {'---':>20s}  {flag_str}")
             continue
 
-        hdr = nii.header
-        shape = np.array(nii.shape[:3])  # spatial dims only
-        pixdim = np.abs(hdr.get_zooms()[:3])
-        full_shape_str = "x".join(str(s) for s in nii.shape)
+        all_pixdims.append(r["pixdim"])
+        all_shapes.append(r["shape_arr"])
+        all_bbox_extents.append(r["bbox_ext"])
 
-        # --- Load data for bbox (slower but necessary) ---
-        data = np.asarray(nii.dataobj)
-        _, _, bbox_ext = brain_bbox(data)
-
-        all_pixdims.append(pixdim)
-        all_shapes.append(shape)
-        all_bbox_extents.append(bbox_ext)
-
-        # --- Per-channel sharpness (optional, slower) ---
-        ch_sharp = []
-        if args.sharpness:
-            ch_sharp = per_channel_sharpness(data)
+        ch_sharp = r.get("ch_sharp", [])
+        if ch_sharp:
             all_sharpness.append(ch_sharp)
 
-        # --- Flag outliers ---
-        subj_flags = []
-
-        # Resolution
-        if is_outlier_resolution(pixdim):
-            subj_flags.append(f"RESOLUTION({pixdim[0]:.3f},{pixdim[1]:.3f},{pixdim[2]:.3f})")
-
-        if is_anisotropic(pixdim):
-            subj_flags.append("ANISOTROPIC")
-
-        # Dimensions — BraTS is typically 240x240x155
-        if np.any(shape[:2] != 240) or shape[2] != 155:
-            subj_flags.append(f"NON_STANDARD_DIM({full_shape_str})")
-
-        # Brain bbox vs crop target
-        for ax, (ext, tgt, ax_name) in enumerate(
-            zip(bbox_ext, crop_target, ["LR", "AP", "SI"])
-        ):
-            if ext > tgt:
-                excess = ext - tgt
-                subj_flags.append(f"BRAIN_EXCEEDS_{ax_name}({ext}>{tgt}, clip={excess}vox)")
-            elif ext < tgt * 0.6:
-                subj_flags.append(f"SMALL_BRAIN_{ax_name}({ext}<{int(tgt*0.6)})")
-
-        # Zero volume
-        if np.all(bbox_ext == 0):
-            subj_flags.append("EMPTY_VOLUME")
-
-        # Effective resolution (spectral sharpness)
-        if ch_sharp:
-            for cs in ch_sharp:
-                if cs["hf_ratio"] < 0.35:
-                    subj_flags.append(
-                        f"LOW_HF_{cs['modality']}({cs['hf_ratio']:.3f})")
-
-        flag_str = ", ".join(subj_flags) if subj_flags else "ok"
+        subj_flags = r["flags"]
+        flag_str = r["flag_str"]
         if subj_flags:
             flags.extend(subj_flags)
-
-        pixdim_str = f"{pixdim[0]:.3f}x{pixdim[1]:.3f}x{pixdim[2]:.3f}"
-        bbox_str = "x".join(str(e) for e in bbox_ext)
 
         sharp_str = ""
         if ch_sharp:
@@ -283,23 +333,23 @@ def main():
 
         print(
             f"{i+1:5d}  {subj_id:<20s}  {split:<10s}  "
-            f"{full_shape_str:>20s}  {pixdim_str:>18s}  "
-            f"{bbox_str:>20s}  {flag_str}{sharp_str}"
+            f"{r['shape']:>20s}  {r['pixdim_str']:>18s}  "
+            f"{r['bbox_str']:>20s}  {flag_str}{sharp_str}"
         )
 
-        # Accumulate for CSV
+        # CSV row
         if args.csv:
             csv_row = {
                 "subject_id": subj_id,
                 "split": split,
-                "image": img_path,
-                "shape": full_shape_str,
-                "spacing_x": f"{pixdim[0]:.4f}",
-                "spacing_y": f"{pixdim[1]:.4f}",
-                "spacing_z": f"{pixdim[2]:.4f}",
-                "bbox_LR": bbox_ext[0],
-                "bbox_AP": bbox_ext[1],
-                "bbox_SI": bbox_ext[2],
+                "image": r["image"],
+                "shape": r["shape"],
+                "spacing_x": f"{r['pixdim'][0]:.4f}",
+                "spacing_y": f"{r['pixdim'][1]:.4f}",
+                "spacing_z": f"{r['pixdim'][2]:.4f}",
+                "bbox_LR": r["bbox_ext"][0],
+                "bbox_AP": r["bbox_ext"][1],
+                "bbox_SI": r["bbox_ext"][2],
                 "flag": flag_str,
             }
             if ch_sharp:
@@ -308,16 +358,13 @@ def main():
                     csv_row[f"{cs['modality']}_lap_var"] = f"{cs['lap_var']:.4f}"
             csv_rows.append(csv_row)
 
-        # Optional: label bbox (tumour extent)
-        if args.include_labels and "label" in item:
-            try:
-                lbl_nii = nib.load(item["label"])
-                lbl_data = np.asarray(lbl_nii.dataobj)
-                _, _, lbl_ext = brain_bbox(lbl_data)
-                lbl_bbox_str = "x".join(str(e) for e in lbl_ext)
-                print(f"       {'':20s}  {'':10s}  {'':>20s}  {'':>18s}  {lbl_bbox_str:>20s}  tumour_bbox")
-            except Exception as exc:
-                print(f"       {'':20s}  {'':10s}  {'':>20s}  {'':>18s}  {'---':>20s}  LABEL_ERROR: {exc}")
+        # Label bbox
+        if r.get("label_bbox"):
+            print(f"       {'':20s}  {'':10s}  {'':>20s}  "
+                  f"{'':>18s}  {r['label_bbox']:>20s}  tumour_bbox")
+        elif r.get("label_error"):
+            print(f"       {'':20s}  {'':10s}  {'':>20s}  "
+                  f"{'':>18s}  {'---':>20s}  LABEL_ERROR: {r['label_error']}")
 
     # ── Summary ──────────────────────────────────────────────────────────
     print("\n" + "=" * 80)
