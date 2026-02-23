@@ -33,8 +33,8 @@ def parse_args():
                    help="Directory containing nnUNetv2-XXXXX.nii.gz files")
     p.add_argument("--n_examples", type=int, default=5,
                    help="Number of tail examples per cluster (default: 5)")
-    p.add_argument("--channel", type=int, default=2,
-                   help="Volume channel to display (0=FLAIR,1=T1CE,2=T1,3=T2)")
+    p.add_argument("--channel", type=int, default=0,
+                   help="Volume channel to display (0=T1,1=T1CE,2=T2,3=FLAIR)")
     p.add_argument("--output", default="audit_figures/scatter_with_slices.png")
     return p.parse_args()
 
