@@ -2,7 +2,7 @@ model:
   name: "AutoencoderKL"
   lr: 0.00005
   perceptual_weight: 0.01
-  adv_weight: 0.025
+  adv_weight: 0.25
   kl_weight: 0.00000001
   params:
     spatial_dims: 3
