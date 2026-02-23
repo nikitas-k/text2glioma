@@ -9,6 +9,13 @@ Usage::
     # Plot every 20th subject, save to plots/ directory:
     python scripts/plot_slices.py --datalist datalist_N1511.json
 
+    # Plot and collate into a single multi-page PDF:
+    python scripts/plot_slices.py --datalist datalist_N1511.json --collate
+
+    # Custom PDF name:
+    python scripts/plot_slices.py --datalist datalist_N1511.json \
+        --collate --collate-out qc_all_subjects.pdf
+
     # Customise stride and output:
     python scripts/plot_slices.py --datalist datalist_N1511.json \
         --subject-stride 50 --slice-stride 10 --outdir qc_slices
@@ -128,6 +135,12 @@ def main():
                         help="Maximum number of subjects to plot.")
     parser.add_argument("--workers", "-j", type=int, default=8,
                         help="Number of parallel workers (default: 8).")
+    parser.add_argument("--collate", action="store_true",
+                        help="Collate all subject plots into a single "
+                             "multi-page PDF after generation.")
+    parser.add_argument("--collate-out", type=str, default=None,
+                        help="Output path for the collated PDF "
+                             "(default: <outdir>/collated.pdf).")
     args = parser.parse_args()
 
     with open(args.datalist) as f:
@@ -160,6 +173,7 @@ def main():
     n = len(selected)
     done = 0
     errors = 0
+    saved_paths: list[Path] = []
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         future_to_subj = {
@@ -177,6 +191,7 @@ def main():
             done += 1
             try:
                 out = future.result()
+                saved_paths.append(out)
                 if done % 5 == 0 or done == n:
                     print(f"  [{done}/{n}] {subj_id} → {out}")
             except Exception as exc:
@@ -185,6 +200,30 @@ def main():
 
     print(f"\nDone. {done - errors}/{n} plots saved to {outdir}/"
           f"{f' ({errors} errors)' if errors else ''}")
+
+    # ── Collate into a single multi-page PDF ──────────────────────────
+    if args.collate and saved_paths:
+        from PIL import Image as PILImage
+
+        pdf_path = Path(args.collate_out) if args.collate_out else outdir / "collated.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Sort by filename for deterministic page order
+        saved_paths.sort()
+
+        print(f"\nCollating {len(saved_paths)} plots → {pdf_path} ...")
+        pil_pages = []
+        for p in saved_paths:
+            img = PILImage.open(p).convert("RGB")
+            pil_pages.append(img)
+
+        pil_pages[0].save(
+            pdf_path,
+            save_all=True,
+            append_images=pil_pages[1:],
+            resolution=120,
+        )
+        print(f"Saved collated PDF: {pdf_path}")
 
 
 if __name__ == "__main__":
