@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import matplotlib
@@ -126,6 +126,8 @@ def main():
                         help="Output directory for PNGs (default: plots/).")
     parser.add_argument("--max-subjects", type=int, default=None,
                         help="Maximum number of subjects to plot.")
+    parser.add_argument("--workers", "-j", type=int, default=8,
+                        help="Number of parallel workers (default: 8).")
     args = parser.parse_args()
 
     with open(args.datalist) as f:
@@ -152,20 +154,37 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     print(f"Plotting {len(selected)} subjects (every {args.subject_stride}th "
-          f"of {len(entries)}) → {outdir}/")
+          f"of {len(entries)}) → {outdir}/  [{args.workers} workers]")
     print(f"Slice stride: every {args.slice_stride} voxels in Z\n")
 
-    for i, item in enumerate(selected):
-        img_path = item["image"]
-        subj_id = item.get("subject_id", Path(img_path).stem)
-        print(f"  [{i+1}/{len(selected)}] {subj_id} ...", end=" ", flush=True)
-        try:
-            out = plot_subject(img_path, subj_id, args.slice_stride, outdir)
-            print(f"→ {out}")
-        except Exception as exc:
-            print(f"ERROR: {exc}")
+    n = len(selected)
+    done = 0
+    errors = 0
 
-    print(f"\nDone. {len(selected)} plots saved to {outdir}/")
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        future_to_subj = {
+            pool.submit(
+                plot_subject,
+                item["image"],
+                item.get("subject_id", Path(item["image"]).stem),
+                args.slice_stride,
+                outdir,
+            ): item.get("subject_id", Path(item["image"]).stem)
+            for item in selected
+        }
+        for future in as_completed(future_to_subj):
+            subj_id = future_to_subj[future]
+            done += 1
+            try:
+                out = future.result()
+                if done % 5 == 0 or done == n:
+                    print(f"  [{done}/{n}] {subj_id} → {out}")
+            except Exception as exc:
+                errors += 1
+                print(f"  [{done}/{n}] {subj_id} ERROR: {exc}")
+
+    print(f"\nDone. {done - errors}/{n} plots saved to {outdir}/"
+          f"{f' ({errors} errors)' if errors else ''}")
 
 
 if __name__ == "__main__":
