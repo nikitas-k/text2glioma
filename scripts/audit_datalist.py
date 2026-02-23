@@ -147,21 +147,29 @@ def per_channel_sharpness(data: np.ndarray) -> list[dict]:
 def _parse_wb_fwhm(stdout: str) -> list[float]:
     """Parse ``wb_command -volume-estimate-fwhm`` stdout into [x, y, z].
 
-    wb_command prints lines like::
+    wb_command prints one of::
 
-        FWHM: 2.345, 2.456, 3.567
+        subvol 1 FWHM: 2.345, 2.456, 3.567   (per-subvolume mode)
+        FWHM: 2.345, 2.456, 3.567             (-whole-file mode)
 
-    or three separate numbers, depending on version.  This function handles
-    both formats and returns [0.0, 0.0, 0.0] on parse failure.
+    We split on "FWHM:" to skip the "subvol N" prefix, then parse the
+    three comma-separated floats after it.
+
+    Returns [0.0, 0.0, 0.0] on parse failure.
     """
-    nums: list[float] = []
-    for token in stdout.replace(",", " ").split():
-        try:
-            nums.append(float(token))
-        except ValueError:
+    # Find the FWHM values after the "FWHM:" label
+    for line in stdout.splitlines():
+        if "FWHM:" not in line:
             continue
-    if len(nums) >= 3:
-        return nums[:3]
+        after = line.split("FWHM:")[-1]
+        nums: list[float] = []
+        for token in after.replace(",", " ").split():
+            try:
+                nums.append(float(token))
+            except ValueError:
+                continue
+        if len(nums) >= 3:
+            return nums[:3]
     return [0.0, 0.0, 0.0]
 
 
