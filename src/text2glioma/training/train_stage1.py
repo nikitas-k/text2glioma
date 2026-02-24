@@ -39,6 +39,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--initialize", action="store_true", default=False, help="Initialize (reset) the data for PersistentDataset.")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint")
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Directory for perceptual-loss network cache. "
+                             "Defaults to <output_dir>/cache if not specified.")
 
     return parser.parse_args()
 
@@ -117,7 +120,7 @@ def main():
     if is_main_process:
         print("Getting data...")
     
-    cache_dir = output_dir / "cache"
+    cache_dir = Path(args.cache_dir) if args.cache_dir else output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)  # cache needs to exist on all ranks
 
     model_type = config["model"]["name"]

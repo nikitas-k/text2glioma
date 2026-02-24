@@ -79,6 +79,9 @@ def parse_args() -> argparse.Namespace:
                     help="Distributed backend (nccl for GPU, gloo for CPU/fallback).")
     p.add_argument("--find_unused_parameters", action="store_true", default=False,
                     help="Pass find_unused_parameters=True to DDP (slower but needed for some models).")
+    p.add_argument("--cache_dir", type=str, default=None,
+                    help="Directory for perceptual-loss network cache. "
+                         "Defaults to <run_dir>/cache if not specified.")
     return p.parse_args()
 
 
@@ -279,7 +282,7 @@ def main():
     model = get_model(model_type, config, args.pretrained)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
-    cache_dir = Path(args.run_dir) / "cache"
+    cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.run_dir) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     perceptual_loss = PerceptualLoss(
         **config["perceptual_network"]["params"], cache_dir=cache_dir,
