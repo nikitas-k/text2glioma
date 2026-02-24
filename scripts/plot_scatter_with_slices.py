@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Scatter plot of T1 FWHM vs HF ratio with example axial slices inset,
-highlighting subjects from the tails of the sharp and blurry clusters.
+"""Scatter plot of T1 FWHM vs WM/GM CNR with example axial slices inset,
+highlighting subjects from the tails of good and poor quality clusters.
 
 Usage (on Gadi or wherever NIfTIs live):
   python scripts/plot_scatter_with_slices.py \
@@ -16,7 +16,6 @@ import pathlib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from matplotlib.patches import Ellipse
 import numpy as np
 import pandas as pd
@@ -28,6 +27,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--audit_csv", default="text2glioma_audit.csv")
+    p.add_argument("--cnr_csv", default="cnr_audit.csv")
     p.add_argument("--meta_csv", default="2025_cancer_dataset_v3.csv")
     p.add_argument("--image_dir", required=True,
                    help="Directory containing nnUNetv2-XXXXX.nii.gz files")
@@ -40,7 +40,7 @@ def parse_args():
 
 
 # ── helpers ───────────────────────────────────────────────────────────
-def load_slice(nifti_path: pathlib.Path, channel: int = 2) -> np.ndarray:
+def load_slice(nifti_path: pathlib.Path, channel: int = 0) -> np.ndarray:
     """Load a representative axial slice from a 4-channel NIfTI.
 
     Picks the axial slice with the maximum foreground area to show a
@@ -63,22 +63,42 @@ def load_slice(nifti_path: pathlib.Path, channel: int = 2) -> np.ndarray:
     return sl
 
 
-def pick_tails(df: pd.DataFrame, cluster_col: str, metric_col: str,
-               n: int, ascending: bool):
-    """Select the n most extreme subjects from each cluster tail.
+def draw_gmm_ellipses(ax, gm, scaler, good_idx, bad_idx):
+    """Draw GMM 1σ/2σ ellipses and cluster centres."""
+    for k in range(2):
+        mean_std = gm.means_[k]
+        cov_std = gm.covariances_[k]
+        s_diag = np.diag(scaler.scale_)
+        cov_orig = s_diag @ cov_std @ s_diag
+        mean_orig = scaler.inverse_transform(mean_std.reshape(1, -1)).ravel()
+        eigvals, eigvecs = np.linalg.eigh(cov_orig)
+        order = eigvals.argsort()[::-1]
+        eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+        angle = np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0]))
+        ec = "#2ca02c" if k == good_idx else "#d62728"
+        for n_std in [1, 2]:
+            w, h = 2 * n_std * np.sqrt(eigvals)
+            lbl = ("good" if k == good_idx else "poor") if n_std == 1 else None
+            ell = Ellipse(mean_orig, w, h, angle=angle,
+                          facecolor="none", edgecolor=ec,
+                          linestyle="--", linewidth=1.2,
+                          alpha=0.7 if n_std == 1 else 0.35,
+                          label=f"GMM {lbl} ($\\mu\\pm{n_std}\\sigma$)" if lbl else None)
+            ax.add_patch(ell)
+        ax.plot(mean_orig[0], mean_orig[1], "*", markersize=14,
+                markeredgecolor="k", markeredgewidth=0.8, color=ec)
 
-    For the *sharp* cluster: lowest FWHM (ascending=True).
-    For the *blurry* cluster: highest FWHM (ascending=False).
-    """
-    sharp = (df[cluster_col] == "sharp").copy()
-    blurry = ~sharp
 
-    sharp_tail = df.loc[sharp].nsmallest(n, metric_col) if ascending \
-        else df.loc[sharp].nlargest(n, metric_col)
-    blurry_tail = df.loc[blurry].nlargest(n, metric_col) if not ascending \
-        else df.loc[blurry].nsmallest(n, metric_col)
-
-    return sharp_tail, blurry_tail
+def draw_decision_boundary(ax, gm, scaler, good_idx, bad_idx, x_range, y_range):
+    """Draw the GMM decision boundary contour."""
+    xx = np.linspace(*x_range, 300)
+    yy = np.linspace(*y_range, 300)
+    XX, YY = np.meshgrid(xx, yy)
+    grid_std = scaler.transform(np.column_stack([XX.ravel(), YY.ravel()]))
+    prob = gm.predict_proba(grid_std)
+    ZZ = (prob[:, bad_idx] - prob[:, good_idx]).reshape(XX.shape)
+    ax.contour(XX, YY, ZZ, levels=[0], colors="k",
+               linewidths=1.2, linestyles="--")
 
 
 # ── main ──────────────────────────────────────────────────────────────
@@ -90,46 +110,59 @@ def main():
 
     # ── load & merge ──────────────────────────────────────────────────
     audit = pd.read_csv(args.audit_csv)
+    cnr = pd.read_csv(args.cnr_csv)
     meta = pd.read_csv(args.meta_csv)
     audit["nnunet_id"] = audit["image"].str.extract(r"(nnUNetv2-\d+)")
 
-    merged = meta[["Collection", "DataID"]].merge(
-        audit, left_on="DataID", right_on="nnunet_id", how="inner"
+    merged = (
+        meta[["Collection", "DataID"]]
+        .merge(cnr, left_on="DataID", right_on="nnunet_id", how="inner")
+        .merge(audit[["nnunet_id", "T1_fwhm_mean", "T1_hf_ratio"]],
+               on="nnunet_id", how="inner")
     )
     merged["Collection"] = merged["Collection"].fillna("Unknown")
     print(f"Merged: {len(merged)} subjects")
 
-    # ── GMM (same as _tmp_collection_analysis.py) ─────────────────────
-    X = merged[["T1_fwhm_mean", "T1_hf_ratio"]].values
+    # ── GMM on FWHM + CNR ────────────────────────────────────────────
+    X = merged[["T1_fwhm_mean", "T1_wmgm_cnr"]].values
     scaler = StandardScaler()
     X_std = scaler.fit_transform(X)
-    gm = GaussianMixture(n_components=2, random_state=42, covariance_type="full")
+    gm = GaussianMixture(n_components=2, random_state=42,
+                          covariance_type="full", n_init=5)
     gm.fit(X_std)
     labels = gm.predict(X_std)
 
     centres = scaler.inverse_transform(gm.means_)
-    sharp_idx = int(np.argmin(centres[:, 0]))
-    blur_idx = int(np.argmax(centres[:, 0]))
-    merged["cluster"] = np.where(labels == sharp_idx, "sharp", "blurry")
+    # "good" = higher CNR
+    good_idx = int(np.argmax(centres[:, 1]))
+    bad_idx = int(np.argmin(centres[:, 1]))
+    merged["cluster"] = np.where(labels == good_idx, "good", "poor")
 
-    print(f"Sharp:  FWHM={centres[sharp_idx, 0]:.2f}, "
-          f"HF={centres[sharp_idx, 1]:.4f}, n={int((labels == sharp_idx).sum())}")
-    print(f"Blurry: FWHM={centres[blur_idx, 0]:.2f}, "
-          f"HF={centres[blur_idx, 1]:.4f}, n={int((labels == blur_idx).sum())}")
+    n_good = int((labels == good_idx).sum())
+    n_poor = int((labels == bad_idx).sum())
+    print(f"Good:  FWHM={centres[good_idx, 0]:.2f}, "
+          f"CNR={centres[good_idx, 1]:.3f}, n={n_good}")
+    print(f"Poor:  FWHM={centres[bad_idx, 0]:.2f}, "
+          f"CNR={centres[bad_idx, 1]:.3f}, n={n_poor}")
 
     # ── select tail subjects ──────────────────────────────────────────
-    sharp_tail, blurry_tail = pick_tails(
-        merged, "cluster", "T1_fwhm_mean",
-        n=args.n_examples, ascending=True
+    # Good tail: highest CNR subjects
+    good_tail = merged[merged["cluster"] == "good"].nlargest(
+        args.n_examples, "T1_wmgm_cnr"
     )
-    print(f"\nSharp tail ({len(sharp_tail)} subjects, lowest FWHM):")
-    for _, r in sharp_tail.iterrows():
-        print(f"  {r['nnunet_id']}  FWHM={r['T1_fwhm_mean']:.2f}  "
-              f"HF={r['T1_hf_ratio']:.4f}  [{r['Collection']}]")
-    print(f"Blurry tail ({len(blurry_tail)} subjects, highest FWHM):")
-    for _, r in blurry_tail.iterrows():
-        print(f"  {r['nnunet_id']}  FWHM={r['T1_fwhm_mean']:.2f}  "
-              f"HF={r['T1_hf_ratio']:.4f}  [{r['Collection']}]")
+    # Poor tail: lowest CNR subjects
+    poor_tail = merged[merged["cluster"] == "poor"].nsmallest(
+        args.n_examples, "T1_wmgm_cnr"
+    )
+
+    print(f"\nGood tail ({len(good_tail)} subjects, highest CNR):")
+    for _, r in good_tail.iterrows():
+        print(f"  {r['nnunet_id']}  CNR={r['T1_wmgm_cnr']:.3f}  "
+              f"FWHM={r['T1_fwhm_mean']:.2f}  [{r['Collection']}]")
+    print(f"Poor tail ({len(poor_tail)} subjects, lowest CNR):")
+    for _, r in poor_tail.iterrows():
+        print(f"  {r['nnunet_id']}  CNR={r['T1_wmgm_cnr']:.3f}  "
+              f"FWHM={r['T1_fwhm_mean']:.2f}  [{r['Collection']}]")
 
     # ── load slices ───────────────────────────────────────────────────
     def get_slice(row):
@@ -139,25 +172,22 @@ def main():
             return None
         return load_slice(nii, channel=args.channel)
 
-    sharp_slices = [(r, get_slice(r)) for _, r in sharp_tail.iterrows()]
-    blurry_slices = [(r, get_slice(r)) for _, r in blurry_tail.iterrows()]
-    sharp_slices = [(r, s) for r, s in sharp_slices if s is not None]
-    blurry_slices = [(r, s) for r, s in blurry_slices if s is not None]
+    good_slices = [(r, get_slice(r)) for _, r in good_tail.iterrows()]
+    poor_slices = [(r, get_slice(r)) for _, r in poor_tail.iterrows()]
+    good_slices = [(r, s) for r, s in good_slices if s is not None]
+    poor_slices = [(r, s) for r, s in poor_slices if s is not None]
 
-    if not sharp_slices and not blurry_slices:
+    if not good_slices and not poor_slices:
         print("ERROR: No NIfTI files found. Check --image_dir.")
         return
 
     # ── figure ────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(16, 10))
 
-    # layout: scatter in the middle, slice strips top-right & bottom-left
     gs = fig.add_gridspec(3, 1, height_ratios=[1.2, 4, 1.2],
                           hspace=0.08)
-    gs_top = gs[0].subgridspec(1, max(len(sharp_slices), 1),
-                                wspace=0.05)
-    gs_bot = gs[2].subgridspec(1, max(len(blurry_slices), 1),
-                                wspace=0.05)
+    gs_top = gs[0].subgridspec(1, max(len(good_slices), 1), wspace=0.05)
+    gs_bot = gs[2].subgridspec(1, max(len(poor_slices), 1), wspace=0.05)
     ax_scatter = fig.add_subplot(gs[1])
 
     # ── scatter ───────────────────────────────────────────────────────
@@ -172,90 +202,64 @@ def main():
     for col in ["UCSF-PDGM", "UPENN-GBM", "TCGA-LGG", "TCGA-GBM", "Unknown"]:
         sub = merged[merged["Collection"] == col]
         ax_scatter.scatter(
-            sub["T1_fwhm_mean"], sub["T1_hf_ratio"],
+            sub["T1_fwhm_mean"], sub["T1_wmgm_cnr"],
             c=COLOURS[col], marker=MARKERS[col],
             s=16, alpha=0.45, linewidths=0.2, edgecolors="k",
             label=f"{col} (n={len(sub)})",
         )
 
-    # GMM ellipses
-    for k in range(2):
-        mean_std = gm.means_[k]
-        cov_std = gm.covariances_[k]
-        s_diag = np.diag(scaler.scale_)
-        cov_orig = s_diag @ cov_std @ s_diag
-        mean_orig = scaler.inverse_transform(mean_std.reshape(1, -1)).ravel()
-        eigvals, eigvecs = np.linalg.eigh(cov_orig)
-        order = eigvals.argsort()[::-1]
-        eigvals, eigvecs = eigvals[order], eigvecs[:, order]
-        angle = np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0]))
-        ec = "#2ca02c" if k == sharp_idx else "#d62728"
-        for n_std in [1, 2]:
-            w, h = 2 * n_std * np.sqrt(eigvals)
-            ell = Ellipse(mean_orig, w, h, angle=angle,
-                          facecolor="none", edgecolor=ec,
-                          linestyle="--", linewidth=1.2,
-                          alpha=0.7 if n_std == 1 else 0.35)
-            ax_scatter.add_patch(ell)
-        ax_scatter.plot(mean_orig[0], mean_orig[1], "*", markersize=14,
-                        markeredgecolor="k", markeredgewidth=0.8, color=ec)
-
-    # decision boundary
-    xx = np.linspace(merged["T1_fwhm_mean"].min() - 0.5,
-                     merged["T1_fwhm_mean"].max() + 0.5, 300)
-    yy = np.linspace(merged["T1_hf_ratio"].min() - 0.001,
-                     merged["T1_hf_ratio"].max() + 0.001, 300)
-    XX, YY = np.meshgrid(xx, yy)
-    grid_std = scaler.transform(np.column_stack([XX.ravel(), YY.ravel()]))
-    prob = gm.predict_proba(grid_std)
-    ZZ = (prob[:, blur_idx] - prob[:, sharp_idx]).reshape(XX.shape)
-    ax_scatter.contour(XX, YY, ZZ, levels=[0], colors="k",
-                       linewidths=1.2, linestyles="--")
+    # GMM ellipses & decision boundary
+    draw_gmm_ellipses(ax_scatter, gm, scaler, good_idx, bad_idx)
+    draw_decision_boundary(
+        ax_scatter, gm, scaler, good_idx, bad_idx,
+        x_range=(merged["T1_fwhm_mean"].min() - 0.5,
+                 merged["T1_fwhm_mean"].max() + 0.5),
+        y_range=(merged["T1_wmgm_cnr"].min() - 0.1,
+                 merged["T1_wmgm_cnr"].max() + 0.1),
+    )
 
     # highlight tail subjects on scatter
-    for row, _ in sharp_slices:
-        ax_scatter.scatter(row["T1_fwhm_mean"], row["T1_hf_ratio"],
+    for row, _ in good_slices:
+        ax_scatter.scatter(row["T1_fwhm_mean"], row["T1_wmgm_cnr"],
                            s=80, facecolors="none", edgecolors="#2ca02c",
                            linewidths=2, zorder=5)
-    for row, _ in blurry_slices:
-        ax_scatter.scatter(row["T1_fwhm_mean"], row["T1_hf_ratio"],
+    for row, _ in poor_slices:
+        ax_scatter.scatter(row["T1_fwhm_mean"], row["T1_wmgm_cnr"],
                            s=80, facecolors="none", edgecolors="#d62728",
                            linewidths=2, zorder=5)
 
     ax_scatter.set_xlabel("T1 FWHM mean (mm)", fontsize=12)
-    ax_scatter.set_ylabel("T1 HF ratio", fontsize=12)
-    ax_scatter.set_title("T1 Image Quality: GMM Clusters with Example Slices",
+    ax_scatter.set_ylabel("T1 WM/GM CNR", fontsize=12)
+    ax_scatter.set_title("T1 Image Quality: FWHM vs CNR with Example Slices",
                          fontsize=14, fontweight="bold")
     ax_scatter.legend(fontsize=8, loc="upper right", framealpha=0.9)
     ax_scatter.grid(True, alpha=0.2)
 
     # ── slice strips ──────────────────────────────────────────────────
-    # Top row = sharp tail
-    for i, (row, sl) in enumerate(sharp_slices):
+    # Top row = good tail (high CNR)
+    for i, (row, sl) in enumerate(good_slices):
         ax = fig.add_subplot(gs_top[0, i])
         ax.imshow(sl, cmap="gray", aspect="equal", interpolation="none")
         ax.set_title(f"{row['nnunet_id']}\n"
-                     f"FWHM={row['T1_fwhm_mean']:.1f}  HF={row['T1_hf_ratio']:.4f}",
+                     f"CNR={row['T1_wmgm_cnr']:.2f}  FWHM={row['T1_fwhm_mean']:.1f}",
                      fontsize=7, color="#2ca02c", fontweight="bold")
         ax.axis("off")
-        # green border
         for spine in ax.spines.values():
             spine.set_visible(True)
             spine.set_edgecolor("#2ca02c")
             spine.set_linewidth(2)
 
-    # label
-    if sharp_slices:
-        fig.text(0.02, 0.92, f"SHARP tail\n(n={len(sharp_slices)})",
+    if good_slices:
+        fig.text(0.02, 0.92, f"HIGH CNR tail\n(n={len(good_slices)})",
                  fontsize=10, fontweight="bold", color="#2ca02c",
                  ha="left", va="center")
 
-    # Bottom row = blurry tail
-    for i, (row, sl) in enumerate(blurry_slices):
+    # Bottom row = poor tail (low CNR)
+    for i, (row, sl) in enumerate(poor_slices):
         ax = fig.add_subplot(gs_bot[0, i])
         ax.imshow(sl, cmap="gray", aspect="equal", interpolation="none")
         ax.set_title(f"{row['nnunet_id']}\n"
-                     f"FWHM={row['T1_fwhm_mean']:.1f}  HF={row['T1_hf_ratio']:.4f}",
+                     f"CNR={row['T1_wmgm_cnr']:.2f}  FWHM={row['T1_fwhm_mean']:.1f}",
                      fontsize=7, color="#d62728", fontweight="bold")
         ax.axis("off")
         for spine in ax.spines.values():
@@ -263,8 +267,8 @@ def main():
             spine.set_edgecolor("#d62728")
             spine.set_linewidth(2)
 
-    if blurry_slices:
-        fig.text(0.02, 0.08, f"BLURRY tail\n(n={len(blurry_slices)})",
+    if poor_slices:
+        fig.text(0.02, 0.08, f"LOW CNR tail\n(n={len(poor_slices)})",
                  fontsize=10, fontweight="bold", color="#d62728",
                  ha="left", va="center")
 
