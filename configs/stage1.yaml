@@ -4,6 +4,7 @@ model:
   perceptual_weight: 0.002
   adv_weight: 0.005
   kl_weight: 0.00000001
+  autoencoder_warm_up_n_epochs: 0   # train G alone for this many epochs before enabling D
   params:
     spatial_dims: 3
     in_channels: 4             # T1, T1CE, T2, FLAIR

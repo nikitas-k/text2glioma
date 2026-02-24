@@ -97,6 +97,7 @@ def train_autoencoder(
     kl_weight: float = 1e-6,
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
+    autoencoder_warm_up_n_epochs: int = 0,
 ):
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -134,6 +135,7 @@ def train_autoencoder(
             perceptual_weight=perceptual_weight,
             scaler_g=scaler_g,
             scaler_d=scaler_d,
+            autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -187,7 +189,18 @@ def train_epoch_autoencoder(
     perceptual_weight: float,
     scaler_g: torch.amp.GradScaler,
     scaler_d: torch.amp.GradScaler,
+    autoencoder_warm_up_n_epochs: int = 0,
 ) -> None:
+    warming_up = epoch < autoencoder_warm_up_n_epochs
+    if warming_up and epoch == 0:
+        print(f"[WARMUP] Training generator only for the first "
+              f"{autoencoder_warm_up_n_epochs} epochs (D disabled).")
+    if warming_up:
+        print(f"[WARMUP] Epoch {epoch}/{autoencoder_warm_up_n_epochs - 1} "
+              f"— discriminator skipped.")
+    elif epoch == autoencoder_warm_up_n_epochs and autoencoder_warm_up_n_epochs > 0:
+        print(f"[WARMUP] Warmup complete — enabling discriminator at epoch {epoch}.")
+
     model.train()
     discriminator.train()
 
@@ -215,7 +228,9 @@ def train_epoch_autoencoder(
         # separate forwards through the same BN layer create two
         # saved-variable versions and the second backward fails.
         # One forward = one BN update = no conflict.
-        if adversarial_weight > 0:
+        # During warmup, skip D entirely so G learns a stable
+        # reconstruction baseline before adversarial training begins.
+        if adversarial_weight > 0 and not warming_up:
             optimizer_d.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda"):
@@ -259,7 +274,7 @@ def train_epoch_autoencoder(
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
-            if adversarial_weight > 0:
+            if adversarial_weight > 0 and not warming_up:
                 logits_fake_g = disc_module(reconstruction.contiguous().float())[-1]
                 generator_loss = adv_loss(logits_fake_g, target_is_real=True, for_discriminator=False)
             else:

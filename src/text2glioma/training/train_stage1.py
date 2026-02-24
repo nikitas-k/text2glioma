@@ -280,6 +280,7 @@ def main():
         kl_weight=config["model"]["kl_weight"],
         perceptual_weight=config["model"]["perceptual_weight"],
         adversarial_weight=config["model"]["adv_weight"],
+        autoencoder_warm_up_n_epochs=config["model"].get("autoencoder_warm_up_n_epochs", 0),
     )
     if is_main_process:
         print(f"Training completed. Best validation loss: {val_loss:.4f}")
