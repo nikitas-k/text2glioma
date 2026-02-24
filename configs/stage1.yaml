@@ -1,19 +1,20 @@
 model:
   name: "AutoencoderKL"
   lr: 0.00005
-  perceptual_weight: 0.01
-  adv_weight: 0.25
+  perceptual_weight: 0.002
+  adv_weight: 0.005
   kl_weight: 0.00000001
   params:
     spatial_dims: 3
     in_channels: 4             # T1, T1CE, T2, FLAIR
     out_channels: 4
-    num_channels: [32, 64, 128, 128]
+    num_channels: [64, 128, 256, 512]
     latent_channels: 3
     num_res_blocks: 2
-    attention_levels: [False, False, False, False]
-    with_encoder_nonlocal_attn: False
-    with_decoder_nonlocal_attn: False
+    attention_levels: [False, False, False, True]
+    with_encoder_nonlocal_attn: True
+    with_decoder_nonlocal_attn: True
+    use_flash_attention: True
 
 # Channel ordering convention:
 #   0: T1w
