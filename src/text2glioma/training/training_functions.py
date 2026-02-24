@@ -216,15 +216,18 @@ def train_epoch_autoencoder(
         optimizer_g.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda"):
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss expects single-channel → average over channels
+            # MedicalNet perceptual loss expects single-channel → average over channels.
+            # Disable autocast: MedicalNet ResNet50 features overflow in float16
+            # (x**2 in normalize_tensor exceeds fp16 max ≈ 65504 → inf → NaN).
             n_ch = images.shape[1]
-            p_loss = sum(
-                perceptual_loss(
-                    reconstruction[:, c:c+1].float(),
-                    images[:, c:c+1].float()
-                )
-                for c in range(n_ch)
-            ) / n_ch
+            with torch.amp.autocast("cuda", enabled=False):
+                p_loss = sum(
+                    perceptual_loss(
+                        reconstruction[:, c:c+1].float(),
+                        images[:, c:c+1].float()
+                    )
+                    for c in range(n_ch)
+                ) / n_ch
 
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
@@ -308,15 +311,18 @@ def eval_autoencoder(
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss expects single-channel → average over channels
+            # MedicalNet perceptual loss expects single-channel → average over channels.
+            # Disable autocast: MedicalNet ResNet50 features overflow in float16
+            # (x**2 in normalize_tensor exceeds fp16 max ≈ 65504 → inf → NaN).
             n_ch = images.shape[1]
-            p_loss = sum(
-                perceptual_loss(
-                    reconstruction[:, c:c+1].float(),
-                    images[:, c:c+1].float()
-                )
-                for c in range(n_ch)
-            ) / n_ch
+            with torch.amp.autocast("cuda", enabled=False):
+                p_loss = sum(
+                    perceptual_loss(
+                        reconstruction[:, c:c+1].float(),
+                        images[:, c:c+1].float()
+                    )
+                    for c in range(n_ch)
+                ) / n_ch
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
