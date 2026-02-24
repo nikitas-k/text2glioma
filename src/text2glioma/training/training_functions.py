@@ -14,6 +14,40 @@ from generative.losses import PatchAdversarialLoss
 
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning, get_text_encoder_hidden_states
 
+
+def _safe_perceptual_loss(
+    perceptual_loss_fn: nn.Module,
+    reconstruction: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Compute per-channel MedicalNet perceptual loss, guarding against NaN.
+
+    ``medicalnet_intensity_normalisation`` inside MONAI does ``(x - mean) / std``
+    with **no epsilon**.  When a single channel has near-zero variance (common
+    early in multi-channel training before the model differentiates modalities),
+    ``std -> 0`` and the normalisation produces inf/NaN.
+
+    This helper skips channels whose reconstruction std is below *eps* and
+    runs the perceptual network in float32 (fp16 feature-squaring can also
+    overflow in MedicalNet ResNet50).
+    """
+    n_ch = reconstruction.shape[1]
+    total = torch.tensor(0.0, device=reconstruction.device)
+    counted = 0
+    for c in range(n_ch):
+        recon_ch = reconstruction[:, c : c + 1].float()
+        target_ch = target[:, c : c + 1].float()
+        # Guard: skip channels that would cause div-by-zero in
+        # medicalnet_intensity_normalisation  ((x - mean) / std).
+        if recon_ch.std() < eps or target_ch.std() < eps:
+            continue
+        total = total + perceptual_loss_fn(recon_ch, target_ch)
+        counted += 1
+    if counted == 0:
+        return torch.tensor(0.0, device=reconstruction.device, requires_grad=True)
+    return total / counted
+
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
     """Encode a list of texts into text embeddings using the provided tokenizer and text encoder."""
@@ -216,18 +250,11 @@ def train_epoch_autoencoder(
         optimizer_g.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda"):
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss expects single-channel → average over channels.
-            # Disable autocast: MedicalNet ResNet50 features overflow in float16
-            # (x**2 in normalize_tensor exceeds fp16 max ≈ 65504 → inf → NaN).
-            n_ch = images.shape[1]
+            # MedicalNet perceptual loss: computed per-channel in float32.
+            # Guarded against div-by-zero from near-constant channels and
+            # fp16 overflow in MedicalNet internal features.
             with torch.amp.autocast("cuda", enabled=False):
-                p_loss = sum(
-                    perceptual_loss(
-                        reconstruction[:, c:c+1].float(),
-                        images[:, c:c+1].float()
-                    )
-                    for c in range(n_ch)
-                ) / n_ch
+                p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
 
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
@@ -311,18 +338,11 @@ def eval_autoencoder(
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss expects single-channel → average over channels.
-            # Disable autocast: MedicalNet ResNet50 features overflow in float16
-            # (x**2 in normalize_tensor exceeds fp16 max ≈ 65504 → inf → NaN).
-            n_ch = images.shape[1]
+            # MedicalNet perceptual loss: computed per-channel in float32.
+            # Guarded against div-by-zero from near-constant channels and
+            # fp16 overflow in MedicalNet internal features.
             with torch.amp.autocast("cuda", enabled=False):
-                p_loss = sum(
-                    perceptual_loss(
-                        reconstruction[:, c:c+1].float(),
-                        images[:, c:c+1].float()
-                    )
-                    for c in range(n_ch)
-                ) / n_ch
+                p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
