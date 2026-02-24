@@ -5,19 +5,25 @@ With DecathlonDataset (BraTS)::
     torchrun --nproc_per_node=4 -m text2glioma.training.train_stage1_ddp \
         --config configs/stage1.yaml --run_dir /runs/ --num_epochs 300
 
-With a custom datalist (e.g. Task03_BrainTumourDx)::
+With a custom datalist and a named run::
 
-    torchrun --nproc_per_node=4 -m text2glioma.training.train_stage1_ddp \
-        --config configs/stage1.yaml --run_dir /runs/ \
+    torchrun --nproc_per_node=4 -m text2glioma.training.train_stage1_ddp \\
+        --config configs/stage1.yaml --run_dir /runs/ \\
+        --run_name lr_d_sweep_2.5e-5 \\
         --datalist datalist_task03.json --no_channel_reorder
+
+If ``--run_name`` is omitted a timestamp is used (e.g. ``2026-02-25_143022``).
+Each run saves a ``config_snapshot.yaml`` capturing the full config + CLI args.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -53,6 +59,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--config", type=str, required=True, help="Stage-1 YAML config.")
     p.add_argument("--run_dir", type=str, required=True, help="Root output directory.")
+    p.add_argument("--run_name", type=str, default=None,
+                    help="Run name (used as sub-directory under run_dir). "
+                         "Defaults to a timestamp, e.g. 2026-02-25_143022.")
     p.add_argument("--data_dir", type=str, default="./data",
                     help="Root for DecathlonDataset download / cache.")
     p.add_argument("--datalist", type=str, default=None,
@@ -82,6 +91,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache_dir", type=str, default=None,
                     help="Directory for perceptual-loss network cache. "
                          "Defaults to <run_dir>/cache if not specified.")
+    p.add_argument("--set", nargs="+", metavar="KEY=VALUE", default=[],
+                    help="Override config values using dot notation, e.g. "
+                         "--set model.lr=1e-4 discriminator.lr=2.5e-5 "
+                         "model.adv_weight=0.025")
     return p.parse_args()
 
 
@@ -124,6 +137,82 @@ def print0(msg: str, rank: int):
     """Print only on rank 0."""
     if is_main(rank):
         print(msg)
+
+
+def _save_config_snapshot(
+    config: dict,
+    args: argparse.Namespace,
+    run_dir: Path,
+) -> None:
+    """Dump the merged YAML config + CLI overrides into *run_dir* for reproducibility.
+
+    Creates ``run_dir/config_snapshot.yaml`` containing:
+    - The full YAML config (with any CLI-driven overrides applied)
+    - A ``_cli`` block recording every CLI argument
+    - A ``_meta`` block with timestamp, config source path, etc.
+    """
+    import yaml
+
+    snapshot = copy.deepcopy(config)
+
+    # Apply CLI overrides that shadow YAML values
+    cli_overrides = {}
+    if args.batch_size != 2:
+        cli_overrides["batch_size"] = args.batch_size
+    if args.num_epochs != 300:
+        cli_overrides["num_epochs"] = args.num_epochs
+    if args.seed != 42:
+        cli_overrides["seed"] = args.seed
+
+    snapshot["_cli"] = {k: v for k, v in vars(args).items()
+                        if v is not None and k != "config"}
+    snapshot["_meta"] = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "config_source": str(Path(args.config).resolve()),
+        "run_name": run_dir.parent.name,
+    }
+
+    out_path = run_dir / "config_snapshot.yaml"
+    with open(out_path, "w") as f:
+        yaml.dump(snapshot, f, default_flow_style=False, sort_keys=False)
+    print(f"[rank-0] Config snapshot saved to {out_path}")
+
+
+def _apply_overrides(config: dict, overrides: list[str]) -> dict:
+    """Apply ``key=value`` overrides using dot notation.
+
+    Examples::
+
+        --set model.lr=1e-4  discriminator.lr=2.5e-5  model.adv_weight=0.025
+              model.params.num_channels='[64,128,256]'
+    """
+    import ast
+
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Override must be KEY=VALUE, got: {item!r}")
+        key, value = item.split("=", 1)
+        # Auto-cast value
+        try:
+            value = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            pass  # keep as string
+
+        parts = key.split(".")
+        d = config
+        for p in parts[:-1]:
+            if p not in d:
+                raise KeyError(f"Config key {key!r}: sub-key {p!r} not found. "
+                               f"Available: {list(d.keys())}")
+            d = d[p]
+        leaf = parts[-1]
+        if leaf not in d:
+            raise KeyError(f"Config key {key!r}: leaf {leaf!r} not found. "
+                           f"Available: {list(d.keys())}")
+        old = d[leaf]
+        d[leaf] = value
+        print(f"[override] {key}: {old!r} -> {value!r}")
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +367,8 @@ def main():
     # Model, discriminator, perceptual loss
     # ------------------------------------------------------------------
     config = load_config(args.config)
+    if args.set:
+        config = _apply_overrides(config, args.set)
     model_type = config["model"]["name"]
     model = get_model(model_type, config, args.pretrained)
 
@@ -310,13 +401,16 @@ def main():
     # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
-    run_dir = Path(args.run_dir) / "text2glioma" / "autoencoder_stage1"
+    run_name = args.run_name or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_dir = Path(args.run_dir) / run_name / "autoencoder_stage1"
     output_dir = run_dir / "output"
     model_dir = output_dir / "models"
     log_dir = output_dir / "logs"
     if is_main(rank):
         for d in [output_dir, model_dir, log_dir]:
             d.mkdir(parents=True, exist_ok=True)
+        # Save config snapshot with CLI overrides for reproducibility
+        _save_config_snapshot(config, args, run_dir)
     if distributed:
         dist.barrier()
 
