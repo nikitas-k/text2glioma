@@ -506,10 +506,76 @@ def get_experiment_dataloaders(
     )
     return train_loader, val_loader
 
+def _patch_attention_proj(model: nn.Module) -> None:
+    """Fix MONAI Generative bug: AttentionBlock defines proj_attn but never
+    calls it in forward().  This monkey-patches the forward method of every
+    AttentionBlock to apply the output projection after multi-head attention,
+    which is standard transformer behaviour and necessary for DDP (otherwise
+    the unused parameters cause a reduction error).
+
+    See: generative/networks/nets/autoencoderkl.py  AttentionBlock.__init__
+    """
+    from generative.networks.nets.autoencoderkl import AttentionBlock
+
+    for module in model.modules():
+        if isinstance(module, AttentionBlock) and hasattr(module, "proj_attn"):
+            _bind_patched_forward(module)
+
+
+def _bind_patched_forward(block: nn.Module) -> None:
+    """Bind a patched forward to *block* that includes ``proj_attn``."""
+    import types
+
+    _orig = block.forward  # keep a reference
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:      # noqa: D401
+        residual = x
+
+        batch = channel = height = width = depth = -1
+        if self.spatial_dims == 2:
+            batch, channel, height, width = x.shape
+        if self.spatial_dims == 3:
+            batch, channel, height, width, depth = x.shape
+
+        x = self.norm(x)
+
+        if self.spatial_dims == 2:
+            x = x.view(batch, channel, height * width).transpose(1, 2)
+        if self.spatial_dims == 3:
+            x = x.view(batch, channel, height * width * depth).transpose(1, 2)
+
+        query = self.to_q(x)
+        key = self.to_k(x)
+        value = self.to_v(x)
+
+        query = self.reshape_heads_to_batch_dim(query)
+        key = self.reshape_heads_to_batch_dim(key)
+        value = self.reshape_heads_to_batch_dim(value)
+
+        if self.use_flash_attention:
+            x = self._memory_efficient_attention_xformers(query, key, value)
+        else:
+            x = self._attention(query, key, value)
+
+        x = self.reshape_batch_dim_to_heads(x)
+        x = self.proj_attn(x)            # ← FIX: output projection
+        x = x.to(query.dtype)
+
+        if self.spatial_dims == 2:
+            x = x.transpose(-1, -2).reshape(batch, channel, height, width)
+        if self.spatial_dims == 3:
+            x = x.transpose(-1, -2).reshape(batch, channel, height, width, depth)
+
+        return x + residual
+
+    block.forward = types.MethodType(_forward, block)
+
+
 def get_model(model_type, config, pretrained=False, from_file=None):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
         model = AutoencoderKL(**config["model"]["params"])
+        _patch_attention_proj(model)
         if pretrained:
             print("Using pretrained weights from Pinaya et al. for the autoencoder.")
             state_dict = gdown.download(
