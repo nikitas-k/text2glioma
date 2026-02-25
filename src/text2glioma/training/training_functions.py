@@ -98,6 +98,7 @@ def train_autoencoder(
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
     autoencoder_warm_up_n_epochs: int = 0,
+    d_skip_threshold: float = 0.0,
 ):
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -136,6 +137,7 @@ def train_autoencoder(
             scaler_g=scaler_g,
             scaler_d=scaler_d,
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
+            d_skip_threshold=d_skip_threshold,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -190,6 +192,7 @@ def train_epoch_autoencoder(
     scaler_g: torch.amp.GradScaler,
     scaler_d: torch.amp.GradScaler,
     autoencoder_warm_up_n_epochs: int = 0,
+    d_skip_threshold: float = 0.0,
 ) -> None:
     warming_up = epoch < autoencoder_warm_up_n_epochs
     if warming_up and epoch == 0:
@@ -200,6 +203,12 @@ def train_epoch_autoencoder(
               f"— discriminator skipped.")
     elif epoch == autoencoder_warm_up_n_epochs and autoencoder_warm_up_n_epochs > 0:
         print(f"[WARMUP] Warmup complete — enabling discriminator at epoch {epoch}.")
+
+    if d_skip_threshold > 0 and epoch == 0:
+        print(f"[D-SKIP] Adaptive D skipping enabled: "
+              f"D update skipped when d_loss < {d_skip_threshold}")
+
+    d_skips = 0  # count how many steps D was skipped this epoch
 
     model.train()
     discriminator.train()
@@ -230,6 +239,11 @@ def train_epoch_autoencoder(
         # One forward = one BN update = no conflict.
         # During warmup, skip D entirely so G learns a stable
         # reconstruction baseline before adversarial training begins.
+        #
+        # Adaptive D skipping: when d_loss drops below d_skip_threshold
+        # the discriminator is "too good" — skip its update to let G
+        # catch up.  D still runs a forward pass so we get the loss
+        # value for logging, but we skip backward + step.
         if adversarial_weight > 0 and not warming_up:
             optimizer_d.zero_grad(set_to_none=True)
 
@@ -247,11 +261,16 @@ def train_epoch_autoencoder(
                 discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
                 d_loss = (adversarial_weight * discriminator_loss).mean()
 
-            scaler_d.scale(d_loss).backward()
-            scaler_d.unscale_(optimizer_d)
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
+            # Adaptive skip: only update D if it hasn't collapsed yet.
+            skip_d = d_skip_threshold > 0 and discriminator_loss.item() < d_skip_threshold
+            if skip_d:
+                d_skips += 1
+            else:
+                scaler_d.scale(d_loss).backward()
+                scaler_d.unscale_(optimizer_d)
+                torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
+                scaler_d.step(optimizer_d)
+                scaler_d.update()
         else:
             discriminator_loss = torch.tensor([0.0]).to(device)
 
@@ -309,10 +328,14 @@ def train_epoch_autoencoder(
         losses["d_loss"] = discriminator_loss
 
         if writer is not None:
-            writer.add_scalar("lr_g", get_lr(optimizer_g), epoch * len(loader) + step)
-            writer.add_scalar("lr_d", get_lr(optimizer_d), epoch * len(loader) + step)
+            global_step = epoch * len(loader) + step
+            writer.add_scalar("lr_g", get_lr(optimizer_g), global_step)
+            writer.add_scalar("lr_d", get_lr(optimizer_d), global_step)
             for k, v in losses.items():
-                writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
+                writer.add_scalar(f"{k}", v.item(), global_step)
+            if d_skip_threshold > 0:
+                writer.add_scalar("d_skip_rate",
+                                  d_skips / (step + 1), global_step)
 
         pbar.set_postfix(
             {
@@ -326,6 +349,11 @@ def train_epoch_autoencoder(
                 "lr_d": f"{get_lr(optimizer_d):.6f}",
             },
         )
+
+    if d_skip_threshold > 0:
+        skip_pct = 100.0 * d_skips / max(len(loader), 1)
+        print(f"[D-SKIP] Epoch {epoch}: skipped {d_skips}/{len(loader)} "
+              f"D updates ({skip_pct:.1f}%)")
 
 @torch.no_grad()
 def eval_autoencoder(
