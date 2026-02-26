@@ -7,6 +7,7 @@ import math
 from tqdm import tqdm
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -262,7 +263,18 @@ def train_epoch_autoencoder(
                 d_loss = (adversarial_weight * discriminator_loss).mean()
 
             # Adaptive skip: only update D if it hasn't collapsed yet.
-            skip_d = d_skip_threshold > 0 and discriminator_loss.item() < d_skip_threshold
+            # CRITICAL: synchronize the skip decision across all DDP ranks.
+            # Each rank sees a different mini-batch so d_loss can differ.
+            # If some ranks skip backward() and others don't, the DDP
+            # gradient allreduce will hang (NCCL timeout).
+            if d_skip_threshold > 0 and dist.is_initialized():
+                d_loss_avg = discriminator_loss.detach().clone()
+                dist.all_reduce(d_loss_avg, op=dist.ReduceOp.AVG)
+                skip_d = d_loss_avg.item() < d_skip_threshold
+            elif d_skip_threshold > 0:
+                skip_d = discriminator_loss.item() < d_skip_threshold
+            else:
+                skip_d = False
             if skip_d:
                 d_skips += 1
             else:
