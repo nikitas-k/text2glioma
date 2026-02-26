@@ -99,11 +99,10 @@ def _apply_overrides(config: dict, overrides: list[str]) -> dict:
             d = d[p]
         leaf = parts[-1]
         if leaf not in d:
-            raise KeyError(f"Config key {key!r}: leaf {leaf!r} not found. "
-                           f"Available: {list(d.keys())}")
-        old = d[leaf]
+            print(f"[override] {key}: NEW key (not in config) -> {value!r}")
+        else:
+            print(f"[override] {key}: {d[leaf]!r} -> {value!r}")
         d[leaf] = value
-        print(f"[override] {key}: {old!r} -> {value!r}")
     return config
 
 
@@ -281,6 +280,7 @@ def main():
         perceptual_weight=config["model"]["perceptual_weight"],
         adversarial_weight=config["model"]["adv_weight"],
         autoencoder_warm_up_n_epochs=config["model"].get("autoencoder_warm_up_n_epochs", 0),
+        d_skip_threshold=config["model"].get("d_skip_threshold", 0.0),
     )
     if is_main_process:
         print(f"Training completed. Best validation loss: {val_loss:.4f}")
