@@ -41,7 +41,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from text2glioma.training.training_functions import train_autoencoder
-from text2glioma.utils import get_model, load_config
+from text2glioma.utils import apply_spectral_norm, get_model, load_config
 
 warnings.filterwarnings("ignore")
 
@@ -372,6 +372,8 @@ def main():
     model = get_model(model_type, config, args.pretrained)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
+    if config["discriminator"].get("spectral_norm", False):
+        apply_spectral_norm(discriminator)
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.run_dir) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     perceptual_loss = PerceptualLoss(

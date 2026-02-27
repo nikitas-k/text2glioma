@@ -571,6 +571,36 @@ def _bind_patched_forward(block: nn.Module) -> None:
     block.forward = types.MethodType(_forward, block)
 
 
+def apply_spectral_norm(discriminator: nn.Module) -> nn.Module:
+    """Wrap every Conv layer in *discriminator* with spectral normalisation.
+
+    Spectral normalisation (Miyato et al., 2018) constrains the Lipschitz
+    constant of each layer to 1, which stabilises PatchGAN training and
+    prevents the discriminator from creating sharp patch-boundary gradients
+    that imprint grid artifacts onto the generator.
+
+    The module is modified **in-place** and also returned for convenience.
+    """
+    count = 0
+    for name, mod in list(discriminator.named_modules()):
+        if isinstance(mod, (nn.Conv1d, nn.Conv2d, nn.Conv3d,
+                            nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d)):
+            # Navigate to the parent so we can replace the child
+            parts = name.split(".")
+            parent = discriminator
+            for p in parts[:-1]:
+                parent = getattr(parent, p) if not p.isdigit() else parent[int(p)]
+            attr = parts[-1]
+            try:
+                setattr(parent, attr, nn.utils.spectral_norm(mod))
+                count += 1
+            except Exception:
+                pass  # already wrapped or unsupported — skip silently
+    if count:
+        print(f"[spectral_norm] Wrapped {count} conv layers in discriminator")
+    return discriminator
+
+
 def get_model(model_type, config, pretrained=False, from_file=None):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
