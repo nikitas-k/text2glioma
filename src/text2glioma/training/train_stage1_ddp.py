@@ -465,6 +465,7 @@ def main():
         adversarial_weight=config["model"]["adv_weight"],
         autoencoder_warm_up_n_epochs=config["model"].get("autoencoder_warm_up_n_epochs", 0),
         d_skip_threshold=config["model"].get("d_skip_threshold", 0.0),
+        r1_gamma=config["model"].get("r1_gamma", 0.0),
     )
     print0(f"Training finished.  Best val loss: {val_loss:.4f}", rank)
     cleanup()

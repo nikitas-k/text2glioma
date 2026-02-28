@@ -16,6 +16,28 @@ from generative.losses import PatchAdversarialLoss
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning, get_text_encoder_hidden_states
 
 
+def _r1_penalty(
+    discriminator: nn.Module,
+    real: torch.Tensor,
+) -> torch.Tensor:
+    """R1 gradient penalty (Mescheder et al., 2018).
+
+    Penalises ||∇D(real)||² to prevent the discriminator from creating
+    overly sharp decision boundaries.  This stabilises GAN training
+    without needing to weaken D architecturally or skip its updates.
+
+    The penalty is computed in float32 for numerical stability.
+    """
+    real = real.detach().requires_grad_(True)
+    logits = discriminator(real.float())[-1]
+    grad, = torch.autograd.grad(
+        outputs=logits.sum(),
+        inputs=real,
+        create_graph=True,
+    )
+    return grad.pow(2).reshape(grad.shape[0], -1).sum(1).mean()
+
+
 def _safe_perceptual_loss(
     perceptual_loss_fn: nn.Module,
     reconstruction: torch.Tensor,
@@ -100,6 +122,7 @@ def train_autoencoder(
     adversarial_weight: float = 1e-3,
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
+    r1_gamma: float = 0.0,
 ):
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -139,6 +162,7 @@ def train_autoencoder(
             scaler_d=scaler_d,
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
             d_skip_threshold=d_skip_threshold,
+            r1_gamma=r1_gamma,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -194,6 +218,7 @@ def train_epoch_autoencoder(
     scaler_d: torch.amp.GradScaler,
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
+    r1_gamma: float = 0.0,
 ) -> None:
     warming_up = epoch < autoencoder_warm_up_n_epochs
     if warming_up and epoch == 0:
@@ -261,6 +286,13 @@ def train_epoch_autoencoder(
                 loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
                 discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
                 d_loss = (adversarial_weight * discriminator_loss).mean()
+
+            # R1 gradient penalty — computed outside autocast because
+            # grad computation requires float32 for stability.
+            r1_loss = torch.tensor(0.0, device=device)
+            if r1_gamma > 0:
+                r1_loss = _r1_penalty(discriminator, images)
+                d_loss = d_loss + 0.5 * r1_gamma * r1_loss
 
             # Adaptive skip: only update D if it hasn't collapsed yet.
             # CRITICAL: synchronize the skip decision across all DDP ranks.
@@ -345,6 +377,8 @@ def train_epoch_autoencoder(
             writer.add_scalar("lr_d", get_lr(optimizer_d), global_step)
             for k, v in losses.items():
                 writer.add_scalar(f"{k}", v.item(), global_step)
+            if r1_gamma > 0:
+                writer.add_scalar("r1_penalty", r1_loss.item(), global_step)
             if d_skip_threshold > 0:
                 writer.add_scalar("d_skip_rate",
                                   d_skips / (step + 1), global_step)
