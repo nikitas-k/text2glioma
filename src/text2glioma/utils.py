@@ -585,14 +585,11 @@ def apply_spectral_norm(discriminator: nn.Module) -> nn.Module:
     for name, mod in list(discriminator.named_modules()):
         if isinstance(mod, (nn.Conv1d, nn.Conv2d, nn.Conv3d,
                             nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d)):
-            # Navigate to the parent so we can replace the child
-            parts = name.split(".")
-            parent = discriminator
-            for p in parts[:-1]:
-                parent = getattr(parent, p) if not p.isdigit() else parent[int(p)]
-            attr = parts[-1]
+            # spectral_norm modifies the module in-place (reparameterises
+            # weight → weight_orig + weight_v/u), so no parent navigation
+            # or setattr is needed.
             try:
-                setattr(parent, attr, nn.utils.spectral_norm(mod))
+                nn.utils.spectral_norm(mod)
                 count += 1
             except Exception:
                 pass  # already wrapped or unsupported — skip silently
