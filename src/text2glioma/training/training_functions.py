@@ -3,6 +3,7 @@ from typing import Any
 from collections import OrderedDict
 from copy import deepcopy
 import math
+import warnings
 
 from tqdm import tqdm
 
@@ -38,6 +39,57 @@ def _r1_penalty(
     return grad.pow(2).reshape(grad.shape[0], -1).sum(1).mean()
 
 
+def _get_last_decoder_weight(model: nn.Module) -> torch.Tensor:
+    """Return the weight tensor of the last Conv layer in the VAE decoder.
+
+    Used by ``_compute_adaptive_weight`` to equalize reconstruction and
+    adversarial gradient magnitudes (VQGAN / Taming Transformers).
+    Walks *model.decoder* (or *model.module.decoder* for DDP) and returns
+    the ``weight`` of the last ``Conv3d`` / ``Conv2d`` leaf module found.
+    """
+    decoder = getattr(model, "module", model).decoder
+    last_weight = None
+    for mod in decoder.modules():
+        if isinstance(mod, (nn.Conv2d, nn.Conv3d)):
+            last_weight = mod.weight
+    if last_weight is None:
+        raise RuntimeError("Could not find any Conv layer in model.decoder")
+    return last_weight
+
+
+def _compute_adaptive_weight(
+    rec_loss: torch.Tensor,
+    g_loss: torch.Tensor,
+    last_layer_weight: torch.Tensor,
+    max_weight: float = 1e4,
+) -> torch.Tensor:
+    """Compute adaptive adversarial weight (Esser et al., VQGAN 2021).
+
+    Balances reconstruction and adversarial gradients at the last decoder
+    layer so that neither dominates regardless of discriminator strength::
+
+        d_weight = ‖∂L_rec/∂w_last‖ / ‖∂L_adv/∂w_last‖
+
+    This replaces the fixed ``adv_weight`` hyperparameter with a
+    dynamically computed scalar, eliminating the D collapse / G starvation
+    failure mode caused by a mis-tuned constant.
+
+    Returns
+    -------
+    d_weight : scalar tensor
+        The adaptive weight, clamped to [0, max_weight] for safety.
+    """
+    rec_grads = torch.autograd.grad(
+        rec_loss, last_layer_weight, retain_graph=True,
+    )[0]
+    g_grads = torch.autograd.grad(
+        g_loss, last_layer_weight, retain_graph=True,
+    )[0]
+    d_weight = torch.norm(rec_grads) / (torch.norm(g_grads) + 1e-6)
+    d_weight = torch.clamp(d_weight, 0.0, max_weight).detach()
+    return d_weight
+
+
 def _safe_perceptual_loss(
     perceptual_loss_fn: nn.Module,
     reconstruction: torch.Tensor,
@@ -51,16 +103,15 @@ def _safe_perceptual_loss(
     early in multi-channel training before the model differentiates modalities),
     ``std -> 0`` and the normalisation produces inf/NaN.
 
-    This helper skips channels whose reconstruction std is below *eps* and
-    runs the perceptual network in float32 (fp16 feature-squaring can also
-    overflow in MedicalNet ResNet50).
+    This helper computes the loss per-channel (MedicalNet expects 1-ch input)
+    and skips channels whose reconstruction std is below *eps*.
     """
     n_ch = reconstruction.shape[1]
     total = torch.tensor(0.0, device=reconstruction.device)
     counted = 0
     for c in range(n_ch):
-        recon_ch = reconstruction[:, c : c + 1].float()
-        target_ch = target[:, c : c + 1].float()
+        recon_ch = reconstruction[:, c : c + 1]
+        target_ch = target[:, c : c + 1]
         # Guard: skip channels that would cause div-by-zero in
         # medicalnet_intensity_normalisation  ((x - mean) / std).
         if recon_ch.std() < eps or target_ch.std() < eps:
@@ -106,8 +157,6 @@ def train_autoencoder(
     val_loader,
     optimizer_g: torch.optim.Optimizer,
     optimizer_d: torch.optim.Optimizer,
-    scaler_g: torch.amp.GradScaler,
-    scaler_d: torch.amp.GradScaler,
     device: torch.device,
     n_epochs: int,
     start_epoch: int = 0,
@@ -125,7 +174,19 @@ def train_autoencoder(
     r1_gamma: float = 0.0,
     kl_warmup_epochs: int = 0,
     kl_max: float = 0.0,
+    adaptive_adv_weight: bool = False,
+    # Deprecated — kept for backwards compatibility with queued jobs.
+    # GradScaler is no longer used (bf16 doesn't need loss scaling).
+    scaler_g=None,
+    scaler_d=None,
 ):
+    if scaler_g is not None or scaler_d is not None:
+        warnings.warn(
+            "scaler_g/scaler_d are deprecated and ignored (bf16 training "
+            "does not use GradScaler). Remove them from your call site.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     raw_model = model.module if hasattr(model, "module") else model
 
     model_dir = Path(model_dir)
@@ -160,13 +221,12 @@ def train_autoencoder(
             kl_weight=kl_weight,
             adversarial_weight=adversarial_weight,
             perceptual_weight=perceptual_weight,
-            scaler_g=scaler_g,
-            scaler_d=scaler_d,
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
             d_skip_threshold=d_skip_threshold,
             r1_gamma=r1_gamma,
             kl_warmup_epochs=kl_warmup_epochs,
             kl_max=kl_max,
+            adaptive_adv_weight=adaptive_adv_weight,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -218,14 +278,23 @@ def train_epoch_autoencoder(
     kl_weight: float,
     adversarial_weight: float,
     perceptual_weight: float,
-    scaler_g: torch.amp.GradScaler,
-    scaler_d: torch.amp.GradScaler,
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
     r1_gamma: float = 0.0,
     kl_warmup_epochs: int = 0,
     kl_max: float = 0.0,
+    adaptive_adv_weight: bool = False,
+    # Deprecated — kept for backwards compatibility with queued jobs.
+    scaler_g=None,
+    scaler_d=None,
 ) -> None:
+    if scaler_g is not None or scaler_d is not None:
+        warnings.warn(
+            "scaler_g/scaler_d are deprecated and ignored (bf16 training "
+            "does not use GradScaler). Remove them from your call site.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     warming_up = epoch < autoencoder_warm_up_n_epochs
     if warming_up and epoch == 0:
         print(f"[WARMUP] Training generator only for the first "
@@ -264,13 +333,19 @@ def train_epoch_autoencoder(
 
     adv_loss = PatchAdversarialLoss(criterion="least_squares", no_activation_leastsq=True)
 
+    # For adaptive adversarial weight: cache the last decoder conv weight.
+    last_layer_weight = _get_last_decoder_weight(model) if adaptive_adv_weight else None
+    if adaptive_adv_weight and epoch == 0:
+        print(f"[ADAPTIVE-ADV] Using VQGAN-style adaptive adversarial weight "
+              f"(adv_weight={adversarial_weight} used as multiplier)")
+
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
         images = x["image"].to(device)
 
         # Shared forward pass — kept in the graph so the generator
         # backward can reach the autoencoder parameters.
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             reconstruction, z_mu, z_sigma = model(x=images)
 
         # -------- DISCRIMINATOR --------
@@ -291,7 +366,7 @@ def train_epoch_autoencoder(
         if adversarial_weight > 0 and not warming_up:
             optimizer_d.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 disc_input = torch.cat(
                     [reconstruction.contiguous().detach(),
                      images.contiguous().detach()],
@@ -328,11 +403,9 @@ def train_epoch_autoencoder(
             if skip_d:
                 d_skips += 1
             else:
-                scaler_d.scale(d_loss).backward()
-                scaler_d.unscale_(optimizer_d)
+                d_loss.backward()
                 torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
-                scaler_d.step(optimizer_d)
-                scaler_d.update()
+                optimizer_d.step()
         else:
             discriminator_loss = torch.tensor([0.0]).to(device)
 
@@ -344,13 +417,11 @@ def train_epoch_autoencoder(
             p.requires_grad_(False)
 
         optimizer_g.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss: computed per-channel in float32.
-            # Guarded against div-by-zero from near-constant channels and
-            # fp16 overflow in MedicalNet internal features.
-            with torch.amp.autocast("cuda", enabled=False):
-                p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
+            # MedicalNet perceptual loss: per-channel (MedicalNet expects 1-ch)
+            # with div-by-zero guard for near-constant channels.
+            p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
 
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
@@ -366,7 +437,20 @@ def train_epoch_autoencoder(
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
 
-            loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adversarial_weight * generator_loss
+            # Reconstruction loss (everything except adversarial)
+            rec_loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss
+
+            # Adversarial contribution: adaptive or fixed weight
+            if adaptive_adv_weight and adversarial_weight > 0 and not warming_up:
+                d_weight = _compute_adaptive_weight(
+                    rec_loss, generator_loss, last_layer_weight,
+                )
+                # Use adv_weight as an extra multiplier on top of the
+                # adaptive weight (keeps the config knob meaningful).
+                loss = rec_loss + adversarial_weight * d_weight * generator_loss
+            else:
+                d_weight = torch.tensor(adversarial_weight, device=device)
+                loss = rec_loss + adversarial_weight * generator_loss
 
             loss = loss.mean()
             l1_loss = l1_loss.mean()
@@ -382,11 +466,9 @@ def train_epoch_autoencoder(
                 g_loss=g_loss,
             )
 
-        scaler_g.scale(losses["loss"]).backward()
-        scaler_g.unscale_(optimizer_g)
+        losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
-        scaler_g.step(optimizer_g)
-        scaler_g.update()
+        optimizer_g.step()
 
         # Unfreeze discriminator for the next iteration.
         for p in disc_module.parameters():
@@ -407,6 +489,8 @@ def train_epoch_autoencoder(
                                   d_skips / (step + 1), global_step)
             if kl_warmup_epochs > 0 and epoch < kl_warmup_epochs:
                 writer.add_scalar("kl_weight_eff", kl_weight, global_step)
+            if adaptive_adv_weight:
+                writer.add_scalar("d_weight", d_weight.item(), global_step)
 
         pbar.set_postfix(
             {
@@ -448,15 +532,13 @@ def eval_autoencoder(
     for x in loader:
         images = x["image"].to(device)
 
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
-            # MedicalNet perceptual loss: computed per-channel in float32.
-            # Guarded against div-by-zero from near-constant channels and
-            # fp16 overflow in MedicalNet internal features.
-            with torch.amp.autocast("cuda", enabled=False):
-                p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
+            # MedicalNet perceptual loss: per-channel (MedicalNet expects 1-ch)
+            # with div-by-zero guard for near-constant channels.
+            p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
@@ -527,7 +609,6 @@ def train_ldm(
     train_loader: Any,
     val_loader: Any,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.amp.GradScaler,
     device: str,
     n_epochs: int,
     text_field: str = "impression",
@@ -546,7 +627,16 @@ def train_ldm(
     ema_decay: float = 0.9999,
     ema_state_dict: dict = None,
     snr_gamma: float = 5.0,
+    # Deprecated — kept for backwards compatibility with queued jobs.
+    scaler=None,
 ) -> float:
+    if scaler is not None:
+        warnings.warn(
+            "scaler is deprecated and ignored (bf16 training does not use "
+            "GradScaler). Remove it from your call site.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     raw_model = model.module if hasattr(model, "module") else model
 
     best_loss = float("inf")
@@ -629,7 +719,6 @@ def train_ldm(
             device=device,
             epoch=epoch,
             writer=writer_train,
-            scaler=scaler,
             scale_factor=scale_factor,
             num_mask_classes=num_mask_classes,
             mask_dropout_p=mask_dropout_p,
@@ -698,7 +787,6 @@ def train_epoch_ldm(
     device: torch.device,
     epoch: int,
     writer: SummaryWriter,
-    scaler: torch.amp.GradScaler,
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
@@ -707,7 +795,16 @@ def train_epoch_ldm(
     ema_model: Any = None,
     ema_decay: float = 0.9999,
     min_snr_weights: torch.Tensor = None,
+    # Deprecated — kept for backwards compatibility with queued jobs.
+    scaler=None,
 ) -> None:
+    if scaler is not None:
+        warnings.warn(
+            "scaler is deprecated and ignored (bf16 training does not use "
+            "GradScaler). Remove it from your call site.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     model.train()
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -722,7 +819,7 @@ def train_epoch_ldm(
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             with torch.no_grad():
                 e = stage1(images) * scale_factor
                 latent_spatial = e.shape[2:]  # (D', H', W')
@@ -765,11 +862,9 @@ def train_epoch_ldm(
 
         losses = OrderedDict(loss=loss)
 
-        scaler.scale(losses["loss"]).backward()
-        scaler.unscale_(optimizer)
+        losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
 
         if lr_scheduler is not None:
             lr_scheduler.step()
@@ -816,7 +911,7 @@ def eval_ldm(
         reports = x[text_field]
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             e = stage1(images) * scale_factor
             latent_spatial = e.shape[2:]
 

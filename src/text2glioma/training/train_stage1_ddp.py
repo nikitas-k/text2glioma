@@ -392,12 +392,10 @@ def main():
                             find_unused_parameters=args.find_unused_parameters)
 
     # ------------------------------------------------------------------
-    # Optimisers & scalers
+    # Optimisers
     # ------------------------------------------------------------------
     optimizer_g = optim.AdamW(model.parameters(), lr=config["model"]["lr"])
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
-    scaler_g = torch.amp.GradScaler()
-    scaler_d = torch.amp.GradScaler()
 
     # ------------------------------------------------------------------
     # Directories
@@ -449,8 +447,6 @@ def main():
         val_loader=val_loader,
         optimizer_g=optimizer_g,
         optimizer_d=optimizer_d,
-        scaler_g=scaler_g,
-        scaler_d=scaler_d,
         device=device,
         n_epochs=args.num_epochs,
         start_epoch=start_epoch,
@@ -468,6 +464,7 @@ def main():
         r1_gamma=config["model"].get("r1_gamma", 0.0),
         kl_warmup_epochs=config["model"].get("kl_warmup_epochs", 0),
         kl_max=config["model"].get("kl_max", 0.0),
+        adaptive_adv_weight=config["model"].get("adaptive_adv_weight", False),
     )
     print0(f"Training finished.  Best val loss: {val_loss:.4f}", rank)
     cleanup()

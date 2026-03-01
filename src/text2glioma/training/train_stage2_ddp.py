@@ -397,10 +397,9 @@ def main():
         param.requires_grad = False
 
     # ------------------------------------------------------------------
-    # Optimiser & scaler
+    # Optimiser
     # ------------------------------------------------------------------
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
-    scaler = torch.amp.GradScaler()
 
     # ------------------------------------------------------------------
     # Latent scale factor
@@ -481,7 +480,6 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
-        scaler=scaler,
         device=device,
         n_epochs=args.num_epochs,
         start_epoch=start_epoch,

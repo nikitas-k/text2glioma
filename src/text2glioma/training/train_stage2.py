@@ -231,7 +231,6 @@ def main():
     stage1 = stage1.to(device)
 
     optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
-    scaler = torch.amp.GradScaler()
     
     if is_main_process:
         print("Starting training...")
@@ -244,7 +243,6 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
-        scaler=scaler,
         device=device,
         model_dir=model_dir,
         writer_train=writer_train,
