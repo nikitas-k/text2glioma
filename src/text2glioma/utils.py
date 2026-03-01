@@ -152,8 +152,8 @@ def get_figure(
         cols = []
         for d in slice_depths:
             d_safe = min(d, img.shape[-1] - 1)
-            orig = np.clip(img[0, ch, :, :, d_safe].cpu().numpy(), 0, 1)
-            rec = np.clip(recons[0, ch, :, :, d_safe].cpu().numpy(), 0, 1)
+            orig = np.clip(img[0, ch, :, :, d_safe].float().cpu().numpy(), 0, 1)
+            rec = np.clip(recons[0, ch, :, :, d_safe].float().cpu().numpy(), 0, 1)
             cols.append(np.concatenate((orig, rec), axis=1))  # side-by-side
         rows.append(np.concatenate(cols, axis=1))
     
@@ -826,7 +826,7 @@ def log_ldm_sample_unconditioned(
     depth_idx = min(60, x_hat.shape[-1] - 1)
     cols = []
     for c in range(n_ch):
-        cols.append(np.clip(x_hat[0, c, :, :, depth_idx].cpu().numpy(), 0, 1))
+        cols.append(np.clip(x_hat[0, c, :, :, depth_idx].float().cpu().numpy(), 0, 1))
     grid = np.concatenate(cols, axis=1)
     fig, ax = plt.subplots(dpi=300)
     ax.imshow(grid, cmap="gray")
