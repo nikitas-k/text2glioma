@@ -123,6 +123,8 @@ def train_autoencoder(
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
     r1_gamma: float = 0.0,
+    kl_warmup_epochs: int = 0,
+    kl_max: float = 0.0,
 ):
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -163,6 +165,8 @@ def train_autoencoder(
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
             d_skip_threshold=d_skip_threshold,
             r1_gamma=r1_gamma,
+            kl_warmup_epochs=kl_warmup_epochs,
+            kl_max=kl_max,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -219,6 +223,8 @@ def train_epoch_autoencoder(
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
     r1_gamma: float = 0.0,
+    kl_warmup_epochs: int = 0,
+    kl_max: float = 0.0,
 ) -> None:
     warming_up = epoch < autoencoder_warm_up_n_epochs
     if warming_up and epoch == 0:
@@ -229,6 +235,18 @@ def train_epoch_autoencoder(
               f"— discriminator skipped.")
     elif epoch == autoencoder_warm_up_n_epochs and autoencoder_warm_up_n_epochs > 0:
         print(f"[WARMUP] Warmup complete — enabling discriminator at epoch {epoch}.")
+
+    # KL warmup: linearly ramp kl_weight from 0 → full over the first
+    # kl_warmup_epochs.  Prevents catastrophic KL spikes at init
+    # (latent space is unconstrained; early KL can reach billions).
+    if kl_warmup_epochs > 0:
+        kl_ramp = min(1.0, (epoch + 1) / kl_warmup_epochs)
+        kl_weight = kl_weight * kl_ramp
+        if epoch < kl_warmup_epochs:
+            print(f"[KL-WARMUP] epoch {epoch}: kl_weight ramped to "
+                  f"{kl_weight:.2e} ({kl_ramp:.0%} of target)")
+        elif epoch == kl_warmup_epochs:
+            print(f"[KL-WARMUP] Warmup complete — kl_weight at full {kl_weight:.2e}")
 
     if d_skip_threshold > 0 and epoch == 0:
         print(f"[D-SKIP] Adaptive D skipping enabled: "
@@ -337,6 +355,11 @@ def train_epoch_autoencoder(
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
+            # Clamp KL to prevent individual-batch spikes from
+            # overwhelming the loss (common at init or with large kl_weight).
+            if kl_max > 0:
+                kl_loss = torch.clamp(kl_loss, max=kl_max)
+
             if adversarial_weight > 0 and not warming_up:
                 logits_fake_g = disc_module(reconstruction.contiguous().float())[-1]
                 generator_loss = adv_loss(logits_fake_g, target_is_real=True, for_discriminator=False)
@@ -382,6 +405,8 @@ def train_epoch_autoencoder(
             if d_skip_threshold > 0:
                 writer.add_scalar("d_skip_rate",
                                   d_skips / (step + 1), global_step)
+            if kl_warmup_epochs > 0 and epoch < kl_warmup_epochs:
+                writer.add_scalar("kl_weight_eff", kl_weight, global_step)
 
         pbar.set_postfix(
             {

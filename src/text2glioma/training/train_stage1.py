@@ -284,6 +284,8 @@ def main():
         autoencoder_warm_up_n_epochs=config["model"].get("autoencoder_warm_up_n_epochs", 0),
         d_skip_threshold=config["model"].get("d_skip_threshold", 0.0),
         r1_gamma=config["model"].get("r1_gamma", 0.0),
+        kl_warmup_epochs=config["model"].get("kl_warmup_epochs", 0),
+        kl_max=config["model"].get("kl_max", 0.0),
     )
     if is_main_process:
         print(f"Training completed. Best validation loss: {val_loss:.4f}")
