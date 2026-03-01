@@ -196,7 +196,13 @@ def _apply_overrides(config: dict, overrides: list[str]) -> dict:
         try:
             value = ast.literal_eval(value)
         except (ValueError, SyntaxError):
-            pass  # keep as string
+            # Handle YAML-style booleans (true/false) that Python's
+            # ast.literal_eval doesn't recognise.
+            if value.lower() in ("true", "yes"):
+                value = True
+            elif value.lower() in ("false", "no"):
+                value = False
+            # else: keep as string
 
         parts = key.split(".")
         d = config
