@@ -205,6 +205,7 @@ def train_autoencoder(
         kl_weight=kl_weight,
         adversarial_weight=adversarial_weight,
         perceptual_weight=perceptual_weight,
+        kl_max=kl_max,
     )
 
     for epoch in range(start_epoch, n_epochs):
@@ -241,6 +242,7 @@ def train_autoencoder(
                 kl_weight=kl_weight,
                 adversarial_weight=adversarial_weight,
                 perceptual_weight=perceptual_weight,
+                kl_max=kl_max,
             )
             print_gpu_memory_report()
 
@@ -337,7 +339,7 @@ def train_epoch_autoencoder(
     last_layer_weight = _get_last_decoder_weight(model) if adaptive_adv_weight else None
     if adaptive_adv_weight and epoch == 0:
         print(f"[ADAPTIVE-ADV] Using VQGAN-style adaptive adversarial weight "
-              f"(adv_weight={adversarial_weight} used as multiplier)")
+              f"(d_weight replaces adv_weight={adversarial_weight})")
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
@@ -445,9 +447,9 @@ def train_epoch_autoencoder(
                 d_weight = _compute_adaptive_weight(
                     rec_loss, generator_loss, last_layer_weight,
                 )
-                # Use adv_weight as an extra multiplier on top of the
-                # adaptive weight (keeps the config knob meaningful).
-                loss = rec_loss + adversarial_weight * d_weight * generator_loss
+                # VQGAN-style: d_weight alone replaces adv_weight.
+                # No extra multiplier — the gradient ratio IS the weight.
+                loss = rec_loss + d_weight * generator_loss
             else:
                 d_weight = torch.tensor(adversarial_weight, device=device)
                 loss = rec_loss + adversarial_weight * generator_loss
@@ -522,6 +524,7 @@ def eval_autoencoder(
     kl_weight: float,
     adversarial_weight: float,
     perceptual_weight: float,
+    kl_max: float = 0.0,
 ) -> float:
     model.eval()
     discriminator.eval()
@@ -541,6 +544,9 @@ def eval_autoencoder(
             p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+
+            if kl_max > 0:
+                kl_loss = torch.clamp(kl_loss, max=kl_max)
 
             if adversarial_weight > 0:
                 logits_fake = discriminator(reconstruction.contiguous().float())[-1]
