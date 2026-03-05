@@ -339,7 +339,8 @@ def train_epoch_autoencoder(
     last_layer_weight = _get_last_decoder_weight(model) if adaptive_adv_weight else None
     if adaptive_adv_weight and epoch == 0:
         print(f"[ADAPTIVE-ADV] Using VQGAN-style adaptive adversarial weight "
-              f"(d_weight replaces adv_weight={adversarial_weight})")
+              f"(loss += adv_weight × d_weight × g_loss, "
+              f"adv_weight={adversarial_weight})")
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
@@ -447,9 +448,11 @@ def train_epoch_autoencoder(
                 d_weight = _compute_adaptive_weight(
                     rec_loss, generator_loss, last_layer_weight,
                 )
-                # VQGAN-style: d_weight alone replaces adv_weight.
-                # No extra multiplier — the gradient ratio IS the weight.
-                loss = rec_loss + d_weight * generator_loss
+                # VQGAN-style: d_weight = ‖∂rec/∂w‖ / ‖∂adv/∂w‖
+                # scaled by adv_weight as a global multiplier to
+                # moderate D's influence (prevents D-dominance / grid
+                # artifacts when adv_weight=1.0).
+                loss = rec_loss + adversarial_weight * d_weight * generator_loss
             else:
                 d_weight = torch.tensor(adversarial_weight, device=device)
                 loss = rec_loss + adversarial_weight * generator_loss
