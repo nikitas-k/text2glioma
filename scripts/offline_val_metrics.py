@@ -214,6 +214,22 @@ def main():
     print(f"\n  Weakest channel (L1):   {worst_l1} ({per_ch_l1[worst_l1]:.6f})")
     print(f"  Weakest channel (SSIM): {worst_ssim} ({per_ch_ssim[worst_ssim]:.6f})")
 
+    # ── Save JSON ──
+    metrics = {
+        "epoch": epoch,
+        "n_samples": n_samples,
+        "overall_l1": total_l1,
+        "overall_ssim": mean_ssim,
+        "per_channel_l1": per_ch_l1,
+        "per_channel_ssim": per_ch_ssim,
+        "weakest_l1": worst_l1,
+        "weakest_ssim": worst_ssim,
+    }
+    out_path = run_dir / "offline_metrics.json"
+    with open(out_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"\n  Saved to {out_path}")
+
 
 if __name__ == "__main__":
     main()
