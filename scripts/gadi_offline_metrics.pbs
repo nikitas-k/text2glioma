@@ -32,4 +32,5 @@ python ${HOME}/text2glioma/scripts/offline_val_metrics.py \
     --data_dir "$DATA_DIR" \
     --batch_size 2 \
     --num_workers 4 \
+    --save_samples 5 \
     2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_offline_metrics.log"

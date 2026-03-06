@@ -48,6 +48,8 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val_frac", type=float, default=0.2)
+    p.add_argument("--save_samples", type=int, default=5,
+                   help="Number of val samples to save as NIfTI (0 to skip)")
     return p.parse_args()
 
 
@@ -163,12 +165,21 @@ def main():
     )
     print(f"Val set: {len(val_ds)} samples")
 
+    # ── Optional NIfTI sample saving ──
+    saver = None
+    if args.save_samples > 0:
+        from text2glioma.inference.saver import NiftiSaver
+        samples_dir = run_dir / "samples"
+        saver = NiftiSaver(output_dir=str(samples_dir), rescale=True)
+        print(f"Will save {args.save_samples} sample pairs to {samples_dir}")
+
     # ── Evaluate ──
     # Accumulators
     per_ch_l1 = {cn: 0.0 for cn in CH_NAMES}
     per_ch_ssim = {cn: 0.0 for cn in CH_NAMES}
     total_l1 = 0.0
     n_samples = 0
+    n_saved = 0
 
     with torch.no_grad():
         for x in tqdm(val_loader, desc="Evaluating"):
@@ -187,6 +198,15 @@ def main():
                 t = img_f[:, ci:ci+1]
                 per_ch_l1[cn] += F.l1_loss(r, t).item() * bs
                 per_ch_ssim[cn] += ssim_3d(r, t).item() * bs
+
+            # Save sample pairs as NIfTI
+            if saver is not None and n_saved < args.save_samples:
+                for i in range(bs):
+                    if n_saved >= args.save_samples:
+                        break
+                    saver.save(img_f[i], f"ep{epoch}_sample{n_saved:02d}_original.nii.gz")
+                    saver.save(rec_f[i], f"ep{epoch}_sample{n_saved:02d}_recon.nii.gz")
+                    n_saved += 1
 
             n_samples += bs
 
@@ -229,6 +249,9 @@ def main():
     with open(out_path, "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"\n  Saved to {out_path}")
+
+    if n_saved > 0:
+        print(f"  Saved {n_saved} sample pairs to {run_dir / 'samples'}")
 
 
 if __name__ == "__main__":
