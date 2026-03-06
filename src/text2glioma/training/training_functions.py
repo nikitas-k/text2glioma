@@ -385,9 +385,12 @@ def train_epoch_autoencoder(
 
             # R1 gradient penalty — computed outside autocast because
             # grad computation requires float32 for stability.
+            # Use disc_module (unwrapped) to avoid DDP's _sync_buffers
+            # triggering a second in-place copy_() on BN running stats
+            # (same two-forward version-mismatch bug as the GAN pattern).
             r1_loss = torch.tensor(0.0, device=device)
             if r1_gamma > 0:
-                r1_loss = _r1_penalty(discriminator, images)
+                r1_loss = _r1_penalty(disc_module, images)
                 d_loss = d_loss + 0.5 * r1_gamma * r1_loss
 
             # Adaptive skip: only update D if it hasn't collapsed yet.
