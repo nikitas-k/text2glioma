@@ -1,0 +1,35 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=50GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=00:10:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N offline_metrics
+
+# ── Offline per-channel L1 & SSIM on val set ───────────────────────
+# Reads the latest checkpoint from the running v3 job without
+# interrupting it.  Single GPU, ~5 min for 323 val samples.
+
+# ── Environment ─────────────────────────────────────────────────────
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+# ── Run ─────────────────────────────────────────────────────────────
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/bf16_adaptive_v2_pw_1.0_r1_1.0_adv_weight_0.1
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+
+python ${HOME}/text2glioma/scripts/offline_val_metrics.py \
+    --run_dir "$RUN_DIR" \
+    --data_dir "$DATA_DIR" \
+    --batch_size 2 \
+    --num_workers 4 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_offline_metrics.log"
