@@ -57,6 +57,46 @@ def _get_last_decoder_weight(model: nn.Module) -> torch.Tensor:
     return last_weight
 
 
+def _ssim_3d(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 7,
+    C1: float = 0.01 ** 2,
+    C2: float = 0.03 ** 2,
+) -> torch.Tensor:
+    """Compute mean SSIM for a single-channel 3D volume (NCDHW or NCHW).
+
+    Uses a uniform sliding window (no Gaussian weighting) for simplicity
+    and speed.  Returns a scalar per batch element, averaged over spatial
+    locations.
+    """
+    ndim = pred.ndim - 2  # spatial dims (2 or 3)
+    if ndim == 3:
+        kernel = torch.ones(1, 1, window_size, window_size, window_size,
+                            device=pred.device, dtype=pred.dtype)
+        conv_fn = F.conv3d
+    else:
+        kernel = torch.ones(1, 1, window_size, window_size,
+                            device=pred.device, dtype=pred.dtype)
+        conv_fn = F.conv2d
+    kernel = kernel / kernel.numel()
+    pad = window_size // 2
+
+    mu_p = conv_fn(pred, kernel, padding=pad)
+    mu_t = conv_fn(target, kernel, padding=pad)
+    mu_pp = mu_p * mu_p
+    mu_tt = mu_t * mu_t
+    mu_pt = mu_p * mu_t
+
+    sigma_pp = conv_fn(pred * pred, kernel, padding=pad) - mu_pp
+    sigma_tt = conv_fn(target * target, kernel, padding=pad) - mu_tt
+    sigma_pt = conv_fn(pred * target, kernel, padding=pad) - mu_pt
+
+    ssim_map = ((2 * mu_pt + C1) * (2 * sigma_pt + C2)) / \
+               ((mu_pp + mu_tt + C1) * (sigma_pp + sigma_tt + C2))
+    return ssim_map.mean()
+
+
 def _compute_adaptive_weight(
     rec_loss: torch.Tensor,
     g_loss: torch.Tensor,
@@ -579,6 +619,24 @@ def eval_autoencoder(
             g_loss = generator_loss.mean()
             d_loss = discriminator_loss.mean()
 
+            # Per-channel L1 (T1, T1CE, T2, FLAIR)
+            ch_names = ["T1", "T1CE", "T2", "FLAIR"]
+            rec_f = reconstruction.float()
+            img_f = images.float()
+            per_ch_l1 = {}
+            for ci, cn in enumerate(ch_names):
+                per_ch_l1[f"l1_{cn}"] = F.l1_loss(
+                    rec_f[:, ci : ci + 1], img_f[:, ci : ci + 1]
+                ).mean()
+
+            # Per-channel SSIM (3D, sliding-window)
+            per_ch_ssim = {}
+            for ci, cn in enumerate(ch_names):
+                per_ch_ssim[f"ssim_{cn}"] = _ssim_3d(
+                    rec_f[:, ci : ci + 1], img_f[:, ci : ci + 1]
+                ).mean()
+            ssim_mean = sum(per_ch_ssim.values()) / len(per_ch_ssim)
+
             losses = OrderedDict(
                 loss=loss,
                 l1_loss=l1_loss,
@@ -586,6 +644,9 @@ def eval_autoencoder(
                 kl_loss=kl_loss,
                 g_loss=g_loss,
                 d_loss=d_loss,
+                ssim=ssim_mean,
+                **per_ch_l1,
+                **per_ch_ssim,
             )
 
         for k, v in losses.items():
