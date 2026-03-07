@@ -23,17 +23,32 @@ module load python3/3.9.2
 source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 SCRIPT=${HOME}/text2glioma/scripts/find_max_bs_ldm.py
+CACHE_DIR=/g/data/vp06/$USER/text2glioma_train/runs/cache
 
-echo "===== latent_channels=3 (current) ====="
-python $SCRIPT --latent_channels 3 --max_bs 16
-
-echo ""
-echo "===== latent_channels=4 ====="
-python $SCRIPT --latent_channels 4 --max_bs 16
+echo "===== CLIP (ldm.yaml) ====="
+echo "--- latent_channels=3 (current) ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm.yaml --latent_channels 3 --max_bs 16 --cache_dir $CACHE_DIR
 
 echo ""
-echo "===== latent_channels=8 ====="
-python $SCRIPT --latent_channels 8 --max_bs 16
+echo "--- latent_channels=4 ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm.yaml --latent_channels 4 --max_bs 16 --cache_dir $CACHE_DIR
+
+echo ""
+echo "--- latent_channels=8 ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm.yaml --latent_channels 8 --max_bs 16 --cache_dir $CACHE_DIR
+
+echo ""
+echo "===== RadBERT (ldm_radbert.yaml) ====="
+echo "--- latent_channels=3 (current) ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm_radbert.yaml --latent_channels 3 --max_bs 16 --cache_dir $CACHE_DIR
+
+echo ""
+echo "--- latent_channels=4 ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm_radbert.yaml --latent_channels 4 --max_bs 16 --cache_dir $CACHE_DIR
+
+echo ""
+echo "--- latent_channels=8 ---"
+python $SCRIPT --ldm_config ${HOME}/text2glioma/configs/ldm_radbert.yaml --latent_channels 8 --max_bs 16 --cache_dir $CACHE_DIR
 
 echo ""
 echo "Done."

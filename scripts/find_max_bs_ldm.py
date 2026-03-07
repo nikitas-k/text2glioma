@@ -26,6 +26,8 @@ def parse_args():
                    help="Override latent_channels (default: from stage1 config)")
     p.add_argument("--max_bs", type=int, default=16,
                    help="Max batch size to try")
+    p.add_argument("--cache_dir", type=str, default=None,
+                   help="HuggingFace cache dir for text encoder")
     return p.parse_args()
 
 
@@ -84,10 +86,42 @@ def main():
     vae_params = sum(p.numel() for p in vae.parameters())
     print(f"VAE parameters (frozen): {vae_params/1e6:.1f}M")
 
-    # Text encoder placeholder (just the embedding, ~1.2GB for SD2.1 text encoder)
-    # We'll simulate with random embeddings to avoid loading HF model
-    text_emb_mem_gb = 1.2  # approximate SD2.1 text encoder
-    print(f"Text encoder memory (approx): {text_emb_mem_gb:.1f}GB")
+    # Text encoder — load the real model from config
+    from text2glioma.utils import load_text_encoder_and_tokenizer
+    cond_cfg = ldm_cfg.get("conditioning", {})
+    cache_dir = args.cache_dir
+    try:
+        tokenizer, text_encoder = load_text_encoder_and_tokenizer(
+            cond_cfg, cache_dir=cache_dir, local_files_only=True,
+        )
+        text_encoder = text_encoder.to(device).eval()
+        for p in text_encoder.parameters():
+            p.requires_grad_(False)
+        te_params = sum(p.numel() for p in text_encoder.parameters())
+        print(f"Text encoder ({cond_cfg.get('text_encoder', '?')}): {te_params/1e6:.1f}M params, "
+              f"{te_params * 2 / 1024**3:.2f}GB (bf16)")
+        seq_len = cond_cfg.get("max_length", 77)
+        # Pre-encode a dummy text to get hidden dim
+        dummy_tokens = tokenizer(
+            ["test"] * 2, padding="max_length", max_length=seq_len,
+            truncation=True, return_tensors="pt",
+        ).input_ids.to(device)
+        with torch.no_grad():
+            te_out = text_encoder(dummy_tokens)
+            if hasattr(te_out, "last_hidden_state"):
+                text_hidden = te_out.last_hidden_state
+            else:
+                text_hidden = te_out[0]
+        print(f"Text encoder output shape: {list(text_hidden.shape)} (seq_len={seq_len})")
+        del dummy_tokens, te_out, text_hidden
+        use_real_te = True
+    except Exception as e:
+        print(f"Could not load text encoder: {e}")
+        print("Falling back to random embeddings (text encoder memory NOT counted)")
+        text_encoder = None
+        tokenizer = None
+        use_real_te = False
+        seq_len = cond_cfg.get("max_length", 77)
 
     torch.cuda.reset_peak_memory_stats()
     baseline_mem = torch.cuda.memory_allocated() / 1024**3
@@ -126,8 +160,22 @@ def main():
             mask = torch.zeros(bs, mask_ch, *latent_spatial, device=device, dtype=torch.bfloat16)
             mask[:, 0] = 1.0  # all background for memory test
 
-            # Random text embeddings
-            text_emb = torch.randn(bs, seq_len, cross_attn_dim, device=device, dtype=torch.bfloat16)
+            # Text embeddings — real encoder or fallback
+            if use_real_te:
+                dummy_text = ["A glioblastoma with ring enhancement and surrounding edema."] * bs
+                tokens = tokenizer(
+                    dummy_text, padding="max_length", max_length=seq_len,
+                    truncation=True, return_tensors="pt",
+                ).input_ids.to(device)
+                with torch.no_grad():
+                    te_out = text_encoder(tokens)
+                    if hasattr(te_out, "last_hidden_state"):
+                        text_emb = te_out.last_hidden_state.detach()
+                    else:
+                        text_emb = te_out[0].detach()
+                del tokens, te_out
+            else:
+                text_emb = torch.randn(bs, seq_len, cross_attn_dim, device=device, dtype=torch.bfloat16)
 
             # Random timesteps
             timesteps = torch.randint(0, 1000, (bs,), device=device)
