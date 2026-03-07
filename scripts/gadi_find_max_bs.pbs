@@ -1,0 +1,39 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=50GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=00:10:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N find_max_bs
+
+# ── Find max LDM batch size per GPU ────────────────────────────────
+# Runs a single training step at increasing batch sizes until OOM.
+# Tests latent_channels = 3, 4, 8.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+SCRIPT=${HOME}/text2glioma/scripts/find_max_bs_ldm.py
+
+echo "===== latent_channels=3 (current) ====="
+python $SCRIPT --latent_channels 3 --max_bs 16
+
+echo ""
+echo "===== latent_channels=4 ====="
+python $SCRIPT --latent_channels 4 --max_bs 16
+
+echo ""
+echo "===== latent_channels=8 ====="
+python $SCRIPT --latent_channels 8 --max_bs 16
+
+echo ""
+echo "Done."
