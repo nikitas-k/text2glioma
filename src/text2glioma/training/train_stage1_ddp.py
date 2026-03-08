@@ -40,7 +40,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
-from text2glioma.training.training_functions import train_autoencoder
+from text2glioma.training.training_functions import train_autoencoder, MultiScalePatchDiscriminator
 from text2glioma.utils import apply_spectral_norm, get_model, load_config
 
 warnings.filterwarnings("ignore")
@@ -378,6 +378,12 @@ def main():
     model = get_model(model_type, config, args.pretrained)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
+    n_disc_scales = config["discriminator"].get("n_scales", 1)
+    if n_disc_scales > 1:
+        discriminator = MultiScalePatchDiscriminator(
+            disc_params=config["discriminator"]["params"],
+            n_scales=n_disc_scales,
+        )
     if config["discriminator"].get("spectral_norm", False):
         apply_spectral_norm(discriminator)
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.run_dir) / "cache"
@@ -471,6 +477,9 @@ def main():
         kl_warmup_epochs=config["model"].get("kl_warmup_epochs", 0),
         kl_max=config["model"].get("kl_max", 0.0),
         adaptive_adv_weight=config["model"].get("adaptive_adv_weight", False),
+        wavelet_loss_weight=config["model"].get("wavelet_loss_weight", 0.0),
+        wavelet_detail_weight=config["model"].get("wavelet_detail_weight", 2.0),
+        wavelet_name=config["model"].get("wavelet_name", "haar"),
     )
     print0(f"Training finished.  Best val loss: {val_loss:.4f}", rank)
     cleanup()

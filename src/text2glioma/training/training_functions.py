@@ -17,6 +17,192 @@ from generative.losses import PatchAdversarialLoss
 from text2glioma.utils import print_gpu_memory_report, get_lr, log_reconstructions, log_ldm_sample_unconditioned, prepare_mask_conditioning, get_text_encoder_hidden_states
 
 
+# ---------------------------------------------------------------------------
+# 3-D wavelet decomposition helpers  (pywt for filter coefficients)
+# ---------------------------------------------------------------------------
+
+# Module-level cache: (wavelet_name, device) → (kernels, labels)
+_WAVELET_KERNEL_CACHE: dict[tuple[str, torch.device], tuple[torch.Tensor, list[str]]] = {}
+
+
+def _get_wavelet_kernels_3d(
+    wavelet_name: str,
+    device: torch.device,
+) -> tuple[torch.Tensor, list[str]]:
+    """Build 8 separable 3-D DWT kernels from *pywt* filter coefficients.
+
+    Returns ``(kernels, labels)`` where *kernels* has shape
+    ``(8, 1, K, K, K)`` and *labels* is ``['LLL', 'LLH', …, 'HHH']``.
+
+    Kernels are outer products of 1-D decomposition filters, which is
+    exact for Haar (``'haar'`` / ``'db1'``) and a close approximation
+    for longer wavelets (``'db2'``, ``'sym4'``, ``'coif1'``, …).
+    See `PyWavelets docs <https://pywavelets.readthedocs.io>`_ for the
+    full list of available wavelet families.
+    """
+    cache_key = (wavelet_name, device)
+    if cache_key in _WAVELET_KERNEL_CACHE:
+        return _WAVELET_KERNEL_CACHE[cache_key]
+
+    import pywt
+
+    w = pywt.Wavelet(wavelet_name)
+    lo = torch.tensor(w.dec_lo, dtype=torch.float32, device=device)
+    hi = torch.tensor(w.dec_hi, dtype=torch.float32, device=device)
+
+    filt = [lo, hi]
+    names = ["L", "H"]
+    kernels: list[torch.Tensor] = []
+    labels: list[str] = []
+    for i in range(2):
+        for j in range(2):
+            for k in range(2):
+                kern = torch.einsum("a,b,c->abc", filt[i], filt[j], filt[k])
+                kernels.append(kern)
+                labels.append(names[i] + names[j] + names[k])
+
+    stacked = torch.stack(kernels).unsqueeze(1)  # (8, 1, K, K, K)
+    _WAVELET_KERNEL_CACHE[cache_key] = (stacked, labels)
+    return stacked, labels
+
+
+def _wavelet_dwt_3d(
+    x: torch.Tensor,
+    wavelet_name: str = "haar",
+) -> dict[str, torch.Tensor]:
+    """Single-level 3-D DWT using *pywt* filter coefficients.
+
+    Input : ``(N, C, D, H, W)`` tensor
+    Output: dict with keys ``'LLL'``, ``'LLH'``, …, ``'HHH'``
+            each of shape ``(N, C, D', H', W')`` where ``D' ≈ D//2``.
+
+    The decomposition is implemented as a grouped 3-D convolution at
+    stride ``(2, 2, 2)`` using the outer-product kernels from
+    `_get_wavelet_kernels_3d`.  Fully differentiable and GPU-accelerated.
+    """
+    kernels, labels = _get_wavelet_kernels_3d(wavelet_name, x.device)
+    K = kernels.shape[2]
+    N, C, D, H, W = x.shape
+
+    # Pad so spatial dims are even and accommodate filter support
+    p = (K - 2) // 2
+    pd = p + (D % 2)
+    ph = p + (H % 2)
+    pw = p + (W % 2)
+    if pd or ph or pw:
+        x = F.pad(x, (p, pw, p, ph, p, pd))
+
+    # Grouped conv: each of C input channels → 8 sub-band channels
+    w = kernels.to(x.dtype).repeat(C, 1, 1, 1, 1)   # (8C, 1, K, K, K)
+    out = F.conv3d(x, w, stride=2, groups=C)          # (N, 8C, D', H', W')
+
+    D2, H2, W2 = out.shape[2], out.shape[3], out.shape[4]
+    out = out.reshape(N, C, 8, D2, H2, W2)
+
+    return {label: out[:, :, idx] for idx, label in enumerate(labels)}
+
+
+def _wavelet_l1_loss_3d(
+    reconstruction: torch.Tensor,
+    target: torch.Tensor,
+    detail_weight: float = 2.0,
+    wavelet_name: str = "haar",
+) -> torch.Tensor:
+    """Multi-scale wavelet L1 loss for 3-D volumes.
+
+    Decomposes both *reconstruction* and *target* into 8 wavelet
+    sub-bands and computes a weighted L1 loss.  The low-frequency band
+    (LLL) gets weight 1.0; all 7 high-frequency detail bands get
+    *detail_weight*.  This emphasises edge / texture fidelity without
+    changing the model architecture.
+
+    Parameters
+    ----------
+    reconstruction, target : (N, C, D, H, W) tensors
+    detail_weight : float
+        Multiplier for detail (non-LLL) sub-bands.  Higher values
+        penalise blurriness more aggressively.
+    wavelet_name : str
+        Any wavelet recognised by ``pywt.Wavelet`` (e.g. ``'haar'``,
+        ``'db2'``, ``'sym4'``, ``'coif1'``).
+
+    Returns
+    -------
+    Scalar loss tensor.
+    """
+    bands_rec = _wavelet_dwt_3d(reconstruction.float(), wavelet_name)
+    bands_tgt = _wavelet_dwt_3d(target.float(), wavelet_name)
+
+    loss = torch.tensor(0.0, device=reconstruction.device)
+    for key in bands_rec:
+        w = 1.0 if key == "LLL" else detail_weight
+        loss = loss + w * F.l1_loss(bands_rec[key], bands_tgt[key])
+    # Normalise by number of sub-bands so the overall magnitude stays
+    # comparable to the plain L1 loss regardless of detail_weight.
+    loss = loss / (1.0 + 7.0 * detail_weight)
+    return loss
+
+
+# ---------------------------------------------------------------------------
+# Multi-scale PatchDiscriminator wrapper
+# ---------------------------------------------------------------------------
+
+class MultiScalePatchDiscriminator(nn.Module):
+    """Wraps 1–3 PatchDiscriminators at different spatial scales.
+
+    Scale 0 = original resolution (same as the existing single-scale D).
+    Scale 1 = 2× average-pooled (half resolution).
+    Scale 2 = 4× average-pooled (quarter resolution, optional).
+
+    Each discriminator is an independent copy with its own parameters.
+    During forward, the input is progressively downsampled and fed to
+    each sub-discriminator.
+
+    Returns
+    -------
+    list of logits tensors (one per scale, following MONAI
+    PatchDiscriminator convention of returning a list where [-1] is
+    the final logits tensor).  For convenience the [-1] element is a
+    *concatenation* of the final logits from all scales (flattened and
+    cat'd along dim=0) so that ``PatchAdversarialLoss`` works unchanged.
+    """
+
+    def __init__(self, disc_params: dict, n_scales: int = 2):
+        super().__init__()
+        from generative.networks.nets.patchgan_discriminator import PatchDiscriminator
+
+        self.n_scales = n_scales
+        self.discs = nn.ModuleList([
+            PatchDiscriminator(**disc_params) for _ in range(n_scales)
+        ])
+        # Average-pool kernel for 3-D downsampling
+        self._pool = nn.AvgPool3d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        all_logits = []
+        cur = x
+        for i, disc in enumerate(self.discs):
+            if i > 0:
+                cur = self._pool(cur)
+            logits = disc(cur)[-1]  # PatchDiscriminator returns [layer_outs..., final_logits]
+            all_logits.append(logits)
+        # Return list whose [-1] is a scalar-compatible representation
+        # (mean of per-scale logits for PatchAdversarialLoss).
+        # Not concatenated — use mean to keep loss scale invariant.
+        combined = torch.stack([lg.mean() for lg in all_logits]).mean()
+        return all_logits + [combined.unsqueeze(0)]
+
+    def per_scale_forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return per-scale logits tensors (for independent loss computation)."""
+        results = []
+        cur = x
+        for i, disc in enumerate(self.discs):
+            if i > 0:
+                cur = self._pool(cur)
+            results.append(disc(cur)[-1])
+        return results
+
+
 def _r1_penalty(
     discriminator: nn.Module,
     real: torch.Tensor,
@@ -215,6 +401,9 @@ def train_autoencoder(
     kl_warmup_epochs: int = 0,
     kl_max: float = 0.0,
     adaptive_adv_weight: bool = False,
+    wavelet_loss_weight: float = 0.0,
+    wavelet_detail_weight: float = 2.0,
+    wavelet_name: str = "haar",
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -246,6 +435,9 @@ def train_autoencoder(
         adversarial_weight=adversarial_weight,
         perceptual_weight=perceptual_weight,
         kl_max=kl_max,
+        wavelet_loss_weight=wavelet_loss_weight,
+        wavelet_detail_weight=wavelet_detail_weight,
+        wavelet_name=wavelet_name,
     )
 
     for epoch in range(start_epoch, n_epochs):
@@ -268,6 +460,9 @@ def train_autoencoder(
             kl_warmup_epochs=kl_warmup_epochs,
             kl_max=kl_max,
             adaptive_adv_weight=adaptive_adv_weight,
+            wavelet_loss_weight=wavelet_loss_weight,
+            wavelet_detail_weight=wavelet_detail_weight,
+            wavelet_name=wavelet_name,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -283,6 +478,9 @@ def train_autoencoder(
                 adversarial_weight=adversarial_weight,
                 perceptual_weight=perceptual_weight,
                 kl_max=kl_max,
+                wavelet_loss_weight=wavelet_loss_weight,
+                wavelet_detail_weight=wavelet_detail_weight,
+                wavelet_name=wavelet_name,
             )
             print_gpu_memory_report()
 
@@ -326,6 +524,9 @@ def train_epoch_autoencoder(
     kl_warmup_epochs: int = 0,
     kl_max: float = 0.0,
     adaptive_adv_weight: bool = False,
+    wavelet_loss_weight: float = 0.0,
+    wavelet_detail_weight: float = 2.0,
+    wavelet_name: str = "haar",
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -381,6 +582,20 @@ def train_epoch_autoencoder(
         print(f"[ADAPTIVE-ADV] Using VQGAN-style adaptive adversarial weight "
               f"(loss += adv_weight × d_weight × g_loss, "
               f"adv_weight={adversarial_weight})")
+
+    if wavelet_loss_weight > 0 and epoch == 0:
+        print(f"[WAVELET-L1] Wavelet L1 loss enabled: "
+              f"weight={wavelet_loss_weight}, detail_weight={wavelet_detail_weight}, "
+              f"wavelet='{wavelet_name}'")
+
+    # Multi-scale discriminator: detect whether D is a MultiScalePatchDiscriminator
+    is_multiscale_disc = isinstance(
+        getattr(discriminator, "module", discriminator),
+        MultiScalePatchDiscriminator,
+    )
+    if is_multiscale_disc and epoch == 0:
+        n_sc = getattr(discriminator, "module", discriminator).n_scales
+        print(f"[MULTISCALE-D] Multi-scale discriminator enabled ({n_sc} scales)")
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     for step, x in pbar:
@@ -469,6 +684,16 @@ def train_epoch_autoencoder(
             # with div-by-zero guard for near-constant channels.
             p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
 
+            # Wavelet L1 loss: penalise high-frequency sub-band errors
+            if wavelet_loss_weight > 0:
+                w_loss = _wavelet_l1_loss_3d(
+                    reconstruction, images,
+                    detail_weight=wavelet_detail_weight,
+                    wavelet_name=wavelet_name,
+                )
+            else:
+                w_loss = torch.tensor(0.0, device=device)
+
             kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
             kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
 
@@ -484,7 +709,10 @@ def train_epoch_autoencoder(
                 generator_loss = torch.tensor([0.0]).to(device)
 
             # Reconstruction loss (everything except adversarial)
-            rec_loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss
+            rec_loss = (l1_loss
+                        + kl_weight * kl_loss
+                        + perceptual_weight * p_loss
+                        + wavelet_loss_weight * w_loss)
 
             # Adversarial contribution: adaptive or fixed weight
             if adaptive_adv_weight and adversarial_weight > 0 and not warming_up:
@@ -505,6 +733,7 @@ def train_epoch_autoencoder(
             p_loss = p_loss.mean()
             kl_loss = kl_loss.mean()
             g_loss = generator_loss.mean()
+            w_loss = w_loss.mean()
 
             losses = OrderedDict(
                 loss=loss,
@@ -513,6 +742,8 @@ def train_epoch_autoencoder(
                 kl_loss=kl_loss,
                 g_loss=g_loss,
             )
+            if wavelet_loss_weight > 0:
+                losses["w_loss"] = w_loss
 
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
@@ -571,6 +802,9 @@ def eval_autoencoder(
     adversarial_weight: float,
     perceptual_weight: float,
     kl_max: float = 0.0,
+    wavelet_loss_weight: float = 0.0,
+    wavelet_detail_weight: float = 2.0,
+    wavelet_name: str = "haar",
 ) -> float:
     model.eval()
     discriminator.eval()
@@ -612,12 +846,24 @@ def eval_autoencoder(
 
             loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adversarial_weight * generator_loss
 
+            # Wavelet L1 loss (eval)
+            if wavelet_loss_weight > 0:
+                w_loss = _wavelet_l1_loss_3d(
+                    reconstruction, images,
+                    detail_weight=wavelet_detail_weight,
+                    wavelet_name=wavelet_name,
+                )
+                loss = loss + wavelet_loss_weight * w_loss
+            else:
+                w_loss = torch.tensor(0.0, device=device)
+
             loss = loss.mean()
             l1_loss = l1_loss.mean()
             p_loss = p_loss.mean()
             kl_loss = kl_loss.mean()
             g_loss = generator_loss.mean()
             d_loss = discriminator_loss.mean()
+            w_loss_val = w_loss.mean()
 
             # Per-channel L1 (T1, T1CE, T2, FLAIR)
             ch_names = ["T1", "T1CE", "T2", "FLAIR"]
@@ -648,6 +894,8 @@ def eval_autoencoder(
                 **per_ch_l1,
                 **per_ch_ssim,
             )
+            if wavelet_loss_weight > 0:
+                losses["w_loss"] = w_loss_val
 
         for k, v in losses.items():
             total_losses[k] = total_losses.get(k, 0) + v.item() * images.shape[0]
