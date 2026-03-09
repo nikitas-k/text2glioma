@@ -283,6 +283,77 @@ def _ssim_3d(
     return ssim_map.mean()
 
 
+def _ms_ssim_3d(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 7,
+    n_levels: int = 4,
+    C1: float = 0.01 ** 2,
+    C2: float = 0.03 ** 2,
+) -> torch.Tensor:
+    """Compute multi-scale SSIM for a single-channel 3-D volume.
+
+    Follows Wang et al. (2003) but adapted for 3-D:
+    - At each scale, compute contrast/structure (cs) and luminance (l).
+    - Downsample by 2× average-pooling.
+    - Final MS-SSIM = prod(cs_i ** weight_i) * l_last ** weight_last.
+
+    Uses *n_levels* = 4 by default (scales 1×, 0.5×, 0.25×, 0.125×).
+    With input 160×224×160, the smallest scale is 20×28×20 — still
+    large enough for the 7×7×7 sliding window.
+
+    Parameters
+    ----------
+    pred, target : (N, 1, D, H, W) tensors
+    n_levels : int
+        Number of scales.  Must satisfy min(D,H,W) / 2^(n_levels-1) >= window_size.
+
+    Returns
+    -------
+    Scalar MS-SSIM value in [0, 1].
+    """
+    # Weights from Wang et al. 2003 (normalised to sum to 1)
+    weights_5 = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
+    weights = weights_5[:n_levels]
+    wsum = sum(weights)
+    weights = [w / wsum for w in weights]
+    weights = torch.tensor(weights, device=pred.device, dtype=pred.dtype)
+
+    kernel = torch.ones(1, 1, window_size, window_size, window_size,
+                        device=pred.device, dtype=pred.dtype)
+    kernel = kernel / kernel.numel()
+    pad = window_size // 2
+    pool = nn.AvgPool3d(kernel_size=2, stride=2)
+
+    cs_list = []
+    for i in range(n_levels):
+        mu_p = F.conv3d(pred, kernel, padding=pad)
+        mu_t = F.conv3d(target, kernel, padding=pad)
+        mu_pp = mu_p * mu_p
+        mu_tt = mu_t * mu_t
+        mu_pt = mu_p * mu_t
+
+        sigma_pp = F.conv3d(pred * pred, kernel, padding=pad) - mu_pp
+        sigma_tt = F.conv3d(target * target, kernel, padding=pad) - mu_tt
+        sigma_pt = F.conv3d(pred * target, kernel, padding=pad) - mu_pt
+
+        l_map = (2 * mu_pt + C1) / (mu_pp + mu_tt + C1)
+        cs_map = (2 * sigma_pt + C2) / (sigma_pp + sigma_tt + C2)
+
+        if i < n_levels - 1:
+            cs_list.append(cs_map.mean().clamp(min=1e-8))
+            pred = pool(pred)
+            target = pool(target)
+        else:
+            # Last level: use full SSIM (luminance × contrast-structure)
+            cs_list.append((l_map * cs_map).mean().clamp(min=1e-8))
+
+    ms_ssim = torch.ones(1, device=pred.device, dtype=pred.dtype)
+    for i, cs in enumerate(cs_list):
+        ms_ssim = ms_ssim * cs.pow(weights[i])
+    return ms_ssim.squeeze()
+
+
 def _compute_adaptive_weight(
     rec_loss: torch.Tensor,
     g_loss: torch.Tensor,
@@ -883,6 +954,14 @@ def eval_autoencoder(
                 ).mean()
             ssim_mean = sum(per_ch_ssim.values()) / len(per_ch_ssim)
 
+            # Per-channel MS-SSIM (3D, multi-scale)
+            per_ch_ms_ssim = {}
+            for ci, cn in enumerate(ch_names):
+                per_ch_ms_ssim[f"ms_ssim_{cn}"] = _ms_ssim_3d(
+                    rec_f[:, ci : ci + 1], img_f[:, ci : ci + 1]
+                ).mean()
+            ms_ssim_mean = sum(per_ch_ms_ssim.values()) / len(per_ch_ms_ssim)
+
             losses = OrderedDict(
                 loss=loss,
                 l1_loss=l1_loss,
@@ -891,8 +970,10 @@ def eval_autoencoder(
                 g_loss=g_loss,
                 d_loss=d_loss,
                 ssim=ssim_mean,
+                ms_ssim=ms_ssim_mean,
                 **per_ch_l1,
                 **per_ch_ssim,
+                **per_ch_ms_ssim,
             )
             if wavelet_loss_weight > 0:
                 losses["w_loss"] = w_loss_val
