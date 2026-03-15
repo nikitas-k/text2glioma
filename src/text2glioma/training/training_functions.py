@@ -186,11 +186,12 @@ class MultiScalePatchDiscriminator(nn.Module):
                 cur = self._pool(cur)
             logits = disc(cur)[-1]  # PatchDiscriminator returns [layer_outs..., final_logits]
             all_logits.append(logits)
-        # Return list whose [-1] is a scalar-compatible representation
-        # (mean of per-scale logits for PatchAdversarialLoss).
-        # Not concatenated — use mean to keep loss scale invariant.
-        combined = torch.stack([lg.mean() for lg in all_logits]).mean()
-        return all_logits + [combined.unsqueeze(0)]
+        # Flatten each scale's spatial dims and cat along feature dim
+        # so the result preserves the batch dimension.  This allows
+        # torch.chunk(logits, 2, dim=0) to split fake/real halves
+        # when using the concatenated-batch DDP trick.
+        combined = torch.cat([lg.flatten(1) for lg in all_logits], dim=1)
+        return all_logits + [combined]
 
     def per_scale_forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         """Return per-scale logits tensors (for independent loss computation)."""
