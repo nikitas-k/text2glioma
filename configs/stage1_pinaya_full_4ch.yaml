@@ -1,0 +1,60 @@
+# ── Pinaya VAE fine-tuning config (full 4-channel strategy) ────────
+# Architecture based on Pinaya 2022 but adapted to 4-channel in/out:
+#   - encoder.conv_in inflated from 1→4 input channels
+#   - decoder.conv_out inflated from 1→4 output channels
+#   - num_channels: [64, 128, 128, 128]  (same as Pinaya)
+#   - latent_channels: 3
+#   - No attention (Pinaya didn't use attention)
+#
+# ALL parameters are trainable.  The encoder gets a low LR since
+# the Pinaya encoder already captures good spatial features.
+#
+# Fine-tuning hyperparameters:
+#   - Very low LR (5e-6) — we're adapting pretrained features
+#   - Adaptive adv weight for stable GAN training
+#   - warmup: 5 epochs G-only before enabling D
+
+model:
+  name: "AutoencoderKL"
+  lr: 0.000005                       # 10× lower than scratch (5e-5)
+  perceptual_weight: 1.0
+  adv_weight: 0.005
+  kl_weight: 0.00000001
+  autoencoder_warm_up_n_epochs: 5
+  r1_gamma: 0.0
+  kl_warmup_epochs: 0
+  kl_max: 0.0
+  adaptive_adv_weight: true
+  wavelet_loss_weight: 0.0
+  wavelet_detail_weight: 2.0
+  wavelet_name: "haar"
+  params:
+    spatial_dims: 3
+    in_channels: 4                   # inflated from Pinaya's 1-channel
+    out_channels: 4
+    num_channels: [64, 128, 128, 128]  # Pinaya architecture (not our [64,128,256,512])
+    latent_channels: 3
+    num_res_blocks: 2
+    norm_num_groups: 32
+    norm_eps: 0.000001
+    attention_levels: [False, False, False, False]
+    with_encoder_nonlocal_attn: False
+    with_decoder_nonlocal_attn: False
+
+image_keys: ["t1", "t1ce", "t2", "flair"]
+
+discriminator:
+  lr: 0.00005
+  spectral_norm: false
+  n_scales: 1
+  params:
+    spatial_dims: 3
+    num_channels: 96
+    num_layers_d: 3
+    in_channels: 4
+
+perceptual_network:
+  params:
+    spatial_dims: 3
+    network_type: "medicalnet_resnet50_23datasets"
+    is_fake_3d: False

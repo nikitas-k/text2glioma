@@ -1,0 +1,62 @@
+# ── Pinaya VAE fine-tuning config (decoder-only strategy) ──────────
+# Architecture matches the pretrained Pinaya 2022 brain VAE exactly:
+#   - 1-channel in/out (each BraTS modality processed independently)
+#   - num_channels: [64, 128, 128, 128]  (4 downsample levels)
+#   - No attention, no nonlocal attention
+#   - latent_channels: 3
+#
+# Fine-tuning hyperparameters:
+#   - Low LR (1e-5) to preserve pretrained features
+#   - Low adversarial weight — we want reconstruction fidelity
+#   - No KL warmup (pretrained latent space already structured)
+#   - Adaptive adv weight for stability
+
+model:
+  name: "AutoencoderKL"
+  lr: 0.00001                        # 5× lower than scratch training (5e-5)
+  perceptual_weight: 1.0
+  adv_weight: 0.005
+  kl_weight: 0.00000001              # match Pinaya's original kl_weight
+  autoencoder_warm_up_n_epochs: 5    # let decoder settle before D kicks in
+  r1_gamma: 0.0
+  kl_warmup_epochs: 0
+  kl_max: 0.0
+  adaptive_adv_weight: true
+  wavelet_loss_weight: 0.0
+  wavelet_detail_weight: 2.0
+  wavelet_name: "haar"
+  params:
+    spatial_dims: 3
+    in_channels: 1                   # Pinaya architecture: single-channel
+    out_channels: 1
+    num_channels: [64, 128, 128, 128]
+    latent_channels: 3
+    num_res_blocks: 2
+    norm_num_groups: 32
+    norm_eps: 0.000001
+    attention_levels: [False, False, False, False]
+    with_encoder_nonlocal_attn: False
+    with_decoder_nonlocal_attn: False
+
+# Channel ordering convention (handled by PerChannelVAEWrapper):
+#   0: T1w
+#   1: T1w post-contrast (T1CE)
+#   2: T2w
+#   3: FLAIR
+image_keys: ["t1", "t1ce", "t2", "flair"]
+
+discriminator:
+  lr: 0.00005                        # 2× lower than scratch (1e-4)
+  spectral_norm: false
+  n_scales: 1
+  params:
+    spatial_dims: 3
+    num_channels: 64                  # lighter D for fine-tuning
+    num_layers_d: 2                   # fewer layers — we're not training from scratch
+    in_channels: 4                    # operates on concatenated 4-ch output
+
+perceptual_network:
+  params:
+    spatial_dims: 3
+    network_type: "medicalnet_resnet50_23datasets"
+    is_fake_3d: False
