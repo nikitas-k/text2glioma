@@ -6,7 +6,7 @@
 #PBS -l jobfs=250GB
 #PBS -q gpuhopper
 #PBS -P vp06
-#PBS -l walltime=05:00:00
+#PBS -l walltime=01:00:00
 #PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
 #PBS -l wd
 #PBS -j oe
@@ -21,9 +21,9 @@
 # The Pinaya architecture uses num_channels=[64,128,128,128] which is
 # lighter than our baseline [64,128,256,512], so memory is not an issue.
 #
-# Estimated: ~50 epochs × ~380 batches/epoch ≈ 19k steps
-#   At ~45s/epoch (4×A100, bs=4, single 4ch fwd per sample)
-#   → ~40 min total, well within 10h walltime.
+# Estimated: ~50 epochs × ~95 batches/epoch (N=1510, 4 GPUs, bs=4)
+#   Single 4ch fwd per sample
+#   At ~20-30s/epoch on 4×H200 → ~20-25 min total.
 #
 # Logs: TensorBoard with L1, SSIM, MS-SSIM per-channel (same as v4+)
 
