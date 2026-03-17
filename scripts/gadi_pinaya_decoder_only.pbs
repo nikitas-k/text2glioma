@@ -6,7 +6,7 @@
 #PBS -l jobfs=250GB
 #PBS -q gpuhopper
 #PBS -P vp06
-#PBS -l walltime=10:00:00
+#PBS -l walltime=05:00:00
 #PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
 #PBS -l wd
 #PBS -j oe
