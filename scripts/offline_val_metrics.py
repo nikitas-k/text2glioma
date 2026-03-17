@@ -170,7 +170,7 @@ def main():
     if args.save_samples > 0:
         from text2glioma.inference.saver import NiftiSaver
         samples_dir = run_dir / "samples"
-        saver = NiftiSaver(output_dir=str(samples_dir), rescale=True)
+        saver = NiftiSaver(output_dir=str(samples_dir), rescale=False)
         print(f"Will save {args.save_samples} sample pairs to {samples_dir}")
 
     # ── Evaluate ──
