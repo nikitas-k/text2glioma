@@ -12,9 +12,12 @@ class NiftiSaver:
     - works with shapes [B,C,D,H,W] / [C,D,H,W] / [D,H,W].
     """
     def __init__(self, output_dir: str, default_affine: np.ndarray = None,
-                 rescale: bool = True, dtype: str = "float32") -> None:
+                 rescale: bool = False, dtype: str = "float32") -> None:
         """
-        rescale: if True, min-max to [0,1] before save (ignored for labels).
+        rescale: if True, per-channel min-max to [0,1] then ×255 before save.
+                 Default False — saves raw float32 values as-is (recommended
+                 when the model already outputs [0,1] data, e.g. VAE with
+                 ScaleIntensityRangePercentiles preprocessing).
         dtype: 'float32' (recommended) or 'uint8' if you must quantise.
         """
         super().__init__()
@@ -73,7 +76,16 @@ class NiftiSaver:
                     vmin, vmax = float(data.min()), float(data.max())
                     denom = max(vmax - vmin, 1e-8)
                     data = (data - vmin) / denom
-            data = (data * 255).astype(np.float32 if self.dtype == "float32" else np.uint8)
+                # Scale to [0, 255] for legacy compatibility
+                data = (data * 255).astype(
+                    np.float32 if self.dtype == "float32" else np.uint8
+                )
+            else:
+                # Save raw values (already in [0,1] from model output)
+                if self.dtype == "uint8":
+                    data = (np.clip(data, 0, 1) * 255).astype(np.uint8)
+                else:
+                    data = data.astype(np.float32)
 
         # Crop border artefacts
         if data.ndim == 4:  # [C,D,H,W]
