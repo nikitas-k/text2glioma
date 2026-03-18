@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Offline per-channel L1 & SSIM evaluation on the val set.
+"""Offline per-channel L1 & SSIM evaluation on train + val sets.
 
 Loads the latest checkpoint from a training run, reconstructs the full
-val set, and prints per-channel L1 + 3D SSIM without modifying the
-running job.  Runs on a single GPU (no DDP needed).
+val set and a subset of the training set, and prints per-channel L1 +
+3D SSIM without modifying the running job.  Runs on a single GPU
+(no DDP needed).
 
 Usage (local or Gadi interactive)::
 
@@ -15,6 +16,9 @@ Or with a datalist::
 
     python scripts/offline_val_metrics.py \
         --run_dir ... --datalist datalist.json --no_channel_reorder
+
+By default evaluates all val samples and the same number of training
+samples (randomly drawn).  Use --train_samples N to control.
 """
 
 from __future__ import annotations
@@ -49,7 +53,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val_frac", type=float, default=0.2)
     p.add_argument("--save_samples", type=int, default=5,
-                   help="Number of val samples to save as NIfTI (0 to skip)")
+                   help="Number of samples to save as NIfTI per split (0 to skip)")
+    p.add_argument("--train_samples", type=int, default=-1,
+                   help="Number of training samples to evaluate (-1 = same as val set size)")
     return p.parse_args()
 
 
@@ -101,6 +107,92 @@ def ssim_3d(
     return ssim_map.mean()
 
 
+def evaluate_split(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    split_name: str,
+    epoch: int | str,
+    saver=None,
+    max_save: int = 0,
+) -> dict:
+    """Evaluate a single data split and return metrics dict."""
+    per_ch_l1 = {cn: 0.0 for cn in CH_NAMES}
+    per_ch_ssim = {cn: 0.0 for cn in CH_NAMES}
+    total_l1 = 0.0
+    n_samples = 0
+    n_saved = 0
+
+    with torch.no_grad():
+        for x in tqdm(loader, desc=f"Evaluating {split_name}"):
+            images = x["image"].to(device)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                reconstruction, z_mu, z_sigma = model(x=images)
+
+            rec_f = reconstruction.float()
+            img_f = images.float()
+            bs = images.shape[0]
+
+            total_l1 += F.l1_loss(rec_f, img_f).item() * bs
+
+            for ci, cn in enumerate(CH_NAMES):
+                r = rec_f[:, ci:ci+1]
+                t = img_f[:, ci:ci+1]
+                per_ch_l1[cn] += F.l1_loss(r, t).item() * bs
+                per_ch_ssim[cn] += ssim_3d(r, t).item() * bs
+
+            # Save sample pairs as NIfTI
+            if saver is not None and n_saved < max_save:
+                for i in range(bs):
+                    if n_saved >= max_save:
+                        break
+                    prefix = f"ep{epoch}_{split_name}"
+                    saver.save(img_f[i], f"{prefix}_sample{n_saved:02d}_original.nii.gz")
+                    saver.save(rec_f[i], f"{prefix}_sample{n_saved:02d}_recon.nii.gz")
+                    n_saved += 1
+
+            n_samples += bs
+
+    # Aggregate
+    total_l1 /= n_samples
+    for cn in CH_NAMES:
+        per_ch_l1[cn] /= n_samples
+        per_ch_ssim[cn] /= n_samples
+    mean_ssim = sum(per_ch_ssim.values()) / len(CH_NAMES)
+
+    worst_l1 = max(per_ch_l1, key=per_ch_l1.get)
+    worst_ssim = min(per_ch_ssim, key=per_ch_ssim.get)
+
+    return {
+        "split": split_name,
+        "n_samples": n_samples,
+        "n_saved": n_saved,
+        "overall_l1": total_l1,
+        "overall_ssim": mean_ssim,
+        "per_channel_l1": per_ch_l1,
+        "per_channel_ssim": per_ch_ssim,
+        "weakest_l1": worst_l1,
+        "weakest_ssim": worst_ssim,
+    }
+
+
+def print_split_report(m: dict, epoch: int | str) -> None:
+    """Pretty-print metrics for one split."""
+    split = m["split"]
+    n = m["n_samples"]
+    print(f"\n{'='*60}")
+    print(f"  {split.upper()} Metrics  (epoch {epoch}, N={n})")
+    print(f"{'='*60}")
+    print(f"\n  Overall L1:   {m['overall_l1']:.6f}")
+    print(f"  Overall SSIM: {m['overall_ssim']:.6f}")
+    print(f"\n  {'Channel':>8s}  {'L1':>10s}  {'SSIM':>10s}")
+    print(f"  {'-'*8}  {'-'*10}  {'-'*10}")
+    for cn in CH_NAMES:
+        print(f"  {cn:>8s}  {m['per_channel_l1'][cn]:>10.6f}  {m['per_channel_ssim'][cn]:>10.6f}")
+    print(f"\n  Weakest channel (L1):   {m['weakest_l1']} ({m['per_channel_l1'][m['weakest_l1']]:.6f})")
+    print(f"  Weakest channel (SSIM): {m['weakest_ssim']} ({m['per_channel_ssim'][m['weakest_ssim']]:.6f})")
+
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -138,13 +230,26 @@ def main():
 
     model.eval()
 
-    # ── Dataset ──
+    # ── Datasets ──
     channel_reorder = not args.no_channel_reorder
+    xform = get_val_transform(channel_reorder)
+
     if args.datalist:
         with open(args.datalist) as f:
             datalist = json.load(f)
+
         val_data = datalist["validation"]
-        val_ds = Dataset(data=val_data, transform=get_val_transform(channel_reorder))
+        val_ds = Dataset(data=val_data, transform=xform)
+
+        # Training subset
+        train_data = datalist["training"]
+        n_train = args.train_samples if args.train_samples > 0 else len(val_data)
+        n_train = min(n_train, len(train_data))
+        # Deterministic random subset
+        import random
+        rng = random.Random(args.seed)
+        train_subset = rng.sample(train_data, n_train)
+        train_ds = Dataset(data=train_subset, transform=xform)
     else:
         from monai.utils import set_determinism
         set_determinism(args.seed)
@@ -155,15 +260,37 @@ def main():
             download=False,
             seed=args.seed,
             val_frac=args.val_frac,
-            transform=get_val_transform(channel_reorder),
+            transform=xform,
             num_workers=args.num_workers,
         )
+        train_ds = DecathlonDataset(
+            root_dir=args.data_dir,
+            task="Task01_BrainTumour",
+            section="training",
+            download=False,
+            seed=args.seed,
+            val_frac=args.val_frac,
+            transform=xform,
+            num_workers=args.num_workers,
+        )
+        # Subsample training set
+        n_train = args.train_samples if args.train_samples > 0 else len(val_ds)
+        n_train = min(n_train, len(train_ds))
+        import random
+        rng = random.Random(args.seed)
+        indices = rng.sample(range(len(train_ds)), n_train)
+        train_ds = torch.utils.data.Subset(train_ds, indices)
 
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True,
+    )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True,
     )
-    print(f"Val set: {len(val_ds)} samples")
+    print(f"Train subset: {len(train_ds)} samples")
+    print(f"Val set:      {len(val_ds)} samples")
 
     # ── Optional NIfTI sample saving ──
     saver = None
@@ -171,87 +298,46 @@ def main():
         from text2glioma.inference.saver import NiftiSaver
         samples_dir = run_dir / "samples"
         saver = NiftiSaver(output_dir=str(samples_dir), rescale=False)
-        print(f"Will save {args.save_samples} sample pairs to {samples_dir}")
+        print(f"Will save {args.save_samples} sample pairs per split to {samples_dir}")
 
-    # ── Evaluate ──
-    # Accumulators
-    per_ch_l1 = {cn: 0.0 for cn in CH_NAMES}
-    per_ch_ssim = {cn: 0.0 for cn in CH_NAMES}
-    total_l1 = 0.0
-    n_samples = 0
-    n_saved = 0
-
-    with torch.no_grad():
-        for x in tqdm(val_loader, desc="Evaluating"):
-            images = x["image"].to(device)
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                reconstruction, z_mu, z_sigma = model(x=images)
-
-            rec_f = reconstruction.float()
-            img_f = images.float()
-            bs = images.shape[0]
-
-            total_l1 += F.l1_loss(rec_f, img_f).item() * bs
-
-            for ci, cn in enumerate(CH_NAMES):
-                r = rec_f[:, ci:ci+1]
-                t = img_f[:, ci:ci+1]
-                per_ch_l1[cn] += F.l1_loss(r, t).item() * bs
-                per_ch_ssim[cn] += ssim_3d(r, t).item() * bs
-
-            # Save sample pairs as NIfTI
-            if saver is not None and n_saved < args.save_samples:
-                for i in range(bs):
-                    if n_saved >= args.save_samples:
-                        break
-                    saver.save(img_f[i], f"ep{epoch}_sample{n_saved:02d}_original.nii.gz")
-                    saver.save(rec_f[i], f"ep{epoch}_sample{n_saved:02d}_recon.nii.gz")
-                    n_saved += 1
-
-            n_samples += bs
+    # ── Evaluate both splits ──
+    train_metrics = evaluate_split(
+        model, train_loader, device, "train", epoch,
+        saver=saver, max_save=args.save_samples,
+    )
+    val_metrics = evaluate_split(
+        model, val_loader, device, "val", epoch,
+        saver=saver, max_save=args.save_samples,
+    )
 
     # ── Report ──
-    total_l1 /= n_samples
-    for cn in CH_NAMES:
-        per_ch_l1[cn] /= n_samples
-        per_ch_ssim[cn] /= n_samples
+    print_split_report(train_metrics, epoch)
+    print_split_report(val_metrics, epoch)
 
-    mean_ssim = sum(per_ch_ssim.values()) / len(CH_NAMES)
-
+    # ── Generalisation gap ──
+    gap_l1 = val_metrics["overall_l1"] - train_metrics["overall_l1"]
+    gap_ssim = val_metrics["overall_ssim"] - train_metrics["overall_ssim"]
     print(f"\n{'='*60}")
-    print(f"  Offline Val Metrics  (epoch {epoch}, N={n_samples})")
+    print(f"  Generalisation Gap (val − train)")
     print(f"{'='*60}")
-    print(f"\n  Overall L1:   {total_l1:.6f}")
-    print(f"  Overall SSIM: {mean_ssim:.6f}")
-    print(f"\n  {'Channel':>8s}  {'L1':>10s}  {'SSIM':>10s}")
-    print(f"  {'-'*8}  {'-'*10}  {'-'*10}")
-    for cn in CH_NAMES:
-        print(f"  {cn:>8s}  {per_ch_l1[cn]:>10.6f}  {per_ch_ssim[cn]:>10.6f}")
-
-    # Identify weakest channel
-    worst_l1 = max(per_ch_l1, key=per_ch_l1.get)
-    worst_ssim = min(per_ch_ssim, key=per_ch_ssim.get)
-    print(f"\n  Weakest channel (L1):   {worst_l1} ({per_ch_l1[worst_l1]:.6f})")
-    print(f"  Weakest channel (SSIM): {worst_ssim} ({per_ch_ssim[worst_ssim]:.6f})")
+    print(f"  ΔL1:   {gap_l1:+.6f}")
+    print(f"  ΔSSIM: {gap_ssim:+.6f}")
 
     # ── Save JSON ──
-    metrics = {
+    combined = {
         "epoch": epoch,
-        "n_samples": n_samples,
-        "overall_l1": total_l1,
-        "overall_ssim": mean_ssim,
-        "per_channel_l1": per_ch_l1,
-        "per_channel_ssim": per_ch_ssim,
-        "weakest_l1": worst_l1,
-        "weakest_ssim": worst_ssim,
+        "train": train_metrics,
+        "val": val_metrics,
+        "generalisation_gap": {"l1": gap_l1, "ssim": gap_ssim},
     }
     out_path = run_dir / "offline_metrics.json"
     with open(out_path, "w") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(combined, f, indent=2)
     print(f"\n  Saved to {out_path}")
 
-    if n_saved > 0:
-        print(f"  Saved {n_saved} sample pairs to {run_dir / 'samples'}")
+    total_saved = train_metrics["n_saved"] + val_metrics["n_saved"]
+    if total_saved > 0:
+        print(f"  Saved {total_saved} sample pairs to {run_dir / 'samples'}")
 
 
 if __name__ == "__main__":
