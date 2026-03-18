@@ -207,6 +207,16 @@ class PerChannelVAEWrapper(nn.Module):
         self.vae = vae
         self.n_channels = n_channels
 
+    # Expose encoder/decoder so _get_last_decoder_weight() and similar
+    # helpers that access model.decoder / model.encoder work transparently.
+    @property
+    def decoder(self):
+        return self.vae.decoder
+
+    @property
+    def encoder(self):
+        return self.vae.encoder
+
     def forward(self, x: torch.Tensor):
         B, C, D, H, W = x.shape
         assert C == self.n_channels
