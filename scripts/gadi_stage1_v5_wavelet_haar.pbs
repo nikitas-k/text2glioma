@@ -34,7 +34,7 @@ DATALIST=${HOME}/text2glioma/datalist_N1510.json
 
 # ── Pre-flight ──────────────────────────────────────────────────────
 export TORCH_HOME=${RUN_DIR}/cache
-mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${RUN_DIR}/job_logs" "$TORCH_HOME"
 
 if [ -z "$DATALIST" ]; then
     if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
@@ -57,7 +57,7 @@ torchrun --standalone --nproc_per_node=4 \
     --run_dir "$RUN_DIR" \
     --run_name v5_wavelet_haar \
     $EXTRA_ARGS \
-    --batch_size 4 \
+    --batch_size 2 \
     --num_epochs 500 \
     --val_interval 5 \
     --pin_memory \
@@ -68,4 +68,4 @@ torchrun --standalone --nproc_per_node=4 \
          model.wavelet_loss_weight=1.0 \
          model.wavelet_detail_weight=2.0 \
          model.wavelet_name=haar \
-    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"
+    2>&1 | tee "${RUN_DIR}/job_logs/${PBS_JOBID}.log"
