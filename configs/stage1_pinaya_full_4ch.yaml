@@ -6,17 +6,22 @@
 #   - latent_channels: 3
 #   - No attention (Pinaya didn't use attention)
 #
-# ALL parameters are trainable.  The encoder gets a low LR since
-# the Pinaya encoder already captures good spatial features.
+# Differential LR strategy: the decoder preserves Pinaya's fine
+# gyral texture prior (learned from 31k UK Biobank scans) via a
+# 50× lower LR.  The encoder needs to learn 4ch→latent mapping
+# so it gets the base LR.  Inflated conv layers (conv_in, conv_out)
+# start from replicated weights and also use the base LR.
 #
 # Fine-tuning hyperparameters:
-#   - Very low LR (5e-6) — we're adapting pretrained features
+#   - Encoder LR: 5e-6 (adapts to 4ch input)
+#   - Decoder LR: 1e-7 (preserves texture vocabulary)
 #   - Adaptive adv weight for stable GAN training
 #   - warmup: 5 epochs G-only before enabling D
 
 model:
   name: "AutoencoderKL"
-  lr: 0.000005                       # 10× lower than scratch (5e-5)
+  lr: 0.000005                       # encoder + inflated conv LR
+  decoder_lr: 0.0000001              # 50× lower — preserves gyral detail
   perceptual_weight: 1.0
   adv_weight: 0.005
   kl_weight: 0.00000001

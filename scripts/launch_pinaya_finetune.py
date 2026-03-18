@@ -549,11 +549,38 @@ def main():
     # ------------------------------------------------------------------
     # Optimisers — only trainable parameters
     # ------------------------------------------------------------------
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer_g = optim.AdamW(trainable_params, lr=config["model"]["lr"])
+    decoder_lr = config["model"].get("decoder_lr")
+    if decoder_lr is not None and args.strategy == "full_4ch":
+        # Differential LR: decoder gets lower LR to preserve Pinaya's
+        # pretrained texture vocabulary (gyral detail from 31k UK Biobank).
+        base_lr = config["model"]["lr"]
+        encoder_params, decoder_params, other_params = [], [], []
+        base_model = getattr(model, "module", model)
+        for name, param in base_model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith("decoder.") or name.startswith("post_quant_conv."):
+                decoder_params.append(param)
+            elif name.startswith("encoder.") or name.startswith("quant_conv"):
+                encoder_params.append(param)
+            else:
+                other_params.append(param)
+        param_groups = [
+            {"params": encoder_params, "lr": base_lr},
+            {"params": decoder_params, "lr": decoder_lr},
+        ]
+        if other_params:
+            param_groups.append({"params": other_params, "lr": base_lr})
+        optimizer_g = optim.AdamW(param_groups)
+        print0(f"Optimiser G: differential LR — "
+               f"encoder ({len(encoder_params)} tensors) lr={base_lr}, "
+               f"decoder ({len(decoder_params)} tensors) lr={decoder_lr}", rank)
+    else:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer_g = optim.AdamW(trainable_params, lr=config["model"]["lr"])
+        print0(f"Optimiser G: {len(trainable_params)} param groups, "
+               f"lr={config['model']['lr']}", rank)
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
-    print0(f"Optimiser G: {len(trainable_params)} param groups, "
-           f"lr={config['model']['lr']}", rank)
 
     # ------------------------------------------------------------------
     # Directories
