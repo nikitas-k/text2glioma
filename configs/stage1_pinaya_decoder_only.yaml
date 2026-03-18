@@ -15,9 +15,9 @@ model:
   name: "AutoencoderKL"
   lr: 0.00001                        # 5× lower than scratch training (5e-5)
   perceptual_weight: 1.0
-  adv_weight: 0.005
+  adv_weight: 0.01                   # 2× previous — sharper detail from D
   kl_weight: 0.00000001              # match Pinaya's original kl_weight
-  autoencoder_warm_up_n_epochs: 5    # let decoder settle before D kicks in
+  autoencoder_warm_up_n_epochs: 3    # shorter warmup so decoder doesn't over-smooth
   r1_gamma: 0.0
   kl_warmup_epochs: 0
   kl_max: 0.0

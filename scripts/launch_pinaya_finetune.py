@@ -1,19 +1,11 @@
 #!/usr/bin/env python
 """Fine-tune the Pinaya 2022 pretrained VAE on multi-channel BraTS data.
 
-Two strategies are supported:
-
-  Strategy A — ``--strategy decoder_only``
+Strategy: ``--strategy decoder_only``
     Keep the Pinaya architecture (1-channel in/out, num_channels=[64,128,128,128]).
     Freeze the entire encoder; fine-tune only the decoder.
     Each modality channel is processed independently through the VAE.
     The discriminator and perceptual loss operate on single-channel volumes.
-
-  Strategy B — ``--strategy full_4ch``
-    Adapt the Pinaya architecture to 4-channel in/out by inflating
-    ``encoder.conv_in`` (1→4) and ``decoder.conv_out`` (1→4) with replicated
-    + scaled Pinaya weights.  Fine-tune ALL parameters with a small LR.
-    The discriminator and perceptual loss work on the full 4-channel output.
 
 Both strategies use the existing ``train_autoencoder`` / ``eval_autoencoder``
 machinery from the text2glioma training pipeline, so TensorBoard logs include
@@ -83,7 +75,7 @@ PINAYA_WEIGHTS_URL = (
 
 
 # ---------------------------------------------------------------------------
-# Weight download & channel inflation
+# Weight download
 # ---------------------------------------------------------------------------
 
 def download_pinaya_weights(cache_dir: Path) -> Path:
@@ -100,19 +92,6 @@ def download_pinaya_weights(cache_dir: Path) -> Path:
     if not out_path.exists():
         raise RuntimeError("Download failed.")
     return out_path
-
-
-def inflate_conv_weight(w: torch.Tensor, target_channels: int, dim: int) -> torch.Tensor:
-    """Replicate a 1-channel conv weight to target_channels and scale.
-
-    For encoder.conv_in (dim=1, input channels):
-        (64, 1, k, k, k) → (64, 4, k, k, k)  by repeating + /4
-    For decoder.conv_out (dim=0, output channels):
-        (1, 64, k, k, k) → (4, 64, k, k, k)  by repeating + /4
-    """
-    reps = [1] * w.ndim
-    reps[dim] = target_channels
-    return w.repeat(*reps) / target_channels
 
 
 def load_pinaya_for_strategy(
@@ -144,42 +123,6 @@ def load_pinaya_for_strategy(
               f"({sum(p.numel() for p in model.parameters() if not p.requires_grad)/1e6:.1f}M params)")
         print(f"  [decoder_only] Trainable: "
               f"{sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.1f}M params")
-
-    elif strategy == "full_4ch":
-        # Architecture has in_channels=4, out_channels=4 but otherwise
-        # matches Pinaya's structure.  We inflate the first/last convs.
-        new_sd = model.state_dict()
-        loaded, skipped = 0, 0
-        for k, v in pinaya_sd.items():
-            if k not in new_sd:
-                skipped += 1
-                continue
-            target = new_sd[k]
-            if v.shape == target.shape:
-                new_sd[k] = v
-                loaded += 1
-            elif k == "encoder.conv_in.weight":
-                # (64, 1, 3, 3, 3) → (64, 4, 3, 3, 3)
-                new_sd[k] = inflate_conv_weight(v, target.shape[1], dim=1)
-                loaded += 1
-                print(f"  [inflate] {k}: {tuple(v.shape)} → {tuple(target.shape)}")
-            elif k == "decoder.conv_out.weight":
-                # (1, C, 3, 3, 3) → (4, C, 3, 3, 3)
-                new_sd[k] = inflate_conv_weight(v, target.shape[0], dim=0)
-                loaded += 1
-                print(f"  [inflate] {k}: {tuple(v.shape)} → {tuple(target.shape)}")
-            elif k == "decoder.conv_out.bias":
-                # (1,) → (4,)
-                new_sd[k] = v.repeat(target.shape[0])
-                loaded += 1
-                print(f"  [inflate] {k}: {tuple(v.shape)} → {tuple(target.shape)}")
-            else:
-                # Shape mismatch in deeper layers → skip (random init)
-                skipped += 1
-                print(f"  [skip] {k}: pinaya {tuple(v.shape)} ≠ ours {tuple(target.shape)}")
-        model.load_state_dict(new_sd)
-        print(f"  [full_4ch] Loaded {loaded} tensors, skipped {skipped}")
-        print(f"  [full_4ch] All {sum(p.numel() for p in model.parameters())/1e6:.1f}M params trainable")
 
     else:
         raise ValueError(f"Unknown strategy: {strategy!r}")
@@ -318,9 +261,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run_dir", type=str, required=True)
     p.add_argument("--run_name", type=str, default=None)
     p.add_argument("--strategy", type=str, required=True,
-                   choices=["decoder_only", "full_4ch"],
-                   help="decoder_only: freeze encoder, 1ch-per-pass. "
-                        "full_4ch: inflate to 4ch, train all.")
+                   choices=["decoder_only"],
+                   help="decoder_only: freeze encoder, 1ch-per-pass.")
     p.add_argument("--data_dir", type=str, default="./data")
     p.add_argument("--datalist", type=str, default=None)
     p.add_argument("--no_channel_reorder", action="store_true", default=False)
@@ -549,37 +491,10 @@ def main():
     # ------------------------------------------------------------------
     # Optimisers — only trainable parameters
     # ------------------------------------------------------------------
-    decoder_lr = config["model"].get("decoder_lr")
-    if decoder_lr is not None and args.strategy == "full_4ch":
-        # Differential LR: decoder gets lower LR to preserve Pinaya's
-        # pretrained texture vocabulary (gyral detail from 31k UK Biobank).
-        base_lr = config["model"]["lr"]
-        encoder_params, decoder_params, other_params = [], [], []
-        base_model = getattr(model, "module", model)
-        for name, param in base_model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name.startswith("decoder.") or name.startswith("post_quant_conv."):
-                decoder_params.append(param)
-            elif name.startswith("encoder.") or name.startswith("quant_conv"):
-                encoder_params.append(param)
-            else:
-                other_params.append(param)
-        param_groups = [
-            {"params": encoder_params, "lr": base_lr},
-            {"params": decoder_params, "lr": decoder_lr},
-        ]
-        if other_params:
-            param_groups.append({"params": other_params, "lr": base_lr})
-        optimizer_g = optim.AdamW(param_groups)
-        print0(f"Optimiser G: differential LR — "
-               f"encoder ({len(encoder_params)} tensors) lr={base_lr}, "
-               f"decoder ({len(decoder_params)} tensors) lr={decoder_lr}", rank)
-    else:
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer_g = optim.AdamW(trainable_params, lr=config["model"]["lr"])
-        print0(f"Optimiser G: {len(trainable_params)} param groups, "
-               f"lr={config['model']['lr']}", rank)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer_g = optim.AdamW(trainable_params, lr=config["model"]["lr"])
+    print0(f"Optimiser G: {len(trainable_params)} param groups, "
+           f"lr={config['model']['lr']}", rank)
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
 
     # ------------------------------------------------------------------
