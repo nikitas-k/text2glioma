@@ -18,9 +18,9 @@
 # Each BraTS modality (T1, T1CE, T2, FLAIR) is processed as an
 # independent 1-channel pass through the VAE.
 #
-# Estimated: ~50 epochs × ~95 batches/epoch (N=1510, 4 GPUs, bs=4)
-#   4 channel passes per sample → 16 VAE fwd/batch
-#   At ~40-60s/epoch on 4×H200 → ~35-50 min total.
+# Estimated: ~50 epochs × ~297 batches/epoch (N=1187, 4 GPUs, bs=1)
+#   4 channel passes per sample (gradient-checkpointed)
+#   At ~60-90s/epoch on 4×H200 → ~50-75 min total.
 #
 # Logs: TensorBoard with L1, SSIM, MS-SSIM per-channel (same as v4+)
 
@@ -40,6 +40,7 @@ DATALIST=${HOME}/text2glioma/datalist_N1510.json
 # ── Pre-flight ──────────────────────────────────────────────────────
 export TORCH_HOME=${RUN_DIR}/cache
 export HF_HOME=${RUN_DIR}/cache/huggingface
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
 
 # Download Pinaya weights on rank 0 before torchrun
@@ -70,7 +71,7 @@ torchrun --standalone --nproc_per_node=4 \
     --datalist "$DATALIST" --no_channel_reorder \
     --pinaya_weights "$PINAYA_WEIGHTS" \
     --cache_dir "${RUN_DIR}/cache" \
-    --batch_size 4 \
+    --batch_size 1 \
     --num_epochs 50 \
     --val_interval 5 \
     --pin_memory \

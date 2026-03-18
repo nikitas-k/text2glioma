@@ -221,9 +221,19 @@ class PerChannelVAEWrapper(nn.Module):
         B, C, D, H, W = x.shape
         assert C == self.n_channels
         recons, z_mus, z_sigmas = [], [], []
+
+        def _run_vae(x_ch):
+            return self.vae(x=x_ch)
+
         for c in range(C):
             x_ch = x[:, c:c+1]  # (B, 1, D, H, W)
-            r, zm, zs = self.vae(x=x_ch)
+            # Gradient checkpoint each channel pass so only 1 channel's
+            # activations are held at a time; the other 3 are recomputed
+            # during backward.  Crucial for fitting 4× 160×224×160
+            # decoder graphs on a single GPU.
+            r, zm, zs = torch.utils.checkpoint.checkpoint(
+                _run_vae, x_ch, use_reentrant=False,
+            )
             recons.append(r)
             z_mus.append(zm)
             z_sigmas.append(zs)
