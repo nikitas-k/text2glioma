@@ -30,6 +30,7 @@ model:
   wavelet_loss_weight: 0.0
   wavelet_detail_weight: 2.0
   wavelet_name: "haar"
+  grad_accum_steps: 4                # effective bs = 1 × 4 GPUs × 4 accum = 16
   params:
     spatial_dims: 3
     in_channels: 1                   # Pinaya architecture: single-channel

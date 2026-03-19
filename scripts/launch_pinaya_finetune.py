@@ -567,6 +567,7 @@ def main():
         wavelet_loss_weight=config["model"].get("wavelet_loss_weight", 0.0),
         wavelet_detail_weight=config["model"].get("wavelet_detail_weight", 2.0),
         wavelet_name=config["model"].get("wavelet_name", "haar"),
+        grad_accum_steps=config["model"].get("grad_accum_steps", 1),
     )
 
     print0("Fine-tuning complete.", rank)

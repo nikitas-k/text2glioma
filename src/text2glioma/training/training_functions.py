@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from collections import OrderedDict
@@ -476,6 +477,7 @@ def train_autoencoder(
     wavelet_loss_weight: float = 0.0,
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
+    grad_accum_steps: int = 1,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -535,6 +537,7 @@ def train_autoencoder(
             wavelet_loss_weight=wavelet_loss_weight,
             wavelet_detail_weight=wavelet_detail_weight,
             wavelet_name=wavelet_name,
+            grad_accum_steps=grad_accum_steps,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -599,6 +602,7 @@ def train_epoch_autoencoder(
     wavelet_loss_weight: float = 0.0,
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
+    grad_accum_steps: int = 1,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -669,9 +673,18 @@ def train_epoch_autoencoder(
         n_sc = getattr(discriminator, "module", discriminator).n_scales
         print(f"[MULTISCALE-D] Multi-scale discriminator enabled ({n_sc} scales)")
 
+    if grad_accum_steps > 1 and epoch == 0:
+        print(f"[GRAD-ACCUM] Gradient accumulation enabled: {grad_accum_steps} "
+              f"micro-steps per optimizer step")
+
     pbar = tqdm(enumerate(loader), total=len(loader))
+    n_steps = len(loader)
     for step, x in pbar:
         images = x["image"].to(device)
+
+        # Gradient accumulation control
+        accum_start = (step % grad_accum_steps == 0)
+        should_step = ((step + 1) % grad_accum_steps == 0) or (step == n_steps - 1)
 
         # Shared forward pass — kept in the graph so the generator
         # backward can reach the autoencoder parameters.
@@ -694,7 +707,8 @@ def train_epoch_autoencoder(
         # catch up.  D still runs a forward pass so we get the loss
         # value for logging, but we skip backward + step.
         if adversarial_weight > 0 and not warming_up:
-            optimizer_d.zero_grad(set_to_none=True)
+            if accum_start:
+                optimizer_d.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 disc_input = torch.cat(
@@ -736,9 +750,12 @@ def train_epoch_autoencoder(
             if skip_d:
                 d_skips += 1
             else:
-                d_loss.backward()
-                torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
-                optimizer_d.step()
+                _d_ctx = nullcontext() if should_step else getattr(discriminator, 'no_sync', nullcontext)()
+                with _d_ctx:
+                    (d_loss / grad_accum_steps).backward()
+                if should_step:
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1)
+                    optimizer_d.step()
         else:
             discriminator_loss = torch.tensor([0.0]).to(device)
 
@@ -749,7 +766,8 @@ def train_epoch_autoencoder(
         for p in disc_module.parameters():
             p.requires_grad_(False)
 
-        optimizer_g.zero_grad(set_to_none=True)
+        if accum_start:
+            optimizer_g.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             l1_loss = F.l1_loss(reconstruction.float(), images.float())
             # MedicalNet perceptual loss: per-channel (MedicalNet expects 1-ch)
@@ -817,9 +835,12 @@ def train_epoch_autoencoder(
             if wavelet_loss_weight > 0:
                 losses["w_loss"] = w_loss
 
-        losses["loss"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
-        optimizer_g.step()
+        _g_ctx = nullcontext() if should_step else getattr(model, 'no_sync', nullcontext)()
+        with _g_ctx:
+            (losses["loss"] / grad_accum_steps).backward()
+        if should_step:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            optimizer_g.step()
 
         # Unfreeze discriminator for the next iteration.
         for p in disc_module.parameters():
