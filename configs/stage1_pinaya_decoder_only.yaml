@@ -21,7 +21,12 @@ model:
   r1_gamma: 0.0
   kl_warmup_epochs: 0
   kl_max: 0.0
-  adaptive_adv_weight: true
+  adaptive_adv_weight: false         # MUST be false: adaptive weight + gradient
+                                     # checkpointing triggers 3× recomputation
+                                     # (two retain_graph autograd.grad calls in
+                                     # _compute_adaptive_weight + final backward),
+                                     # OOMs on H200 140GB at bs=1.
+                                     # Fixed adv_weight=0.01 is sufficient.
   wavelet_loss_weight: 0.0
   wavelet_detail_weight: 2.0
   wavelet_name: "haar"

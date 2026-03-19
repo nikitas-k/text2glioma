@@ -1,10 +1,17 @@
 model:
   name: "AutoencoderKL"
   lr: 0.00005
-  perceptual_weight: 0.002
+  perceptual_weight: 1.0
   adv_weight: 0.005
   kl_weight: 0.00000001
   autoencoder_warm_up_n_epochs: 0   # train G alone for this many epochs before enabling D
+  r1_gamma: 0.0                     # R1 gradient penalty weight (0 = disabled; try 1.0-10.0)
+  kl_warmup_epochs: 0               # linearly ramp kl_weight from 0 over this many epochs (0 = disabled)
+  kl_max: 0.0                       # clamp per-batch KL to this value (0 = disabled; try 1e4-1e5)
+  adaptive_adv_weight: false        # VQGAN-style adaptive D/G balancing (recommended: true)
+  wavelet_loss_weight: 0.0          # wavelet L1 loss weight (0 = disabled; try 0.5–2.0)
+  wavelet_detail_weight: 2.0        # multiplier for high-freq sub-bands vs LLL (try 2–5)
+  wavelet_name: "haar"              # pywt wavelet family: haar, db2, db4, sym4, coif1, …
   params:
     spatial_dims: 3
     in_channels: 4             # T1, T1CE, T2, FLAIR
@@ -26,6 +33,8 @@ image_keys: ["t1", "t1ce", "t2", "flair"]
 
 discriminator:
   lr: 0.0001
+  spectral_norm: false        # wrap D conv layers with spectral norm (anti-grid artifact)
+  n_scales: 1                 # multi-scale D: 1 = single (default), 2 = two scales (orig + 2× pooled)
   params:
     spatial_dims: 3
     num_channels: 96

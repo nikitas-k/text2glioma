@@ -87,6 +87,33 @@ ablation:
   dropout:
     enabled: false
     output_dir: ${paths.output_dir}/dropout_configs
+  vae_ablation:
+    enabled: false
+    n_samples: 50
+    ddim_steps: 50
+    gs_text: 7.5
+    gs_mask: 3.0
+    output_json: ${paths.output_dir}/vae_ablation.json
+    # Each condition must specify: stage1_config, stage1_uri, ldm_config, model_ckpt
+    conditions:
+      - label: pinaya_decoder_only
+        description: "Pinaya VAE decoder-only fine-tuned (frozen encoder) + LDM on adapted latents"
+        stage1_config: ""   # e.g. configs/stage1_pinaya_decoder_only.yaml
+        stage1_uri: ""      # path to decoder-only fine-tuned VAE checkpoint
+        ldm_config: ""      # e.g. configs/ldm.yaml
+        model_ckpt: ""      # path to LDM checkpoint trained on decoder-only latents
+      - label: pinaya_frozen
+        description: "Frozen (zero-shot) Pinaya VAE + LDM on unadapted latents"
+        stage1_config: ""   # e.g. configs/stage1_pinaya_decoder_only.yaml
+        stage1_uri: ""      # path to frozen (uninflated) Pinaya VAE
+        ldm_config: ""      # e.g. configs/ldm.yaml
+        model_ckpt: ""      # path to LDM checkpoint trained on frozen latents
+      - label: from_scratch
+        description: "VAE trained from scratch on BraTS + LDM on those latents"
+        stage1_config: ""   # e.g. configs/stage1.yaml
+        stage1_uri: ""      # path to from-scratch VAE checkpoint
+        ldm_config: ""      # e.g. configs/ldm.yaml
+        model_ckpt: ""      # path to LDM checkpoint trained on scratch latents
 
 # ========================================================================
 # §6 — Diversity & memorisation
