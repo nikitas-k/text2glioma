@@ -478,6 +478,8 @@ def train_autoencoder(
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
     grad_accum_steps: int = 1,
+    l2sp_weight: float = 0.0,
+    pretrained_decoder_weights: dict | None = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -538,6 +540,8 @@ def train_autoencoder(
             wavelet_detail_weight=wavelet_detail_weight,
             wavelet_name=wavelet_name,
             grad_accum_steps=grad_accum_steps,
+            l2sp_weight=l2sp_weight,
+            pretrained_decoder_weights=pretrained_decoder_weights,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -603,6 +607,8 @@ def train_epoch_autoencoder(
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
     grad_accum_steps: int = 1,
+    l2sp_weight: float = 0.0,
+    pretrained_decoder_weights: dict | None = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -676,6 +682,18 @@ def train_epoch_autoencoder(
     if grad_accum_steps > 1 and epoch == 0:
         print(f"[GRAD-ACCUM] Gradient accumulation enabled: {grad_accum_steps} "
               f"micro-steps per optimizer step")
+
+    # L2-SP: build {name → pretrained_tensor} map for decoder params.
+    # Only decoder params that require grad are penalised.
+    _l2sp_ref: dict[str, torch.Tensor] = {}
+    if l2sp_weight > 0 and pretrained_decoder_weights is not None:
+        raw = getattr(model, "module", model)
+        for name, p in raw.named_parameters():
+            if p.requires_grad and name in pretrained_decoder_weights:
+                _l2sp_ref[name] = pretrained_decoder_weights[name].to(device)
+        if epoch == 0:
+            print(f"[L2-SP] Weight-space regularisation enabled: "
+                  f"lambda={l2sp_weight:.1e}, {len(_l2sp_ref)} decoder tensors")
 
     pbar = tqdm(enumerate(loader), total=len(loader))
     n_steps = len(loader)
@@ -804,6 +822,15 @@ def train_epoch_autoencoder(
                         + perceptual_weight * p_loss
                         + wavelet_loss_weight * w_loss)
 
+            # L2-SP: penalise decoder weights drifting from pretrained values
+            l2sp_loss = torch.tensor(0.0, device=device)
+            if l2sp_weight > 0 and _l2sp_ref:
+                raw = getattr(model, "module", model)
+                for name, p in raw.named_parameters():
+                    if name in _l2sp_ref:
+                        l2sp_loss = l2sp_loss + (p - _l2sp_ref[name]).pow(2).sum()
+                rec_loss = rec_loss + l2sp_weight * l2sp_loss
+
             # Adversarial contribution: adaptive or fixed weight
             if adaptive_adv_weight and adversarial_weight > 0 and not warming_up:
                 d_weight = _compute_adaptive_weight(
@@ -834,6 +861,8 @@ def train_epoch_autoencoder(
             )
             if wavelet_loss_weight > 0:
                 losses["w_loss"] = w_loss
+            if l2sp_weight > 0:
+                losses["l2sp_loss"] = l2sp_loss
 
         _g_ctx = nullcontext() if should_step else getattr(model, 'no_sync', nullcontext)()
         with _g_ctx:

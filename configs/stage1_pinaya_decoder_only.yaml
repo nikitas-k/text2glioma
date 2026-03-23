@@ -9,7 +9,8 @@
 #   - Low LR (1e-5) to preserve pretrained features
 #   - Low adversarial weight — we want reconstruction fidelity
 #   - No KL warmup (pretrained latent space already structured)
-#   - Adaptive adv weight for stability
+#   - L2-SP regularisation to prevent catastrophic forgetting
+#   - D enabled from step 0 to preserve sharp detail
 
 model:
   name: "AutoencoderKL"
@@ -17,7 +18,8 @@ model:
   perceptual_weight: 1.0
   adv_weight: 0.01                   # 2× previous — sharper detail from D
   kl_weight: 0.00000001              # match Pinaya's original kl_weight
-  autoencoder_warm_up_n_epochs: 3    # shorter warmup so decoder doesn't over-smooth
+  autoencoder_warm_up_n_epochs: 0    # D from step 0 — preserves fine detail
+                                     # that L1 would smooth out during warmup.
   r1_gamma: 0.0
   kl_warmup_epochs: 0
   kl_max: 0.0
@@ -27,6 +29,10 @@ model:
                                      # _compute_adaptive_weight + final backward),
                                      # OOMs on H200 140GB at bs=1.
                                      # Fixed adv_weight=0.01 is sufficient.
+  l2sp_weight: 0.01                  # L2-SP: penalise decoder weights drifting
+                                     # from pretrained values (Xuhong+ 2018).
+                                     # Prevents catastrophic forgetting of fine
+                                     # gyrification detail from Pinaya pretraining.
   wavelet_loss_weight: 0.0
   wavelet_detail_weight: 2.0
   wavelet_name: "haar"

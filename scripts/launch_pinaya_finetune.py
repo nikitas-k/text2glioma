@@ -456,9 +456,28 @@ def main():
     print0("Loading Pinaya VAE …", rank)
     model = load_pinaya_for_strategy(args.strategy, config, weights_path)
 
+    # Snapshot pretrained decoder weights for L2-SP regularisation
+    # (must happen before PerChannelVAEWrapper / DDP wrapping).
+    pretrained_decoder_weights = None
+    l2sp_weight = config["model"].get("l2sp_weight", 0.0)
+    if l2sp_weight > 0:
+        pretrained_decoder_weights = {
+            name: param.detach().clone().cpu()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        print0(f"Captured {len(pretrained_decoder_weights)} pretrained decoder "
+               f"weight tensors for L2-SP (lambda={l2sp_weight:.1e})", rank)
+
     if args.strategy == "decoder_only":
         # Wrap in PerChannelVAEWrapper so 4-ch images are handled correctly
         model = PerChannelVAEWrapper(model, n_channels=4)
+        # PerChannelVAEWrapper stores VAE as self.vae, so param names
+        # gain a "vae." prefix.  Remap L2-SP reference dict to match.
+        if pretrained_decoder_weights is not None:
+            pretrained_decoder_weights = {
+                f"vae.{k}": v for k, v in pretrained_decoder_weights.items()
+            }
 
     model = model.to(device)
 
@@ -568,6 +587,8 @@ def main():
         wavelet_detail_weight=config["model"].get("wavelet_detail_weight", 2.0),
         wavelet_name=config["model"].get("wavelet_name", "haar"),
         grad_accum_steps=config["model"].get("grad_accum_steps", 1),
+        l2sp_weight=l2sp_weight,
+        pretrained_decoder_weights=pretrained_decoder_weights,
     )
 
     print0("Fine-tuning complete.", rank)
