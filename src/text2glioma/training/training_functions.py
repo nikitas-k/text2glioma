@@ -468,6 +468,7 @@ def train_autoencoder(
     kl_weight: float = 1e-6,
     perceptual_weight: float = 2e-3,
     adversarial_weight: float = 1e-3,
+    l1_weight: float = 1.0,
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
     r1_gamma: float = 0.0,
@@ -510,6 +511,7 @@ def train_autoencoder(
         kl_weight=kl_weight,
         adversarial_weight=adversarial_weight,
         perceptual_weight=perceptual_weight,
+        l1_weight=l1_weight,
         kl_max=kl_max,
         wavelet_loss_weight=wavelet_loss_weight,
         wavelet_detail_weight=wavelet_detail_weight,
@@ -530,6 +532,7 @@ def train_autoencoder(
             kl_weight=kl_weight,
             adversarial_weight=adversarial_weight,
             perceptual_weight=perceptual_weight,
+            l1_weight=l1_weight,
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
             d_skip_threshold=d_skip_threshold,
             r1_gamma=r1_gamma,
@@ -556,6 +559,7 @@ def train_autoencoder(
                 kl_weight=kl_weight,
                 adversarial_weight=adversarial_weight,
                 perceptual_weight=perceptual_weight,
+                l1_weight=l1_weight,
                 kl_max=kl_max,
                 wavelet_loss_weight=wavelet_loss_weight,
                 wavelet_detail_weight=wavelet_detail_weight,
@@ -597,6 +601,7 @@ def train_epoch_autoencoder(
     kl_weight: float,
     adversarial_weight: float,
     perceptual_weight: float,
+    l1_weight: float = 1.0,
     autoencoder_warm_up_n_epochs: int = 0,
     d_skip_threshold: float = 0.0,
     r1_gamma: float = 0.0,
@@ -817,7 +822,7 @@ def train_epoch_autoencoder(
                 generator_loss = torch.tensor([0.0]).to(device)
 
             # Reconstruction loss (everything except adversarial)
-            rec_loss = (l1_loss
+            rec_loss = (l1_weight * l1_loss
                         + kl_weight * kl_loss
                         + perceptual_weight * p_loss
                         + wavelet_loss_weight * w_loss)
@@ -923,6 +928,7 @@ def eval_autoencoder(
     kl_weight: float,
     adversarial_weight: float,
     perceptual_weight: float,
+    l1_weight: float = 1.0,
     kl_max: float = 0.0,
     wavelet_loss_weight: float = 0.0,
     wavelet_detail_weight: float = 2.0,
@@ -966,7 +972,7 @@ def eval_autoencoder(
             else:
                 discriminator_loss = torch.tensor([0.0]).to(device)
 
-            loss = l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adversarial_weight * generator_loss
+            loss = l1_weight * l1_loss + kl_weight * kl_loss + perceptual_weight * p_loss + adversarial_weight * generator_loss
 
             # Wavelet L1 loss (eval)
             if wavelet_loss_weight > 0:

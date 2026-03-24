@@ -577,6 +577,7 @@ def main():
         kl_weight=config["model"]["kl_weight"],
         perceptual_weight=config["model"]["perceptual_weight"],
         adversarial_weight=config["model"]["adv_weight"],
+        l1_weight=config["model"].get("l1_weight", 1.0),
         autoencoder_warm_up_n_epochs=config["model"].get("autoencoder_warm_up_n_epochs", 0),
         d_skip_threshold=config["model"].get("d_skip_threshold", 0.0),
         r1_gamma=config["model"].get("r1_gamma", 0.0),
