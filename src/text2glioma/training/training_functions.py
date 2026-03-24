@@ -1,6 +1,6 @@
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from collections import OrderedDict
 from copy import deepcopy
 import math
@@ -479,7 +479,7 @@ def train_autoencoder(
     wavelet_name: str = "haar",
     grad_accum_steps: int = 1,
     l2sp_weight: float = 0.0,
-    pretrained_decoder_weights: dict | None = None,
+    pretrained_decoder_weights: Optional[dict] = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -608,7 +608,7 @@ def train_epoch_autoencoder(
     wavelet_name: str = "haar",
     grad_accum_steps: int = 1,
     l2sp_weight: float = 0.0,
-    pretrained_decoder_weights: dict | None = None,
+    pretrained_decoder_weights: Optional[dict] = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
