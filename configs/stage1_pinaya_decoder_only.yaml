@@ -9,19 +9,21 @@
 #   - Low LR (1e-5) to preserve pretrained features
 #   - Low adversarial weight — we want reconstruction fidelity
 #   - No KL warmup (pretrained latent space already structured)
-#   - L2-SP regularisation to prevent catastrophic forgetting
+#   - No L2-SP (it pulls the decoder back to its pretrained prior)
 #   - D enabled from step 0 to preserve sharp detail
+#   - D lr = G lr to prevent D dominance
 
 model:
   name: "AutoencoderKL"
   lr: 0.00001                        # 5× lower than scratch training (5e-5)
-  l1_weight: 0.1                     # heavily downweighted — L1 rewards the
-                                     # pixel-wise mean which erases fine detail.
-                                     # At 0.1 it guides global structure without
-                                     # overpowering perceptual + adversarial.
+  l1_weight: 0.3                     # midpoint between v3 (0.1, too weak →
+                                     # reversion) and 0.5 (risks smoothing out
+                                     # gyrification detail).  Should anchor BraTS
+                                     # reconstruction without L1-dominant blur.
   perceptual_weight: 1.0
-  adv_weight: 0.05                   # 5× v2 — adversarial is the only loss
-                                     # that rewards sharpness over smoothness.
+  adv_weight: 0.025                  # midpoint between v3 (0.05, D dominated)
+                                     # and 0.01.  Meaningful sharpness signal
+                                     # without overwhelming reconstruction.
   kl_weight: 0.00000001              # match Pinaya's original kl_weight
   autoencoder_warm_up_n_epochs: 0    # D from step 0 — preserves fine detail
                                      # that L1 would smooth out during warmup.
@@ -33,10 +35,14 @@ model:
                                      # (two retain_graph autograd.grad calls in
                                      # _compute_adaptive_weight + final backward),
                                      # OOMs on H200 140GB at bs=1.
-  l2sp_weight: 0.1                   # 10× v2 — L2-SP must be comparable in
-                                     # magnitude to other losses to actually
-                                     # anchor the decoder near pretrained weights.
-                                     # At 0.01 it was only 5% of total loss.
+  l2sp_weight: 0.0                   # DISABLED.  L2-SP explicitly pulls weights
+                                     # back toward the pretrained Pinaya decoder,
+                                     # which was trained on UK Biobank T1w.  In v3
+                                     # this caused the decoder to revert to its
+                                     # prior (hallucinating cortical gyrification
+                                     # onto smooth pathological tissue), undoing
+                                     # the BraTS adaptation.  SSIM fell from 0.808
+                                     # (epoch 3.5) to 0.627 (epoch 11.5).
   wavelet_loss_weight: 0.0
   wavelet_detail_weight: 2.0
   wavelet_name: "haar"
@@ -62,7 +68,8 @@ model:
 image_keys: ["t1", "t1ce", "t2", "flair"]
 
 discriminator:
-  lr: 0.00005                        # 2× lower than scratch (1e-4)
+  lr: 0.00001                        # same as G lr — v3 used 5× G lr which
+                                     # let D win the arms race (d_loss→0.05).
   spectral_norm: false
   n_scales: 1
   params:
