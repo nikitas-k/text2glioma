@@ -16,10 +16,11 @@
 model:
   name: "AutoencoderKL"
   lr: 0.00001                        # 5× lower than scratch training (5e-5)
-  l1_weight: 0.3                     # midpoint between v3 (0.1, too weak →
-                                     # reversion) and 0.5 (risks smoothing out
-                                     # gyrification detail).  Should anchor BraTS
-                                     # reconstruction without L1-dominant blur.
+  l1_weight: 0.1                     # low L1 to avoid smoothing out fine
+                                     # gyrification detail.  v4 used 0.3 and
+                                     # lost detail.  v3 used 0.1 and preserved
+                                     # detail but diverged due to L2-SP + D
+                                     # dominance — both now fixed.
   perceptual_weight: 1.0
   adv_weight: 0.025                  # midpoint between v3 (0.05, D dominated)
                                      # and 0.01.  Meaningful sharpness signal
