@@ -485,6 +485,14 @@ def main():
     # Discriminator + perceptual loss
     # ------------------------------------------------------------------
     disc_params = config["discriminator"]["params"]
+    conditional_disc = config["model"].get("conditional_disc", False)
+    if conditional_disc:
+        # Pix2pix-style conditional D: input channels = image + output.
+        disc_params = dict(disc_params)  # shallow copy to avoid mutating config
+        disc_params["in_channels"] = disc_params["in_channels"] * 2
+        print0(f"[COND-D] Conditional discriminator enabled: "
+               f"in_channels {disc_params['in_channels']//2} → {disc_params['in_channels']}",
+               rank)
     discriminator = PatchDiscriminator(**disc_params)
     if config["discriminator"].get("spectral_norm", False):
         apply_spectral_norm(discriminator)
@@ -590,6 +598,7 @@ def main():
         grad_accum_steps=config["model"].get("grad_accum_steps", 1),
         l2sp_weight=l2sp_weight,
         pretrained_decoder_weights=pretrained_decoder_weights,
+        conditional_disc=conditional_disc,
     )
 
     print0("Fine-tuning complete.", rank)

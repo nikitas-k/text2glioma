@@ -208,6 +208,7 @@ class MultiScalePatchDiscriminator(nn.Module):
 def _r1_penalty(
     discriminator: nn.Module,
     real: torch.Tensor,
+    condition: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """R1 gradient penalty (Mescheder et al., 2018).
 
@@ -216,9 +217,17 @@ def _r1_penalty(
     without needing to weaken D architecturally or skip its updates.
 
     The penalty is computed in float32 for numerical stability.
+
+    If *condition* is given (conditional D), the input to D is
+    ``cat([condition, real], dim=1)`` and the gradient is taken
+    w.r.t. *real* only.
     """
     real = real.detach().requires_grad_(True)
-    logits = discriminator(real.float())[-1]
+    if condition is not None:
+        disc_in = torch.cat([condition.detach(), real], dim=1).float()
+    else:
+        disc_in = real.float()
+    logits = discriminator(disc_in)[-1]
     grad, = torch.autograd.grad(
         outputs=logits.sum(),
         inputs=real,
@@ -481,6 +490,7 @@ def train_autoencoder(
     grad_accum_steps: int = 1,
     l2sp_weight: float = 0.0,
     pretrained_decoder_weights: Optional[dict] = None,
+    conditional_disc: bool = False,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -516,6 +526,7 @@ def train_autoencoder(
         wavelet_loss_weight=wavelet_loss_weight,
         wavelet_detail_weight=wavelet_detail_weight,
         wavelet_name=wavelet_name,
+        conditional_disc=conditional_disc,
     )
 
     for epoch in range(start_epoch, n_epochs):
@@ -545,6 +556,7 @@ def train_autoencoder(
             grad_accum_steps=grad_accum_steps,
             l2sp_weight=l2sp_weight,
             pretrained_decoder_weights=pretrained_decoder_weights,
+            conditional_disc=conditional_disc,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -564,6 +576,7 @@ def train_autoencoder(
                 wavelet_loss_weight=wavelet_loss_weight,
                 wavelet_detail_weight=wavelet_detail_weight,
                 wavelet_name=wavelet_name,
+                conditional_disc=conditional_disc,
             )
             print_gpu_memory_report()
 
@@ -614,6 +627,7 @@ def train_epoch_autoencoder(
     grad_accum_steps: int = 1,
     l2sp_weight: float = 0.0,
     pretrained_decoder_weights: Optional[dict] = None,
+    conditional_disc: bool = False,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -734,11 +748,17 @@ def train_epoch_autoencoder(
                 optimizer_d.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                disc_input = torch.cat(
-                    [reconstruction.contiguous().detach(),
-                     images.contiguous().detach()],
-                    dim=0,
-                )
+                if conditional_disc:
+                    # Pix2pix-style: D sees (input, output) channel-concat pairs.
+                    fake_pair = torch.cat([images.detach(), reconstruction.contiguous().detach()], dim=1)
+                    real_pair = torch.cat([images.detach(), images.detach()], dim=1)
+                    disc_input = torch.cat([fake_pair, real_pair], dim=0)
+                else:
+                    disc_input = torch.cat(
+                        [reconstruction.contiguous().detach(),
+                         images.contiguous().detach()],
+                        dim=0,
+                    )
                 logits_all = discriminator(disc_input.float())[-1]
                 logits_fake, logits_real = torch.chunk(logits_all, 2, dim=0)
 
@@ -754,7 +774,10 @@ def train_epoch_autoencoder(
             # (same two-forward version-mismatch bug as the GAN pattern).
             r1_loss = torch.tensor(0.0, device=device)
             if r1_gamma > 0:
-                r1_loss = _r1_penalty(disc_module, images)
+                r1_loss = _r1_penalty(
+                    disc_module, images,
+                    condition=images if conditional_disc else None,
+                )
                 d_loss = d_loss + 0.5 * r1_gamma * r1_loss
 
             # Adaptive skip: only update D if it hasn't collapsed yet.
@@ -816,7 +839,11 @@ def train_epoch_autoencoder(
                 kl_loss = torch.clamp(kl_loss, max=kl_max)
 
             if adversarial_weight > 0 and not warming_up:
-                logits_fake_g = disc_module(reconstruction.contiguous().float())[-1]
+                if conditional_disc:
+                    g_disc_in = torch.cat([images, reconstruction.contiguous()], dim=1).float()
+                else:
+                    g_disc_in = reconstruction.contiguous().float()
+                logits_fake_g = disc_module(g_disc_in)[-1]
                 generator_loss = adv_loss(logits_fake_g, target_is_real=True, for_discriminator=False)
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
@@ -933,6 +960,7 @@ def eval_autoencoder(
     wavelet_loss_weight: float = 0.0,
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
+    conditional_disc: bool = False,
 ) -> float:
     model.eval()
     discriminator.eval()
@@ -957,16 +985,26 @@ def eval_autoencoder(
                 kl_loss = torch.clamp(kl_loss, max=kl_max)
 
             if adversarial_weight > 0:
-                logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+                if conditional_disc:
+                    g_disc_in = torch.cat([images, reconstruction.contiguous()], dim=1).float()
+                else:
+                    g_disc_in = reconstruction.contiguous().float()
+                logits_fake = discriminator(g_disc_in)[-1]
                 generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
             else:
                 generator_loss = torch.tensor([0.0]).to(device)
 
             # DISCRIMINATOR
             if adversarial_weight > 0:
-                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+                if conditional_disc:
+                    fake_pair = torch.cat([images.detach(), reconstruction.contiguous().detach()], dim=1)
+                    real_pair = torch.cat([images.detach(), images.detach()], dim=1)
+                    logits_fake = discriminator(fake_pair.float())[-1]
+                    logits_real = discriminator(real_pair.float())[-1]
+                else:
+                    logits_fake = discriminator(reconstruction.contiguous().detach().float())[-1]
+                    logits_real = discriminator(images.contiguous().detach().float())[-1]
                 loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-                logits_real = discriminator(images.contiguous().detach())[-1]
                 loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
                 discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
             else:
