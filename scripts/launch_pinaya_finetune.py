@@ -525,6 +525,27 @@ def main():
     optimizer_d = optim.AdamW(discriminator.parameters(), lr=config["discriminator"]["lr"])
 
     # ------------------------------------------------------------------
+    # LR schedulers (optional cosine annealing)
+    # ------------------------------------------------------------------
+    lr_scheduler = config["model"].get("lr_scheduler", "constant")
+    eta_min_g = config["model"].get("eta_min_g", 0.0)
+    eta_min_d = config["discriminator"].get("eta_min_d", 0.0)
+    scheduler_g = None
+    scheduler_d = None
+    if lr_scheduler == "cosine":
+        scheduler_g = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_g, T_max=args.num_epochs, eta_min=eta_min_g,
+        )
+        scheduler_d = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_d, T_max=args.num_epochs, eta_min=eta_min_d,
+        )
+        print0(f"LR scheduler: cosine annealing over {args.num_epochs} epochs  "
+               f"(eta_min_g={eta_min_g:.1e}, eta_min_d={eta_min_d:.1e})", rank)
+    elif lr_scheduler != "constant":
+        raise ValueError(f"Unknown lr_scheduler: {lr_scheduler!r}  "
+                         f"(expected 'constant' or 'cosine')")
+
+    # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
     default_name = f"pinaya_{args.strategy}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -549,15 +570,25 @@ def main():
     start_epoch = 0
     best_loss = float("inf")
     ckpt_path = run_dir / "checkpoint.pth"
-    if args.resume and ckpt_path.exists():
+    if args.resume:
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"--resume specified but no checkpoint found at {ckpt_path}"
+            )
         print0(f"Resuming from {ckpt_path}", rank)
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["state_dict"])
         discriminator.load_state_dict(ckpt["discriminator"])
         optimizer_g.load_state_dict(ckpt["optimizer_g"])
         optimizer_d.load_state_dict(ckpt["optimizer_d"])
         start_epoch = ckpt["epoch"]
         best_loss = ckpt.get("best_loss", float("inf"))
+        if scheduler_g is not None and "scheduler_g" in ckpt:
+            scheduler_g.load_state_dict(ckpt["scheduler_g"])
+        if scheduler_d is not None and "scheduler_d" in ckpt:
+            scheduler_d.load_state_dict(ckpt["scheduler_d"])
+        print0(f"Resumed at epoch {start_epoch}, best_loss={best_loss:.6f}",
+               rank)
 
     # ------------------------------------------------------------------
     # Train
@@ -599,6 +630,8 @@ def main():
         l2sp_weight=l2sp_weight,
         pretrained_decoder_weights=pretrained_decoder_weights,
         conditional_disc=conditional_disc,
+        scheduler_g=scheduler_g,
+        scheduler_d=scheduler_d,
     )
 
     print0("Fine-tuning complete.", rank)

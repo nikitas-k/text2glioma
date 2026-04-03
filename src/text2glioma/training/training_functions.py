@@ -491,6 +491,8 @@ def train_autoencoder(
     l2sp_weight: float = 0.0,
     pretrained_decoder_weights: Optional[dict] = None,
     conditional_disc: bool = False,
+    scheduler_g: Optional[Any] = None,
+    scheduler_d: Optional[Any] = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -559,6 +561,12 @@ def train_autoencoder(
             conditional_disc=conditional_disc,
         )
 
+        # Step LR schedulers (per-epoch)
+        if scheduler_g is not None:
+            scheduler_g.step()
+        if scheduler_d is not None:
+            scheduler_d.step()
+
         if (epoch + 1) % val_interval == 0:
             val_loss = eval_autoencoder(
                 model=model,
@@ -589,6 +597,10 @@ def train_autoencoder(
                 "optimizer_d": optimizer_d.state_dict(),
                 "best_loss": best_loss,
             }
+            if scheduler_g is not None:
+                checkpoint["scheduler_g"] = scheduler_g.state_dict()
+            if scheduler_d is not None:
+                checkpoint["scheduler_d"] = scheduler_d.state_dict()
             torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
 
             if val_loss <= best_loss:

@@ -47,10 +47,13 @@ model:
   wavelet_detail_weight: 2.0
   wavelet_name: "haar"
   grad_accum_steps: 4                # effective bs = 1 × 4 GPUs × 4 accum = 16
-  conditional_disc: false             # pix2pix-style conditional D: feeds (input, output)
-                                     # pairs to D so adversarial loss rewards faithful
-                                     # reconstruction, not generic realism.  Set to true
-                                     # and D in_channels doubles automatically.
+  conditional_disc: false             # pix2pix-style conditional D: broken for
+                                     # same-domain reconstruction (D learns trivial
+                                     # pixel-identity check).  Keep false.
+  lr_scheduler: "constant"           # "constant" or "cosine".  Cosine annealing
+                                     # prevents late-stage D dominance by decaying
+                                     # both G and D learning rates to eta_min.
+  eta_min_g: 0.0                     # G minimum LR for cosine schedule
   params:
     spatial_dims: 3
     in_channels: 1                   # Pinaya architecture: single-channel
@@ -74,6 +77,7 @@ image_keys: ["t1", "t1ce", "t2", "flair"]
 discriminator:
   lr: 0.00001                        # same as G lr — v3 used 5× G lr which
                                      # let D win the arms race (d_loss→0.05).
+  eta_min_d: 0.0                     # D minimum LR for cosine schedule
   spectral_norm: false
   n_scales: 1
   params:
