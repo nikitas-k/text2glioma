@@ -54,6 +54,15 @@ model:
                                      # prevents late-stage D dominance by decaying
                                      # both G and D learning rates to eta_min.
   eta_min_g: 0.0                     # G minimum LR for cosine schedule
+  adv_anneal_start: 0                # epoch to begin annealing adv_weight to 0
+                                     # (0 with adv_anneal_epochs=0 means disabled)
+  adv_anneal_epochs: 0               # number of epochs over which to linearly
+                                     # decay adv_weight to 0.  Set both this AND
+                                     # adv_anneal_start for scheduled D removal.
+                                     # e.g. start=30, epochs=10 → full weight at
+                                     # ep 30, zero at ep 40.
+  early_stop_patience: 0             # stop training after this many val checks
+                                     # without improvement (0 = disabled)
   params:
     spatial_dims: 3
     in_channels: 1                   # Pinaya architecture: single-channel

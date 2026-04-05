@@ -632,6 +632,9 @@ def main():
         conditional_disc=conditional_disc,
         scheduler_g=scheduler_g,
         scheduler_d=scheduler_d,
+        adv_anneal_start=config["model"].get("adv_anneal_start", 0),
+        adv_anneal_epochs=config["model"].get("adv_anneal_epochs", 0),
+        early_stop_patience=config["model"].get("early_stop_patience", 0),
     )
 
     print0("Fine-tuning complete.", rank)

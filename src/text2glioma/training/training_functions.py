@@ -493,6 +493,9 @@ def train_autoencoder(
     conditional_disc: bool = False,
     scheduler_g: Optional[Any] = None,
     scheduler_d: Optional[Any] = None,
+    adv_anneal_start: int = 0,
+    adv_anneal_epochs: int = 0,
+    early_stop_patience: int = 0,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -531,7 +534,21 @@ def train_autoencoder(
         conditional_disc=conditional_disc,
     )
 
+    patience_counter = 0
+
     for epoch in range(start_epoch, n_epochs):
+        # ── Adversarial weight annealing ──────────────────────────────
+        if adv_anneal_epochs > 0 and epoch >= adv_anneal_start:
+            progress = min(1.0, (epoch - adv_anneal_start) / adv_anneal_epochs)
+            eff_adv_weight = adversarial_weight * (1.0 - progress)
+        else:
+            eff_adv_weight = adversarial_weight
+
+        if writer_train is not None:
+            writer_train.add_scalar(
+                "adv_weight", eff_adv_weight, len(train_loader) * epoch,
+            )
+
         train_epoch_autoencoder(
             model=model,
             discriminator=discriminator,
@@ -543,7 +560,7 @@ def train_autoencoder(
             epoch=epoch,
             writer=writer_train,
             kl_weight=kl_weight,
-            adversarial_weight=adversarial_weight,
+            adversarial_weight=eff_adv_weight,
             perceptual_weight=perceptual_weight,
             l1_weight=l1_weight,
             autoencoder_warm_up_n_epochs=autoencoder_warm_up_n_epochs,
@@ -577,7 +594,7 @@ def train_autoencoder(
                 step=len(train_loader) * epoch,
                 writer=writer_val,
                 kl_weight=kl_weight,
-                adversarial_weight=adversarial_weight,
+                adversarial_weight=eff_adv_weight,
                 perceptual_weight=perceptual_weight,
                 l1_weight=l1_weight,
                 kl_max=kl_max,
@@ -606,6 +623,14 @@ def train_autoencoder(
             if val_loss <= best_loss:
                 print(f"New best val loss {val_loss}")
                 best_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if early_stop_patience > 0 and patience_counter >= early_stop_patience:
+                print(f"[EARLY-STOP] No val improvement for "
+                      f"{patience_counter} checks — stopping at epoch {epoch + 1}.")
+                break
 
     print(f"[rank-0] [INFO] Training finished!")
     print(f"[rank-0] [INFO] Saving final model...")
