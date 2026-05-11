@@ -339,6 +339,68 @@ def main():
     stage1 = stage1.to(device)
 
     # ------------------------------------------------------------------
+    # Reconcile latent channels between Stage-1 checkpoint and Stage-2
+    # ------------------------------------------------------------------
+    num_mask_classes = int(config.get("mask", {}).get("num_classes", 4))
+    stage1_latent_ch = None
+
+    # Preferred: read from Stage-1 model attributes.
+    if hasattr(stage1, "model") and hasattr(stage1.model, "latent_channels"):
+        try:
+            stage1_latent_ch = int(stage1.model.latent_channels)
+        except Exception:
+            stage1_latent_ch = None
+
+    # Fallback: infer from quant conv shape when available.
+    if stage1_latent_ch is None and hasattr(stage1, "model") and hasattr(stage1.model, "quant_conv_mu"):
+        try:
+            stage1_latent_ch = int(stage1.model.quant_conv_mu.out_channels)
+        except Exception:
+            stage1_latent_ch = None
+
+    # Last resort: run one forward pass and read latent channel dim.
+    if stage1_latent_ch is None:
+        try:
+            probe_batch = next(iter(train_loader))
+            probe_img = probe_batch["image"][:1].to(device)
+            with torch.no_grad():
+                probe_z = stage1(probe_img)
+            stage1_latent_ch = int(probe_z.shape[1])
+        except Exception:
+            stage1_latent_ch = None
+
+    cfg_latent = int(config.get("model", {}).get("latent_channels", config.get("model", {}).get("params", {}).get("out_channels", 3)))
+    if stage1_latent_ch is None:
+        stage1_latent_ch = cfg_latent
+        print0(
+            f"[WARN] Could not infer Stage-1 latent channels; using config value {cfg_latent}.",
+            rank,
+        )
+
+    expected_in_channels = stage1_latent_ch + num_mask_classes
+    cfg_params = config.setdefault("model", {}).setdefault("params", {})
+    cfg_in = int(cfg_params.get("in_channels", expected_in_channels))
+    cfg_out = int(cfg_params.get("out_channels", stage1_latent_ch))
+
+    if cfg_latent != stage1_latent_ch or cfg_in != expected_in_channels or cfg_out != stage1_latent_ch:
+        print0(
+            "[WARN] Stage-2 config/channel mismatch detected. "
+            f"Stage-1 latent={stage1_latent_ch}, mask_classes={num_mask_classes}, "
+            f"config latent={cfg_latent}, in={cfg_in}, out={cfg_out}. "
+            "Auto-aligning Stage-2 UNet channels to match Stage-1.",
+            rank,
+        )
+
+    config["model"]["latent_channels"] = stage1_latent_ch
+    cfg_params["in_channels"] = expected_in_channels
+    cfg_params["out_channels"] = stage1_latent_ch
+    print0(
+        f"Stage-2 channels: latent={stage1_latent_ch}, mask={num_mask_classes}, "
+        f"UNet in={expected_in_channels}, out={stage1_latent_ch}",
+        rank,
+    )
+
+    # ------------------------------------------------------------------
     # LDM (diffusion model)
     # ------------------------------------------------------------------
     print0("Initialising LDM …", rank)
@@ -351,7 +413,7 @@ def main():
     # first learn to suppress, slowing convergence dramatically.  By
     # zeroing the mask-channel weights the model starts as if it were
     # a latent-only model and *gradually* learns to use the mask.
-    latent_ch = config["model"].get("latent_channels", 3)
+    latent_ch = stage1_latent_ch
     with torch.no_grad():
         first_conv = ldm.conv_in.conv  # nn.Conv3d(7, 256, 3)
         first_conv.weight[:, latent_ch:].zero_()
@@ -491,9 +553,9 @@ def main():
         writer_val=writer_val,
         run_dir=run_dir,
         scale_factor=scale_factor,
-        num_mask_classes=config.get("mask", {}).get("num_classes", 4),
+        num_mask_classes=num_mask_classes,
         mask_dropout_p=mask_dropout,
-        latent_channels=config.get("model", {}).get("latent_channels", 3),
+        latent_channels=stage1_latent_ch,
         ema_state_dict=ema_state_dict,
     )
 

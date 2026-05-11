@@ -1349,7 +1349,7 @@ def train_epoch_ldm(
     for step, x in pbar:
         images = x["image"].to(device)
         labels = x["label"].to(device)
-        reports = x[text_field]
+        reports = _get_reports_from_batch(x, text_field)
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         optimizer.zero_grad(set_to_none=True)
@@ -1418,6 +1418,23 @@ def train_epoch_ldm(
         pbar.set_postfix({"epoch": epoch, "loss": f"{losses['loss'].item():.5f}", "lr": f"{get_lr(optimizer):.6f}"})
 
 
+def _get_reports_from_batch(batch: dict[str, Any], text_field: str):
+    """Return report strings from a batch with a safe fallback between text fields."""
+    if text_field in batch:
+        return batch[text_field]
+
+    fallback_fields = ["findings", "impression"] if text_field == "impression" else ["impression", "findings"]
+    for field in fallback_fields:
+        if field in batch:
+            return batch[field]
+
+    available = ", ".join(sorted(batch.keys()))
+    raise KeyError(
+        f"Missing text field '{text_field}' in batch and no fallback found. "
+        f"Expected one of: impression/findings. Available batch keys: {available}"
+    )
+
+
 @torch.no_grad()
 def eval_ldm(
     model: nn.Module,
@@ -1442,7 +1459,7 @@ def eval_ldm(
     for x in loader:
         images = x["image"].to(device)
         labels = x["label"].to(device)
-        reports = x[text_field]
+        reports = _get_reports_from_batch(x, text_field)
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
