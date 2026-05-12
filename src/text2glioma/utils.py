@@ -788,6 +788,8 @@ def log_ldm_sample_unconditioned(
     scale_factor: float = 1.0,
     latent_channels: int = 3,
     num_mask_classes: int = 4,
+    conditioning_label: torch.Tensor = None,
+    prompt_text: str = None,
 ) -> None:
     # Only rank 0 has a writer; skip the expensive sampling on other ranks.
     if writer is None:
@@ -796,18 +798,32 @@ def log_ldm_sample_unconditioned(
     latent = torch.randn((1, latent_channels) + latent_spatial)
     latent = latent.to(device)
 
-    # Zero mask = unconditional w.r.t. mask
-    mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
+    # Optional conditional mask from validation batch; fallback to zero mask.
+    if conditioning_label is not None:
+        label = conditioning_label.to(device)
+        if label.ndim == 4:
+            label = label.unsqueeze(0)
+        if label.shape[0] > 1:
+            label = label[:1]
+        mask_cond = prepare_mask_conditioning(
+            labels=label,
+            latent_shape=latent_spatial,
+            num_classes=num_mask_classes,
+            dropout_p=0.0,
+        ).to(device)
+    else:
+        mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
     model_input = torch.cat([latent, mask_cond], dim=1)
 
-    # Build unconditional prompt embedding using the tokenizer
-    empty_tokens = tokenizer(
-        [""], padding="max_length",
+    # Build prompt embedding; fallback to unconditional empty prompt.
+    text = prompt_text if prompt_text is not None else ""
+    tokens = tokenizer(
+        [text], padding="max_length",
         max_length=tokenizer.model_max_length,
         truncation=True, return_tensors="pt",
     )
-    empty_tokens = {k: v.to(device) for k, v in empty_tokens.items()}
-    prompt_embeds = get_text_encoder_hidden_states(text_encoder(**empty_tokens))
+    tokens = {k: v.to(device) for k, v in tokens.items()}
+    prompt_embeds = get_text_encoder_hidden_states(text_encoder(**tokens))
 
     # CRITICAL: configure the scheduler for inference (sets internal
     # timestep spacing based on num_inference_steps). Without this,
@@ -828,9 +844,28 @@ def log_ldm_sample_unconditioned(
     for c in range(n_ch):
         cols.append(np.clip(x_hat[0, c, :, :, depth_idx].float().cpu().numpy(), 0, 1))
     grid = np.concatenate(cols, axis=1)
-    fig, ax = plt.subplots(dpi=300)
-    ax.imshow(grid, cmap="gray")
-    ax.axis("off")
+    has_mask = conditioning_label is not None
+    if has_mask:
+        label_vis = conditioning_label
+        if label_vis.ndim == 5:
+            label_vis = label_vis[0]
+        if label_vis.ndim == 4:
+            label_vis = label_vis[0]
+        label_slice = label_vis[:, :, depth_idx].detach().float().cpu().numpy()
+        label_slice = np.clip(label_slice, 0, num_mask_classes - 1)
+
+        fig, axes = plt.subplots(2, 1, dpi=300, figsize=(8, 8))
+        axes[0].imshow(label_slice, cmap="tab20", vmin=0, vmax=max(num_mask_classes - 1, 1))
+        axes[0].set_title("Input Mask")
+        axes[0].axis("off")
+        axes[1].imshow(grid, cmap="gray")
+        axes[1].set_title("Generated Sample")
+        axes[1].axis("off")
+        ax = axes[1]
+    else:
+        fig, ax = plt.subplots(dpi=300)
+        ax.imshow(grid, cmap="gray")
+        ax.axis("off")
     # Add modality labels
     if n_ch > 1:
         w_per_ch = grid.shape[1] / n_ch
@@ -838,4 +873,8 @@ def log_ldm_sample_unconditioned(
             name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
             ax.text(int(w_per_ch * c) + 2, 10, name,
                     fontsize=6, color="yellow")
+    if prompt_text is not None:
+        fig.suptitle(f"Prompt: {prompt_text[:200]}", fontsize=8)
+        writer.add_text("SAMPLE_PROMPT", prompt_text, step)
+
     writer.add_figure("SAMPLE", fig, step)

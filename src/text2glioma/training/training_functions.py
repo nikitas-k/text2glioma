@@ -1455,11 +1455,24 @@ def eval_ldm(
     model.eval()
     total_losses = OrderedDict()
     n_samples = 0
+    sample_label = None
+    sample_prompt = None
+
+    # Needed to recover predicted clean latent from noisy latent.
+    alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
     for x in loader:
         images = x["image"].to(device)
         labels = x["label"].to(device)
         reports = _get_reports_from_batch(x, text_field)
+
+        if sample_label is None:
+            sample_label = labels[:1].detach().cpu()
+            if isinstance(reports, (list, tuple)) and len(reports) > 0:
+                sample_prompt = str(reports[0])
+            else:
+                sample_prompt = str(reports)
+
         timesteps = torch.randint(0, scheduler.num_train_timesteps, (images.shape[0],), device=device).long()
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -1486,12 +1499,41 @@ def eval_ldm(
             if scheduler.prediction_type == "v_prediction":
                 # Use v-prediction parameterization
                 target = scheduler.get_velocity(e, noise, timesteps)
+                a_t = alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1).to(noisy_e.dtype)
+                # x0 = sqrt(a_t) * x_t - sqrt(1-a_t) * v
+                e_hat = a_t.sqrt() * noisy_e - (1.0 - a_t).sqrt() * noise_pred
             elif scheduler.prediction_type == "epsilon":
                 target = noise
+                a_t = alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1).to(noisy_e.dtype)
+                # x0 = (x_t - sqrt(1-a_t) * eps) / sqrt(a_t)
+                e_hat = (noisy_e - (1.0 - a_t).sqrt() * noise_pred) / a_t.sqrt().clamp(min=1e-8)
             loss = F.mse_loss(noise_pred.float(), target.float())
 
+            # Decode predicted clean latent and compute image-space SSIM.
+            recon_hat = stage1.decode((e_hat / scale_factor).float())
+
         loss = loss.mean()
-        losses = OrderedDict(loss=loss)
+        rec_f = recon_hat.float().clamp(0.0, 1.0)
+        img_f = images.float().clamp(0.0, 1.0)
+        n_ch = img_f.shape[1]
+
+        if n_ch == 4:
+            ch_names = ["T1", "T1CE", "T2", "FLAIR"]
+        else:
+            ch_names = [f"ch{i}" for i in range(n_ch)]
+
+        per_ch_ssim = {}
+        for ci, cn in enumerate(ch_names):
+            per_ch_ssim[f"ssim_{cn}"] = _ssim_3d(
+                rec_f[:, ci : ci + 1], img_f[:, ci : ci + 1]
+            ).mean()
+        ssim_mean = sum(per_ch_ssim.values()) / len(per_ch_ssim)
+
+        losses = OrderedDict(
+            loss=loss,
+            ssim=ssim_mean,
+            **per_ch_ssim,
+        )
 
         n_samples += images.shape[0]
         for k, v in losses.items():
@@ -1520,6 +1562,8 @@ def eval_ldm(
             scale_factor=scale_factor,
             latent_channels=latent_channels,
             num_mask_classes=num_mask_classes,
+            conditioning_label=sample_label,
+            prompt_text=sample_prompt,
         )
 
     return total_losses["loss"]
