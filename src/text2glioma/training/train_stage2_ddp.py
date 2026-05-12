@@ -146,6 +146,28 @@ def print0(msg: str, rank: int):
         print(msg)
 
 
+def _resolve_stage2_run_dir(stage1_uri: str, run_dir_arg: str) -> Path:
+    """Resolve Stage-2 run directory.
+
+    Preferred layout: infer from Stage-1 checkpoint path so runs stay grouped
+    by experiment, e.g.:
+      .../runs/v4/autoencoder_stage1/output/models/best_model.pth
+        -> .../runs/v4/ldm_stage2
+
+    Fallback: use the explicit --run_dir argument with an ldm_stage2 suffix.
+    """
+    stage1_path = Path(stage1_uri).expanduser().resolve()
+
+    parts = stage1_path.parts
+    if "autoencoder_stage1" in parts:
+        idx = parts.index("autoencoder_stage1")
+        run_root = Path(*parts[:idx])
+        if str(run_root):
+            return run_root / "ldm_stage2"
+
+    return Path(run_dir_arg).expanduser().resolve() / "ldm_stage2"
+
+
 # ---------------------------------------------------------------------------
 # Transforms  (image + label for mask conditioning)
 # ---------------------------------------------------------------------------
@@ -479,10 +501,11 @@ def main():
     # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
-    run_dir = Path(args.run_dir) / "text2glioma" / "ldm_stage2"
+    run_dir = _resolve_stage2_run_dir(args.stage1_uri, args.run_dir)
     output_dir = run_dir / "output"
     model_dir = output_dir / "models"
     log_dir = output_dir / "logs"
+    print0(f"Resolved Stage-2 run directory: {run_dir}", rank)
     if is_main(rank):
         for d in [output_dir, model_dir, log_dir]:
             d.mkdir(parents=True, exist_ok=True)
