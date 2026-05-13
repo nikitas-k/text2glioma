@@ -1509,11 +1509,10 @@ def eval_ldm(
                 e_hat = (noisy_e - (1.0 - a_t).sqrt() * noise_pred) / a_t.sqrt().clamp(min=1e-8)
             loss = F.mse_loss(noise_pred.float(), target.float())
 
-            # Decode predicted clean latent and compute image-space SSIM.
-            recon_hat = stage1.decode((e_hat / scale_factor).float())
-
         loss = loss.mean()
-        rec_f = recon_hat.float().clamp(0.0, 1.0)
+
+        # Compute per-sample image-space SSIM to avoid OOM.
+        # Decode each sample individually rather than full batch.
         img_f = images.float().clamp(0.0, 1.0)
         n_ch = img_f.shape[1]
 
@@ -1522,11 +1521,24 @@ def eval_ldm(
         else:
             ch_names = [f"ch{i}" for i in range(n_ch)]
 
-        per_ch_ssim = {}
-        for ci, cn in enumerate(ch_names):
-            per_ch_ssim[f"ssim_{cn}"] = _ssim_3d(
-                rec_f[:, ci : ci + 1], img_f[:, ci : ci + 1]
-            ).mean()
+        per_ch_ssim_accum = {f"ssim_{cn}": 0.0 for cn in ch_names}
+        n_decoded = 0
+
+        for sample_idx in range(e_hat.shape[0]):
+            # Decode single sample to avoid memory explosion
+            recon_sample = stage1.decode((e_hat[sample_idx : sample_idx + 1] / scale_factor).float())
+            rec_f_sample = recon_sample.float().clamp(0.0, 1.0)
+            img_f_sample = img_f[sample_idx : sample_idx + 1]
+
+            for ci, cn in enumerate(ch_names):
+                ssim_val = _ssim_3d(
+                    rec_f_sample[:, ci : ci + 1], img_f_sample[:, ci : ci + 1]
+                ).mean()
+                per_ch_ssim_accum[f"ssim_{cn}"] += ssim_val.item()
+            n_decoded += 1
+
+        # Average SSIM across decoded samples
+        per_ch_ssim = {k: v / max(n_decoded, 1) for k, v in per_ch_ssim_accum.items()}
         ssim_mean = sum(per_ch_ssim.values()) / len(per_ch_ssim)
 
         losses = OrderedDict(
