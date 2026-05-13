@@ -1549,7 +1549,8 @@ def eval_ldm(
 
         n_samples += images.shape[0]
         for k, v in losses.items():
-            total_losses[k] = total_losses.get(k, 0) + v.item() * images.shape[0]
+            v_scalar = v.item() if torch.is_tensor(v) else float(v)
+            total_losses[k] = total_losses.get(k, 0) + v_scalar * images.shape[0]
 
     # Normalise by samples this rank actually processed (not full dataset
     # size, which over-counts under DDP sharded loaders).
