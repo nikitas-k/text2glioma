@@ -366,8 +366,19 @@ def main():
     num_mask_classes = int(config.get("mask", {}).get("num_classes", 4))
     stage1_latent_ch = None
 
-    # Preferred: read from Stage-1 model attributes.
-    if hasattr(stage1, "model") and hasattr(stage1.model, "latent_channels"):
+    # Preferred: run one forward pass and read latent channels directly.
+    # This is robust to wrappers that expand channels (e.g., channel-wise Pinaya).
+    try:
+        probe_batch = next(iter(train_loader))
+        probe_img = probe_batch["image"][:1].to(device)
+        with torch.no_grad():
+            probe_z = stage1(probe_img)
+        stage1_latent_ch = int(probe_z.shape[1])
+    except Exception:
+        stage1_latent_ch = None
+
+    # Fallback: read from Stage-1 model attributes.
+    if stage1_latent_ch is None and hasattr(stage1, "model") and hasattr(stage1.model, "latent_channels"):
         try:
             stage1_latent_ch = int(stage1.model.latent_channels)
         except Exception:
@@ -377,17 +388,6 @@ def main():
     if stage1_latent_ch is None and hasattr(stage1, "model") and hasattr(stage1.model, "quant_conv_mu"):
         try:
             stage1_latent_ch = int(stage1.model.quant_conv_mu.out_channels)
-        except Exception:
-            stage1_latent_ch = None
-
-    # Last resort: run one forward pass and read latent channel dim.
-    if stage1_latent_ch is None:
-        try:
-            probe_batch = next(iter(train_loader))
-            probe_img = probe_batch["image"][:1].to(device)
-            with torch.no_grad():
-                probe_z = stage1(probe_img)
-            stage1_latent_ch = int(probe_z.shape[1])
         except Exception:
             stage1_latent_ch = None
 

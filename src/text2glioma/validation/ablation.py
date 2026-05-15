@@ -1,4 +1,4 @@
-"""Ablation studies: guidance sweeps, DDIM steps, dropout ablation."""
+"""Ablation studies: guidance sweeps, DDIM steps, dropout, VAE ablation."""
 
 from __future__ import annotations
 
@@ -39,6 +39,25 @@ DROPOUT_ABLATION: List[Tuple[float, float]] = [
     (0.3, 0.3),
     (0.2, 0.0),
     (0.0, 0.2),
+]
+
+# Default VAE ablation conditions from validation plan §5.5
+# Each entry maps a human-readable label to its checkpoint paths.
+# Paths are populated from the validation config; these are just
+# structural defaults.
+VAE_ABLATION_CONDITIONS: List[Dict[str, str]] = [
+    {
+        "label": "pinaya_decoder_only",
+        "description": "Pinaya VAE decoder-only fine-tuned (frozen encoder) + LDM on adapted latents",
+    },
+    {
+        "label": "pinaya_frozen",
+        "description": "Frozen (zero-shot) Pinaya VAE + LDM on unadapted latents",
+    },
+    {
+        "label": "from_scratch",
+        "description": "VAE trained from scratch on BraTS + LDM on those latents",
+    },
 ]
 
 
@@ -381,4 +400,101 @@ def evaluate_dropout_checkpoints(
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     logger.info("Dropout ablation saved to %s", out_path)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# §5.5 — VAE ablation (pretrained vs frozen vs from-scratch)
+# ---------------------------------------------------------------------------
+
+def run_vae_ablation(
+    conditions: List[Dict[str, str]],
+    source_json: str,
+    real_dir: str,
+    gt_label_dir: str,
+    output_dir: str,
+    n_samples: int = 50,
+    ddim_steps: int = 50,
+    gs_text: float = 7.5,
+    gs_mask: float = 3.0,
+    device: str = "cuda",
+    output_json: str = "vae_ablation.json",
+) -> List[Dict[str, Any]]:
+    """Run the VAE ablation: generate + evaluate for each VAE/LDM pair.
+
+    *conditions* is a list of dicts, each with keys:
+
+    - ``label``:         human-readable tag (e.g. "pinaya_finetuned")
+    - ``description``:   short description for the results table
+    - ``stage1_config``: path to VAE YAML config
+    - ``stage1_uri``:    path to VAE checkpoint
+    - ``ldm_config``:    path to LDM YAML config
+    - ``model_ckpt``:    path to LDM checkpoint
+
+    For each condition the function:
+
+    1. Generates *n_samples* volumes via the standard sampler CLI.
+    2. Computes image-quality metrics (FID per modality, MS-SSIM).
+    3. Computes mask-fidelity metrics (round-trip Dice, HD95).
+
+    All results are saved to *output_json*.
+    """
+    results: List[Dict[str, Any]] = []
+
+    for cond in conditions:
+        label = cond["label"]
+        tag_dir = str(Path(output_dir) / label)
+        logger.info(
+            "VAE ablation [%s]: stage1=%s, ldm=%s",
+            label, cond.get("stage1_uri", "?"), cond.get("model_ckpt", "?"),
+        )
+
+        # Validate required keys
+        for key in ("stage1_config", "stage1_uri", "ldm_config", "model_ckpt"):
+            if key not in cond or not cond[key]:
+                raise ValueError(
+                    f"VAE ablation condition '{label}' is missing required key '{key}'. "
+                    f"Set it in the validation config under ablation.vae_ablation.conditions."
+                )
+
+        elapsed = _generate_samples(
+            source_json=source_json,
+            output_dir=tag_dir,
+            config_path=cond["ldm_config"],
+            stage1_config=cond["stage1_config"],
+            stage1_uri=cond["stage1_uri"],
+            model_ckpt=cond["model_ckpt"],
+            n_samples=n_samples,
+            guidance_scale_text=gs_text,
+            guidance_scale_mask=gs_mask,
+            ddim_steps=ddim_steps,
+            device=device,
+        )
+
+        quality = _eval_quality(real_dir, tag_dir, max_n=n_samples)
+        mask = _eval_mask(tag_dir, gt_label_dir, max_n=n_samples, device=device)
+
+        entry = {
+            "label": label,
+            "description": cond.get("description", ""),
+            "stage1_config": cond["stage1_config"],
+            "stage1_uri": cond["stage1_uri"],
+            "ldm_config": cond["ldm_config"],
+            "model_ckpt": cond["model_ckpt"],
+            "n_samples": n_samples,
+            "ddim_steps": ddim_steps,
+            "gs_text": gs_text,
+            "gs_mask": gs_mask,
+            "wall_time_s": elapsed,
+            "quality": quality,
+            "mask": mask,
+        }
+        results.append(entry)
+        logger.info("VAE ablation [%s] done in %.1fs", label, elapsed)
+
+    out_path = Path(output_json)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    logger.info("VAE ablation saved to %s (%d conditions)", out_path, len(results))
     return results

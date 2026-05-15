@@ -9,13 +9,10 @@ val set and a subset of the training set, and prints per-channel L1 +
 Usage (local or Gadi interactive)::
 
     python scripts/offline_val_metrics.py \
-        --run_dir /g/data/vp06/$USER/text2glioma_train/runs/bf16_adaptive_v2_pw_1.0_r1_1.0_adv_weight_0.1 \
-        --data_dir /g/data/vp06/$USER/text2glioma_train/data
+        --run_dir /g/data/vp06/$USER/text2glioma_train/runs/v4
 
-Or with a datalist::
-
-    python scripts/offline_val_metrics.py \
-        --run_dir ... --datalist datalist.json --no_channel_reorder
+Uses datalist_N1510.json by default (must match the split used during
+training).  Override with --datalist or --data_dir for DecathlonDataset.
 
 By default evaluates all val samples and the same number of training
 samples (randomly drawn).  Use --train_samples N to control.
@@ -44,10 +41,11 @@ def parse_args():
     p.add_argument("--run_dir", type=str, required=True,
                    help="Root run dir (contains autoencoder_stage1/)")
     p.add_argument("--data_dir", type=str, default="./data",
-                   help="Root for DecathlonDataset")
-    p.add_argument("--datalist", type=str, default=None,
-                   help="JSON datalist (overrides --data_dir)")
-    p.add_argument("--no_channel_reorder", action="store_true", default=False)
+                   help="Root for DecathlonDataset (only used if --datalist is empty)")
+    p.add_argument("--datalist", type=str, default="datalist_N1510.json",
+                   help="JSON datalist for train/val split (default: datalist_N1510.json)")
+    p.add_argument("--no_channel_reorder", action="store_true", default=False,
+                   help="Skip MSD→T2G channel reorder (use if datalist is already reordered)")
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)

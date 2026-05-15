@@ -42,15 +42,63 @@ class Stage1Wrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z_mu, z_sigma = self.model.encode(x)
-        z = self.model.sampling(z_mu, z_sigma)
+    def _base_in_channels(self) -> int:
+        return int(getattr(self.model, "in_channels", 1))
 
-        return z
+    def _base_out_channels(self) -> int:
+        return int(getattr(self.model, "out_channels", 1))
+
+    def _base_latent_channels(self) -> int:
+        if hasattr(self.model, "latent_channels"):
+            return int(self.model.latent_channels)
+        if hasattr(self.model, "quant_conv_mu") and hasattr(self.model.quant_conv_mu, "out_channels"):
+            return int(self.model.quant_conv_mu.out_channels)
+        raise ValueError("Unable to infer stage-1 latent channels from model.")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_in = self._base_in_channels()
+
+        # Standard path: model input channels match tensor channels.
+        if x.shape[1] == base_in:
+            z_mu, z_sigma = self.model.encode(x)
+            return self.model.sampling(z_mu, z_sigma)
+
+        # Pinaya path: 1-channel VAE used on multi-channel data.
+        # Encode each channel independently and concatenate latents.
+        if base_in == 1 and x.shape[1] > 1:
+            z_list = []
+            for c in range(x.shape[1]):
+                x_ch = x[:, c : c + 1]
+                z_mu, z_sigma = self.model.encode(x_ch)
+                z_list.append(self.model.sampling(z_mu, z_sigma))
+            return torch.cat(z_list, dim=1)
+
+        raise ValueError(
+            f"Stage-1 input channel mismatch: model expects {base_in}, got {x.shape[1]}"
+        )
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        """Decode latent back to image space (delegates to inner model)."""
-        return self.model.decode(z)
+        """Decode latent back to image space (supports channel-wise Pinaya path)."""
+        base_latent = self._base_latent_channels()
+        base_out = self._base_out_channels()
+
+        # Standard path.
+        if z.shape[1] == base_latent:
+            return self.model.decode(z)
+
+        # Pinaya path: split concatenated latents into per-channel chunks,
+        # decode each chunk independently, then concatenate image channels.
+        if base_out == 1 and z.shape[1] % base_latent == 0:
+            recons = []
+            n_chunks = z.shape[1] // base_latent
+            for i in range(n_chunks):
+                z_chunk = z[:, i * base_latent : (i + 1) * base_latent]
+                recons.append(self.model.decode(z_chunk))
+            return torch.cat(recons, dim=1)
+
+        raise ValueError(
+            f"Stage-1 latent channel mismatch: base latent={base_latent}, got {z.shape[1]}"
+        )
 
 # ── Mask conditioning utilities ──────────────────────────────────────────────
 
@@ -774,6 +822,43 @@ def load_text_encoder_and_tokenizer(conditioning_config: dict, cache_dir: str = 
 
     return tokenizer, text_encoder
 
+
+def _sample_latent_once(
+    model: nn.Module,
+    scheduler: nn.Module,
+    start_latent: torch.Tensor,
+    mask_cond: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Run one diffusion sampling trajectory from a provided initial latent."""
+    latent = start_latent.clone()
+    model_input = torch.cat([latent, mask_cond], dim=1)
+
+    for t in tqdm(scheduler.timesteps, ncols=70):
+        noise_pred = model(
+            x=model_input,
+            timesteps=torch.asarray((t,)).to(device),
+            context=prompt_embeds,
+        )
+        latent, _ = scheduler.step(noise_pred, t, latent)
+        model_input = torch.cat([latent, mask_cond], dim=1)
+
+    return latent
+
+
+def _build_multislice_grid(x_hat: torch.Tensor, depth_indices: list[int]) -> np.ndarray:
+    """Create a grid with rows=depth slices and columns=modalities."""
+    n_ch = x_hat.shape[1]
+    rows = []
+    for d in depth_indices:
+        d_safe = max(0, min(int(d), x_hat.shape[-1] - 1))
+        cols = []
+        for c in range(n_ch):
+            cols.append(np.clip(x_hat[0, c, :, :, d_safe].float().cpu().numpy(), 0, 1))
+        rows.append(np.concatenate(cols, axis=1))
+    return np.concatenate(rows, axis=0)
+
 @torch.no_grad()
 def log_ldm_sample_unconditioned(
     model: nn.Module,
@@ -794,9 +879,9 @@ def log_ldm_sample_unconditioned(
     # Only rank 0 has a writer; skip the expensive sampling on other ranks.
     if writer is None:
         return
+
     latent_spatial = spatial_shape[1:]  # strip channel dim → (D', H', W')
-    latent = torch.randn((1, latent_channels) + latent_spatial)
-    latent = latent.to(device)
+    latent = torch.randn((1, latent_channels) + latent_spatial, device=device)
 
     # Optional conditional mask from validation batch; fallback to zero mask.
     if conditioning_label is not None:
@@ -813,17 +898,25 @@ def log_ldm_sample_unconditioned(
         ).to(device)
     else:
         mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
-    model_input = torch.cat([latent, mask_cond], dim=1)
 
-    # Build prompt embedding; fallback to unconditional empty prompt.
-    text = prompt_text if prompt_text is not None else ""
-    tokens = tokenizer(
-        [text], padding="max_length",
-        max_length=tokenizer.model_max_length,
-        truncation=True, return_tensors="pt",
-    )
-    tokens = {k: v.to(device) for k, v in tokens.items()}
-    prompt_embeds = get_text_encoder_hidden_states(text_encoder(**tokens))
+    mask_uncond = torch.zeros_like(mask_cond)
+
+    # Build embeddings for conditioned and unconditional sampling.
+    cond_text = prompt_text if prompt_text is not None else ""
+
+    def _encode_text(text: str) -> torch.Tensor:
+        tokens = tokenizer(
+            [text],
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        tokens = {k: v.to(device) for k, v in tokens.items()}
+        return get_text_encoder_hidden_states(text_encoder(**tokens))
+
+    cond_embeds = _encode_text(cond_text)
+    uncond_embeds = _encode_text("")
 
     # CRITICAL: configure the scheduler for inference (sets internal
     # timestep spacing based on num_inference_steps). Without this,
@@ -831,50 +924,61 @@ def log_ldm_sample_unconditioned(
     num_inference_steps = min(200, scheduler.num_train_timesteps)
     scheduler.set_timesteps(num_inference_steps)
 
-    for t in tqdm(scheduler.timesteps, ncols=70):
-        noise_pred = model(x=model_input, timesteps=torch.asarray((t,)).to(device), context=prompt_embeds)
-        latent, _ = scheduler.step(noise_pred, t, latent)
-        # Reconstruct model_input for next step
-        model_input = torch.cat([latent, mask_cond], dim=1)
+    # Use the same starting latent to compare conditioned vs unconditioned outputs.
+    latent_cond = _sample_latent_once(model, scheduler, latent, mask_cond, cond_embeds, device)
+    latent_uncond = _sample_latent_once(model, scheduler, latent, mask_uncond, uncond_embeds, device)
 
-    x_hat = stage1.decode(latent / scale_factor)
-    n_ch = x_hat.shape[1]
-    depth_idx = min(60, x_hat.shape[-1] - 1)
-    cols = []
-    for c in range(n_ch):
-        cols.append(np.clip(x_hat[0, c, :, :, depth_idx].float().cpu().numpy(), 0, 1))
-    grid = np.concatenate(cols, axis=1)
+    x_hat_cond = stage1.decode(latent_cond / scale_factor)
+    x_hat_uncond = stage1.decode(latent_uncond / scale_factor)
+
+    n_ch = x_hat_cond.shape[1]
+    depth = x_hat_cond.shape[-1]
+    depth_indices = [depth // 4, depth // 2, (3 * depth) // 4]
+
+    grid_cond = _build_multislice_grid(x_hat_cond, depth_indices)
+    grid_uncond = _build_multislice_grid(x_hat_uncond, depth_indices)
+
     has_mask = conditioning_label is not None
+    n_rows = 3 if has_mask else 2
+    fig, axes = plt.subplots(n_rows, 1, dpi=300, figsize=(10, 3 * n_rows))
+    if n_rows == 1:
+        axes = [axes]
+
+    row_idx = 0
     if has_mask:
         label_vis = conditioning_label
         if label_vis.ndim == 5:
             label_vis = label_vis[0]
         if label_vis.ndim == 4:
             label_vis = label_vis[0]
-        label_slice = label_vis[:, :, depth_idx].detach().float().cpu().numpy()
+        mask_depth = max(0, min(depth_indices[1], label_vis.shape[-1] - 1))
+        label_slice = label_vis[:, :, mask_depth].detach().float().cpu().numpy()
         label_slice = np.clip(label_slice, 0, num_mask_classes - 1)
+        axes[row_idx].imshow(label_slice, cmap="tab20", vmin=0, vmax=max(num_mask_classes - 1, 1))
+        axes[row_idx].set_title("Input Mask (middle depth)")
+        axes[row_idx].axis("off")
+        row_idx += 1
 
-        fig, axes = plt.subplots(2, 1, dpi=300, figsize=(8, 8))
-        axes[0].imshow(label_slice, cmap="tab20", vmin=0, vmax=max(num_mask_classes - 1, 1))
-        axes[0].set_title("Input Mask")
-        axes[0].axis("off")
-        axes[1].imshow(grid, cmap="gray")
-        axes[1].set_title("Generated Sample")
-        axes[1].axis("off")
-        ax = axes[1]
-    else:
-        fig, ax = plt.subplots(dpi=300)
-        ax.imshow(grid, cmap="gray")
-        ax.axis("off")
-    # Add modality labels
-    if n_ch > 1:
-        w_per_ch = grid.shape[1] / n_ch
-        for c in range(n_ch):
-            name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
-            ax.text(int(w_per_ch * c) + 2, 10, name,
-                    fontsize=6, color="yellow")
+    axes[row_idx].imshow(grid_cond, cmap="gray")
+    axes[row_idx].set_title("Conditioned Sample (3 depths)")
+    axes[row_idx].axis("off")
+    row_idx += 1
+
+    axes[row_idx].imshow(grid_uncond, cmap="gray")
+    axes[row_idx].set_title("Unconditioned Sample (3 depths)")
+    axes[row_idx].axis("off")
+
+    for ax in axes[1:] if has_mask else axes:
+        if n_ch > 1:
+            w_per_ch = grid_cond.shape[1] / n_ch
+            for c in range(n_ch):
+                name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
+                ax.text(int(w_per_ch * c) + 2, 10, name, fontsize=6, color="yellow")
+
     if prompt_text is not None:
         fig.suptitle(f"Prompt: {prompt_text[:200]}", fontsize=8)
         writer.add_text("SAMPLE_PROMPT", prompt_text, step)
 
+    fig.tight_layout()
     writer.add_figure("SAMPLE", fig, step)
+    plt.close(fig)

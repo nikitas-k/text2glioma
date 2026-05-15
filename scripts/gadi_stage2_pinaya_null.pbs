@@ -1,0 +1,75 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stage2_pinaya_null
+
+# Null-model Stage-2 run:
+#   Frozen, non-fine-tuned Pinaya VAE as Stage-1.
+#   LDM is trained on top as a baseline comparator.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+# Force Python to use workspace source edits (not stale site-packages).
+export PYTHONPATH=${HOME}/text2glioma/src:${PYTHONPATH}
+
+# ---------------- Paths ----------------
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert_pinaya_decoder_only.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1_pinaya_decoder_only.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/cache/pinaya_autoencoder.pth
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/pinaya_null_model
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+# ---------------- Pre-flight ----------------
+export TORCH_HOME=/g/data/vp06/$USER/text2glioma_train/cache
+export HF_HOME=/g/data/vp06/$USER/text2glioma_train/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$STAGE1_URI" ]; then
+    echo "ERROR: Raw Pinaya checkpoint not found: $STAGE1_URI"
+    echo "Download/copy pinaya_autoencoder.pth to this path first."
+    echo "Example local source path: ~/.cache/text2glioma/pinaya_autoencoder.pth"
+    exit 1
+fi
+
+if [ -f "$DATALIST" ]; then
+    EXTRA_ARGS="--datalist $DATALIST --no_channel_reorder"
+else
+    if [ ! -d "${DATA_DIR}/Task01_BrainTumour" ]; then
+        echo "ERROR: Neither datalist nor DecathlonDataset found."
+        echo "Missing datalist: $DATALIST"
+        echo "Missing dataset dir: ${DATA_DIR}/Task01_BrainTumour"
+        exit 1
+    fi
+    EXTRA_ARGS="--data_dir $DATA_DIR"
+fi
+
+# Note: with raw Pinaya (latent=3 per modality x 4 modalities), effective
+# latent channels become 12 after Stage1Wrapper channel-wise encoding.
+# train_stage2_ddp auto-aligns UNet channels accordingly.
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    $EXTRA_ARGS \
+    --batch_size 2 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"
