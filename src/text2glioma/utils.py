@@ -646,6 +646,43 @@ def apply_spectral_norm(discriminator: nn.Module) -> nn.Module:
     return discriminator
 
 
+def _extract_state_dict_from_checkpoint(checkpoint_obj: Any) -> dict:
+    """Extract a raw state_dict from common checkpoint containers."""
+    if isinstance(checkpoint_obj, dict):
+        if checkpoint_obj and all(torch.is_tensor(v) for v in checkpoint_obj.values()):
+            return checkpoint_obj
+        for key in ("state_dict", "model", "autoencoder", "vae"):
+            value = checkpoint_obj.get(key)
+            if isinstance(value, dict) and value:
+                return value
+    raise ValueError("Unsupported checkpoint format: unable to extract state_dict.")
+
+
+def _strip_prefix_if_present(state_dict: dict, prefix: str) -> Optional[dict]:
+    """Return a prefix-stripped copy if all keys start with prefix, else None."""
+    keys = list(state_dict.keys())
+    if not keys:
+        return None
+    if all(k.startswith(prefix) for k in keys):
+        return {k[len(prefix):]: v for k, v in state_dict.items()}
+    return None
+
+
+def _normalise_autoencoder_state_dict(state_dict: dict) -> dict:
+    """Normalise common wrapper prefixes for AutoencoderKL checkpoints.
+
+    Handles formats such as:
+      - module.vae.*
+      - vae.*
+      - module.*
+    """
+    for prefix in ("module.vae.", "vae.", "module."):
+        stripped = _strip_prefix_if_present(state_dict, prefix)
+        if stripped is not None:
+            return stripped
+    return state_dict
+
+
 def get_model(model_type, config, pretrained=False, from_file=None):
     if model_type == "AutoencoderKL":
         from generative.networks.nets import AutoencoderKL
@@ -661,7 +698,10 @@ def get_model(model_type, config, pretrained=False, from_file=None):
             model.load_state_dict(state_dict)
         elif from_file is not None:
             print(f"Loading autoencoder weights from {from_file}.")
-            model.load_state_dict(torch.load(from_file, map_location="cpu"))
+            ckpt = torch.load(from_file, map_location="cpu")
+            state_dict = _extract_state_dict_from_checkpoint(ckpt)
+            state_dict = _normalise_autoencoder_state_dict(state_dict)
+            model.load_state_dict(state_dict)
 
     elif model_type == "DiffusionModelUNet":
         from generative.networks.nets import DiffusionModelUNet
