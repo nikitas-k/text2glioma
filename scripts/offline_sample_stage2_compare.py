@@ -43,6 +43,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--scale_factor", type=float, default=None, help="Override scale factor.")
     p.add_argument("--cfg_scale", type=float, default=1.0, help="Classifier-free guidance scale for conditioned sampling.")
+    p.add_argument(
+        "--cfg_mode",
+        type=str,
+        default="text_only",
+        choices=["text_only", "joint"],
+        help=(
+            "CFG variant: 'text_only' keeps the mask in both branches and only "
+            "guides on text (recommended for mask-conditioned models); 'joint' "
+            "drops both text and mask in the uncond branch."
+        ),
+    )
     p.add_argument("--no_channel_reorder", action="store_true", default=False)
     return p.parse_args()
 
@@ -131,29 +142,52 @@ def _sample_latent(
     uncond_embeds: torch.Tensor | None = None,
     uncond_mask_cond: torch.Tensor | None = None,
     guidance_scale: float = 1.0,
+    cfg_mode: str = "text_only",
 ):
+    """Run DDIM sampling with optional classifier-free guidance.
+
+    CFG variants:
+      - ``text_only`` (default): mask is concatenated to the latent in BOTH the
+        conditional and unconditional branches; only the text context is
+        swapped. This matches ``cfg_sample`` in ``inference_functions.py`` and
+        is the theoretically sound choice for this mask-conditioned U-Net,
+        whose mask channels are part of the input convolution rather than
+        cross-attention.
+      - ``joint``: drop both text AND mask in the uncond branch (zeros mask).
+        Use only if you specifically want to extrapolate jointly along both
+        modalities; this typically degrades SSIM because the uncond branch
+        sees out-of-distribution latent input statistics.
+
+    Falls back to a single conditional forward pass when ``guidance_scale ==
+    1.0`` or the uncond inputs are not provided.
+    """
     latent = latent0.clone()
+    do_cfg = (
+        uncond_embeds is not None
+        and uncond_mask_cond is not None
+        and guidance_scale != 1.0
+    )
+    if do_cfg:
+        # Mask routing depends on cfg_mode.
+        mask_for_uncond = mask_cond if cfg_mode == "text_only" else uncond_mask_cond
+
     for t in scheduler.timesteps:
-        model_input = torch.cat([latent, mask_cond], dim=1)
-        if uncond_embeds is not None and uncond_mask_cond is not None and guidance_scale != 1.0:
-            uncond_input = torch.cat([latent, uncond_mask_cond], dim=1)
-            noise_pred_uncond = model(
-                x=uncond_input,
-                timesteps=torch.asarray((t,)).to(device),
-                context=uncond_embeds,
+        ts = torch.asarray((t,)).to(device)
+        if do_cfg:
+            cond_input = torch.cat([latent, mask_cond], dim=1)
+            uncond_input = torch.cat([latent, mask_for_uncond], dim=1)
+            # Batch both branches into a single forward pass.
+            x_in = torch.cat([uncond_input, cond_input], dim=0)
+            ts_in = torch.cat([ts, ts], dim=0)
+            ctx_in = torch.cat([uncond_embeds, prompt_embeds], dim=0)
+            model_output = model(x=x_in, timesteps=ts_in, context=ctx_in)
+            noise_pred_uncond, noise_pred_cond = model_output.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (
+                noise_pred_cond - noise_pred_uncond
             )
-            noise_pred_cond = model(
-                x=model_input,
-                timesteps=torch.asarray((t,)).to(device),
-                context=prompt_embeds,
-            )
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
         else:
-            noise_pred = model(
-                x=model_input,
-                timesteps=torch.asarray((t,)).to(device),
-                context=prompt_embeds,
-            )
+            model_input = torch.cat([latent, mask_cond], dim=1)
+            noise_pred = model(x=model_input, timesteps=ts, context=prompt_embeds)
         latent, _ = scheduler.step(noise_pred, t, latent)
     return latent
 
@@ -477,6 +511,7 @@ def main() -> None:
                 uncond_embeds=uncond_embeds,
                 uncond_mask_cond=mask_uncond,
                 guidance_scale=float(args.cfg_scale),
+                cfg_mode=str(args.cfg_mode),
             )
             latent_uncond = _sample_latent(model, scheduler, latent0, mask_uncond, uncond_embeds, device)
 
@@ -552,7 +587,7 @@ def main() -> None:
                 name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
                 ax.text(int(w_per_ch * c) + 2, 10, name, fontsize=6, color="yellow")
 
-        _header = f"idx={case_i} | scale_factor={scale_factor:.4f} | cfg_scale={args.cfg_scale:.2f} | prompt="
+        _header = f"idx={case_i} | scale_factor={scale_factor:.4f} | cfg_scale={args.cfg_scale:.2f} | cfg_mode={args.cfg_mode} | prompt="
         _ssim_summary = f"SSIM mean: cond={ssim_cond_mean:.4f}, uncond={ssim_uncond_mean:.4f}"
         _wrapped_prompt = "\n".join(textwrap.wrap(prompt, width=120))
         _n_prompt_lines = len(textwrap.wrap(prompt, width=120)) + 2

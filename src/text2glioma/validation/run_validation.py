@@ -209,6 +209,25 @@ def main():
         )
         results["dropout_configs"] = dropout_paths
 
+    va = abl.get("vae_ablation", {})
+    if va.get("enabled") and (steps is None or "vae_ablation" in steps):
+        logger.info("=== §5.5 VAE Ablation (pretrained vs frozen vs from-scratch) ===")
+        from text2glioma.validation.ablation import run_vae_ablation
+
+        results["vae_ablation"] = run_vae_ablation(
+            conditions=va.get("conditions", []),
+            source_json=paths.get("source_json", ""),
+            real_dir=paths["real_dir"],
+            gt_label_dir=paths["real_label_dir"],
+            output_dir=str(Path(paths["output_dir"]) / "vae_ablation"),
+            n_samples=va.get("n_samples", 50),
+            ddim_steps=va.get("ddim_steps", 50),
+            gs_text=va.get("gs_text", 7.5),
+            gs_mask=va.get("gs_mask", 3.0),
+            device=device,
+            output_json=va["output_json"],
+        )
+
     # ---------------------------------------------------------------
     # §6 — Diversity & memorisation
     # ---------------------------------------------------------------

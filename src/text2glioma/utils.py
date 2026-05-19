@@ -43,10 +43,39 @@ class Stage1Wrapper(nn.Module):
         self.model = model
 
     def _base_in_channels(self) -> int:
-        return int(getattr(self.model, "in_channels", 1))
+        # Prefer the explicit attribute when present.
+        if hasattr(self.model, "in_channels"):
+            return int(self.model.in_channels)
+        # monai-generative AutoencoderKL stores in_channels on the Encoder, not the outer module.
+        enc = getattr(self.model, "encoder", None)
+        if enc is not None and hasattr(enc, "in_channels"):
+            return int(enc.in_channels)
+        # Last-resort: infer from the encoder's first conv weight shape [out, in, ...].
+        try:
+            first_conv = self.model.encoder.blocks[0]
+            while hasattr(first_conv, "conv"):
+                first_conv = first_conv.conv
+            if hasattr(first_conv, "weight"):
+                return int(first_conv.weight.shape[1])
+        except (AttributeError, IndexError):
+            pass
+        return 1
 
     def _base_out_channels(self) -> int:
-        return int(getattr(self.model, "out_channels", 1))
+        if hasattr(self.model, "out_channels"):
+            return int(self.model.out_channels)
+        dec = getattr(self.model, "decoder", None)
+        if dec is not None and hasattr(dec, "out_channels"):
+            return int(dec.out_channels)
+        try:
+            last_conv = self.model.decoder.blocks[-1]
+            while hasattr(last_conv, "conv"):
+                last_conv = last_conv.conv
+            if hasattr(last_conv, "weight"):
+                return int(last_conv.weight.shape[0])
+        except (AttributeError, IndexError):
+            pass
+        return 1
 
     def _base_latent_channels(self) -> int:
         if hasattr(self.model, "latent_channels"):
