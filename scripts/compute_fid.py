@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -78,6 +79,25 @@ def _stats(feats: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     mu = feats.mean(axis=0)
     sig = np.cov(feats, rowvar=False)
     return mu, sig
+
+
+# Module-level worker so ProcessPoolExecutor can pickle it on macOS spawn.
+def _bootstrap_one_fid(args: tuple[np.ndarray, np.ndarray, np.ndarray]) -> float:
+    """Compute FID between two feature matrices.  Used as a parallel worker."""
+    a, b, _seed = args  # seed unused here; included for reproducible call signatures
+    mu_a, sig_a = _stats(a)
+    mu_b, sig_b = _stats(b)
+    return _frechet_distance(mu_a, sig_a, mu_b, sig_b)
+
+
+def _run_bootstrap_fids(pairs: list[tuple[np.ndarray, np.ndarray, int]],
+                        workers: int) -> np.ndarray:
+    """Run a list of (feat_a, feat_b, seed) FID computations, in parallel if workers>1."""
+    if workers <= 1 or len(pairs) <= 1:
+        return np.asarray([_bootstrap_one_fid(p) for p in pairs], dtype=np.float64)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        return np.asarray(list(pool.map(_bootstrap_one_fid, pairs, chunksize=1)),
+                          dtype=np.float64)
 
 
 # ---------- Backbones ----------
@@ -390,9 +410,10 @@ class FIDAccumulator:
             })
         return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
 
-    def compute_real_vs_real(self, n_splits: int = 10, seed: int = 0,
+    def compute_real_vs_real(self, n_splits: int = 20, seed: int = 0,
                              n_per_split: Optional[int] = None,
-                             with_replacement: bool = False) -> pd.DataFrame:
+                             with_replacement: bool = False,
+                             workers: int = 1) -> pd.DataFrame:
         """Intra-distribution FID floor.
 
         Two modes:
@@ -417,9 +438,18 @@ class FIDAccumulator:
 
         FID is positively biased at small N (bias ≈ d² / N for feat-dim d);
         any ratio that does not match N on both sides is meaningless.
+
+        ``workers``: parallelise the n_splits × n_modalities FID computations
+        with ``ProcessPoolExecutor`` (default 1 = serial).  Each FID call
+        invokes ``scipy.linalg.sqrtm`` on a feat_dim × feat_dim matrix, so
+        speed-up is ~linear in workers up to physical core count.
         """
         rng = np.random.default_rng(seed)
-        rows = []
+        # Build the entire (a, b) pair list across modalities, then dispatch
+        # in one parallel pool so all sqrtm calls overlap.
+        jobs: list[tuple[np.ndarray, np.ndarray, int]] = []
+        meta: list[tuple[str, int, int]] = []   # (modality, n_real, bag_size)
+        per_mod_offset: dict[str, tuple[int, int]] = {}  # mod -> (start, bag_size)
         for mod, rbag in self._real.items():
             fr = rbag.stack()
             n = fr.shape[0]
@@ -427,26 +457,31 @@ class FIDAccumulator:
                 continue
             if with_replacement:
                 bag_n = int(n_per_split or n)
-                fids = []
-                for _ in range(n_splits):
-                    a = fr[rng.integers(0, n, size=bag_n)]
-                    b = fr[rng.integers(0, n, size=bag_n)]
-                    mu_a, sig_a = _stats(a)
-                    mu_b, sig_b = _stats(b)
-                    fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+                start = len(jobs)
+                for k in range(n_splits):
+                    sub_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
+                    a = fr[sub_rng.integers(0, n, size=bag_n)]
+                    b = fr[sub_rng.integers(0, n, size=bag_n)]
+                    jobs.append((a, b, k))
             else:
                 half = int(n_per_split or (n // 2))
                 half = min(half, n // 2)
-                fids = []
-                for _ in range(n_splits):
+                bag_n = half
+                start = len(jobs)
+                for k in range(n_splits):
                     perm = rng.permutation(n)
                     a = fr[perm[:half]]
                     b = fr[perm[half:2 * half]]
-                    mu_a, sig_a = _stats(a)
-                    mu_b, sig_b = _stats(b)
-                    fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
-                bag_n = half
-            fids = np.asarray(fids, dtype=np.float64)
+                    jobs.append((a, b, k))
+            per_mod_offset[mod] = (start, bag_n)
+            meta.append((mod, n, bag_n))
+
+        results = _run_bootstrap_fids(jobs, workers=workers)
+
+        rows = []
+        for mod, n, bag_n in meta:
+            start, _ = per_mod_offset[mod]
+            fids = results[start:start + n_splits]
             rows.append({
                 "modality": mod,
                 "fid_real_vs_real_median": float(np.median(fids)),
@@ -458,12 +493,13 @@ class FIDAccumulator:
                 "bag_size": int(bag_n),
                 "with_replacement": bool(with_replacement),
                 "n_splits": int(n_splits),
-                "feat_dim": int(fr.shape[1]),
+                "feat_dim": int(self._real[mod].stack().shape[1]),
                 "mode": self.mode,
             })
         return pd.DataFrame(rows).sort_values("modality").reset_index(drop=True)
 
-    def compute_real_vs_real_matched(self, n_splits: int = 50, seed: int = 0) -> pd.DataFrame:
+    def compute_real_vs_real_matched(self, n_splits: int = 50, seed: int = 0,
+                                     workers: int = 1) -> pd.DataFrame:
         """Sample-size-matched intra-distribution FID floor for ratios.
 
         For each ``(modality, cfg)`` present in the gen bag, draws ``n_splits``
@@ -473,9 +509,13 @@ class FIDAccumulator:
         numerator, so ``fid / fid_real_vs_real_matched_median`` is a
         bias-cancelled ratio that can be compared across modalities and
         backbones.
+
+        ``workers``: see :meth:`compute_real_vs_real`.
         """
         rng = np.random.default_rng(seed)
-        rows = []
+        jobs: list[tuple[np.ndarray, np.ndarray, int]] = []
+        keys: list[tuple[str, float, int, int]] = []      # (mod, cfg, n_real, n_g)
+        offsets: list[int] = []
         for (mod, cfg), gbag in self._gen.items():
             rbag = self._real.get(mod)
             if rbag is None or not rbag.feats:
@@ -485,14 +525,19 @@ class FIDAccumulator:
             n_g = int(gbag.stack().shape[0])
             if n_r < 4 or n_g < 4:
                 continue
-            fids = []
-            for _ in range(n_splits):
-                a = fr[rng.integers(0, n_r, size=n_g)]
-                b = fr[rng.integers(0, n_r, size=n_g)]
-                mu_a, sig_a = _stats(a)
-                mu_b, sig_b = _stats(b)
-                fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
-            fids = np.asarray(fids, dtype=np.float64)
+            offsets.append(len(jobs))
+            keys.append((mod, float(cfg), n_r, n_g))
+            for k in range(n_splits):
+                sub_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
+                a = fr[sub_rng.integers(0, n_r, size=n_g)]
+                b = fr[sub_rng.integers(0, n_r, size=n_g)]
+                jobs.append((a, b, k))
+
+        results = _run_bootstrap_fids(jobs, workers=workers)
+
+        rows = []
+        for (mod, cfg, n_r, n_g), start in zip(keys, offsets):
+            fids = results[start:start + n_splits]
             rows.append({
                 "modality": mod, "cfg": cfg,
                 "fid_real_vs_real_matched_median": float(np.median(fids)),
@@ -501,7 +546,7 @@ class FIDAccumulator:
                 "bag_size": int(n_g),
                 "n_real":   int(n_r),
                 "n_splits": int(n_splits),
-                "feat_dim": int(fr.shape[1]),
+                "feat_dim": int(self._real[mod].stack().shape[1]),
                 "mode": self.mode,
             })
         return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
