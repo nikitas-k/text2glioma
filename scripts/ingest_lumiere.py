@@ -71,6 +71,11 @@ from typing import Iterable, Optional
 import nibabel as nib
 import numpy as np
 
+# Allow running the script directly from a checkout without `pip install -e .`.
+_REPO_SRC = Path(__file__).resolve().parent.parent / "src"
+if _REPO_SRC.is_dir() and str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+
 # Pipeline modality order (matches `--no_channel_reorder` ingestion of N1510).
 PIPELINE_MODALITIES = ("T1", "T1CE", "T2", "FLAIR")
 
