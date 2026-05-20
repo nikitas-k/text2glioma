@@ -217,18 +217,33 @@ def _check_shape_consistency(arrs: dict[str, np.ndarray]) -> tuple[bool, str]:
 
 def _ingest_one(info: dict, output_root: Path,
                 gen_prompts: bool, vasari_kwargs: dict,
-                enhancing_label: int, nonenhancing_label: int, edema_label: int) -> Optional[dict]:
+                enhancing_label: int, nonenhancing_label: int, edema_label: int,
+                registered_dir: Optional[Path] = None) -> Optional[dict]:
     subject = info["subject"]
     session = info["session"]
     case_id = f"{subject}_{session}".replace(" ", "_")
+
+    # If a registration pass has produced atlas-aligned NIfTIs for this case,
+    # use those in place of the raw LUMIERE files.  This is required for
+    # VASARI-auto location lookups (atlas masks live on the SRI24 grid).
+    if registered_dir is not None:
+        reg_case = registered_dir / case_id
+        reg_files = {m: reg_case / f"{m}.nii.gz" for m in PIPELINE_MODALITIES}
+        reg_files["label"] = reg_case / "label.nii.gz"
+        if all(p.exists() for p in reg_files.values()):
+            info = {**info, **reg_files, "subject": subject, "session": session}
+        else:
+            log.warning("[%s] --registered_dir set but registered files missing; falling back to raw.", case_id)
 
     img_out = output_root / "images" / f"{case_id}.nii.gz"
     lbl_out = output_root / "labels" / f"{case_id}.nii.gz"
     img_out.parent.mkdir(parents=True, exist_ok=True)
     lbl_out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Skip if already done.
-    if img_out.exists() and lbl_out.exists():
+    # Skip if already done.  When --registered_dir is set we must rebuild
+    # the stacked image/label from atlas-aligned data, so cached files from a
+    # prior raw-space run are intentionally overwritten.
+    if img_out.exists() and lbl_out.exists() and registered_dir is None:
         log.info("[%s] cached", case_id)
     else:
         # Load each modality, validate shape, stack as channel-last.
@@ -310,6 +325,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--edema_label",         type=int, default=2)
     p.add_argument("--atlas_dir", type=str, default=None,
                    help="Override VASARI atlas directory (default: package-bundled).")
+    p.add_argument("--registered_dir", type=Path, default=None,
+                   help="Directory of per-case registered NIfTIs produced by "
+                        "scripts/register_lumiere_to_sri24.py.  When set, stacking "
+                        "and VASARI-auto run on atlas-aligned data.")
     p.add_argument("--limit",   type=int, default=None,
                    help="Process at most N sessions (smoke test).")
     p.add_argument("--seed",    type=int, default=42)
@@ -352,11 +371,16 @@ def main() -> None:
                     "Use --no_prompts to ingest in parallel and run prompt generation as a second pass.")
         args.workers = 1
 
+    reg_dir = args.registered_dir.expanduser().resolve() if args.registered_dir else None
+    if reg_dir is not None and not reg_dir.is_dir():
+        sys.exit(f"--registered_dir not found: {reg_dir}")
+
     if args.workers > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
             futures = {
                 pool.submit(_ingest_one, info, out, not args.no_prompts, vasari_kwargs,
-                            args.enhancing_label, args.nonenhancing_label, args.edema_label): info
+                            args.enhancing_label, args.nonenhancing_label, args.edema_label,
+                            reg_dir): info
                 for info in sessions
             }
             for fut in as_completed(futures):
@@ -366,7 +390,8 @@ def main() -> None:
     else:
         for info in sessions:
             entry = _ingest_one(info, out, not args.no_prompts, vasari_kwargs,
-                                args.enhancing_label, args.nonenhancing_label, args.edema_label)
+                                args.enhancing_label, args.nonenhancing_label, args.edema_label,
+                                reg_dir)
             if entry:
                 entries.append(entry)
 
