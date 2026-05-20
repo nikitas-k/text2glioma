@@ -390,6 +390,46 @@ class FIDAccumulator:
             })
         return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
 
+    def compute_real_vs_real(self, n_splits: int = 10, seed: int = 0) -> pd.DataFrame:
+        """Intra-distribution FID floor: split the real feature bag in half
+        (random, ``n_splits`` times) and compute FID between halves.
+
+        Reports the median/IQR floor per modality. Use this to contextualise
+        the absolute generator FID — gen-FID / real-vs-real-FID is the
+        domain-agnostic ratio reviewers care about.
+        """
+        rng = np.random.default_rng(seed)
+        rows = []
+        for mod, rbag in self._real.items():
+            fr = rbag.stack()
+            n = fr.shape[0]
+            if n < 4:
+                continue
+            half = n // 2
+            fids = []
+            for _ in range(n_splits):
+                perm = rng.permutation(n)
+                a = fr[perm[:half]]
+                b = fr[perm[half:2 * half]]
+                mu_a, sig_a = _stats(a)
+                mu_b, sig_b = _stats(b)
+                fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+            fids = np.asarray(fids, dtype=np.float64)
+            rows.append({
+                "modality": mod,
+                "fid_real_vs_real_median": float(np.median(fids)),
+                "fid_real_vs_real_q25": float(np.quantile(fids, 0.25)),
+                "fid_real_vs_real_q75": float(np.quantile(fids, 0.75)),
+                "fid_real_vs_real_min": float(fids.min()),
+                "fid_real_vs_real_max": float(fids.max()),
+                "n_real": int(n),
+                "half_size": int(half),
+                "n_splits": int(n_splits),
+                "feat_dim": int(fr.shape[1]),
+                "mode": self.mode,
+            })
+        return pd.DataFrame(rows).sort_values("modality").reset_index(drop=True)
+
 
 # ---------- CLI ----------
 
