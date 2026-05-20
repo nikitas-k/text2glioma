@@ -202,8 +202,8 @@ class _MedicalNetFeat(nn.Module):
         n = self.net
         x = n.conv1(x)
         x = n.bn1(x)
-        x = n.relu(x)
-        if hasattr(n, "maxpool"):
+        x = F.relu(x, inplace=True)
+        if hasattr(n, "maxpool") and n.maxpool is not None:
             x = n.maxpool(x)
         x = n.layer1(x)
         x = n.layer2(x)
