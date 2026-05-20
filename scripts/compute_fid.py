@@ -133,6 +133,86 @@ class _RadImageNetFeat(nn.Module):
         return self.net(x)
 
 
+class _MedicalNetFeat(nn.Module):
+    """MedicalNet (Med3D) 3D ResNet feature extractor.
+
+    Expects checkpoints from the Tencent/MedicalNet release, e.g.
+    ``resnet_50.pth`` or ``resnet_50_23dataset.pth`` (3D ResNet-50, 1-channel
+    input, conv1 = [64, 1, 7, 7, 7]). Detects depth (10/18/34/50/101/152) from
+    layer block counts so a single class handles every MedicalNet variant.
+
+    Returns spatially-pooled features from layer4 (2048-d for ResNet-50).
+    """
+
+    def __init__(self, weights_path: Path):
+        super().__init__()
+        state = torch.load(str(weights_path), map_location="cpu")
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        state = {k.replace("module.", "").replace("model.", ""): v for k, v in state.items()}
+
+        # Infer depth from number of conv blocks per layer
+        def _count(prefix):
+            return len({k.split(".")[1] for k in state if k.startswith(f"{prefix}.")})
+        blocks = [_count(f"layer{i}") for i in range(1, 5)]
+        depth_map = {
+            (1, 1, 1, 1): 10,
+            (2, 2, 2, 2): 18,
+            (3, 4, 6, 3): 34,   # also matches resnet50 block counts; disambiguate by bottleneck
+            (3, 4, 23, 3): 101,
+            (3, 8, 36, 3): 152,
+        }
+        is_bottleneck = "layer1.0.conv3.weight" in state
+        if tuple(blocks) == (3, 4, 6, 3) and is_bottleneck:
+            depth = 50
+        else:
+            depth = depth_map.get(tuple(blocks))
+        if depth is None:
+            raise ValueError(f"Cannot infer MedicalNet depth from blocks={blocks}; "
+                             f"bottleneck={is_bottleneck}")
+
+        # Build MONAI 3D ResNet matching the checkpoint
+        try:
+            from monai.networks.nets import resnet10, resnet18, resnet34, resnet50, resnet101, resnet152
+        except ImportError as exc:
+            raise ImportError("MedicalNet mode requires monai>=0.9") from exc
+        factory = {10: resnet10, 18: resnet18, 34: resnet34,
+                   50: resnet50, 101: resnet101, 152: resnet152}[depth]
+        net = factory(
+            spatial_dims=3, n_input_channels=1, num_classes=2,
+            shortcut_type="B", feed_forward=False,
+        )
+        missing, unexpected = net.load_state_dict(state, strict=False)
+        # MedicalNet checkpoints have no FC; missing fc.* keys are expected when feed_forward=False removed them
+        missing = [k for k in missing if not k.startswith("fc")]
+        if missing:
+            print(f"[MedicalNet-r{depth}] missing: {len(missing)} (e.g. {missing[:3]})")
+        if unexpected:
+            print(f"[MedicalNet-r{depth}] unexpected: {len(unexpected)} (e.g. {unexpected[:3]})")
+        net.eval()
+        self.net = net
+        # Feature dim: 512 for r10/18/34, 2048 for r50/101/152
+        self.feat_dim = 2048 if depth >= 50 else 512
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, 1, H, W, D] in [0,1]. MedicalNet was trained on z-scored CT/MR;
+        # we z-score per-volume inside the tumour ROI before this call.
+        # Run the network up to (and including) layer4, then GAP.
+        n = self.net
+        x = n.conv1(x)
+        x = n.bn1(x)
+        x = n.relu(x)
+        if hasattr(n, "maxpool"):
+            x = n.maxpool(x)
+        x = n.layer1(x)
+        x = n.layer2(x)
+        x = n.layer3(x)
+        x = n.layer4(x)
+        x = F.adaptive_avg_pool3d(x, 1).flatten(1)
+        return x
+
+
 class _AutoencoderFeat(nn.Module):
     """Use Stage-1 AutoencoderKL encoder as a 3D feature extractor.
 
@@ -206,6 +286,15 @@ class FIDAccumulator:
             self.backbone = _RadImageNetFeat(Path(backbone_weights)).to(self.device).eval()
             self.feat_dim = 2048
             self.is_3d = False
+        elif mode == "3d_medicalnet":
+            if backbone_weights is None or not Path(backbone_weights).exists():
+                raise FileNotFoundError(
+                    f"--backbone_weights required for 3d_medicalnet; got {backbone_weights}"
+                )
+            bb = _MedicalNetFeat(Path(backbone_weights)).to(self.device).eval()
+            self.backbone = bb
+            self.feat_dim = bb.feat_dim
+            self.is_3d = True
         elif mode == "3d_autoencoder":
             if stage1 is None:
                 raise ValueError("3d_autoencoder mode requires stage1 module")
@@ -256,10 +345,16 @@ class FIDAccumulator:
         mins = nz.min(0).values.tolist()
         maxs = (nz.max(0).values + 1).tolist()
         crop = vol[mins[0]:maxs[0], mins[1]:maxs[1], mins[2]:maxs[2]]
-        # pad to multiple of 8 (encoder downsample)
-        pad = [(0, (-s) % 8) for s in crop.shape]
+        # pad to multiple of 16 (covers both encoder /8 and MedicalNet maxpool/strides)
+        pad = [(0, (-s) % 16) for s in crop.shape]
         crop = F.pad(crop, [p for ab in pad[::-1] for p in ab])
-        crop = crop.unsqueeze(0).unsqueeze(0).to(self.device).float().clamp(0, 1)
+        crop = crop.unsqueeze(0).unsqueeze(0).to(self.device).float()
+        if self.mode == "3d_medicalnet":
+            # MedicalNet expects z-scored input (trained on z-scored CT/MR volumes).
+            m, s = crop.mean(), crop.std().clamp_min(1e-6)
+            crop = (crop - m) / s
+        else:
+            crop = crop.clamp(0, 1)
         f = self.backbone(crop).cpu().numpy()
         return f  # [1, feat_dim]
 
@@ -308,7 +403,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--pairs_csv", type=Path, required=True,
                    help="CSV with columns case_idx,modality,cfg,real_path,gen_path,mask_path")
-    p.add_argument("--mode", choices=["2d_inception", "2d_radimagenet", "3d_autoencoder"],
+    p.add_argument("--mode", choices=["2d_inception", "2d_radimagenet",
+                                       "3d_medicalnet", "3d_autoencoder"],
                    default="2d_inception")
     p.add_argument("--backbone_weights", type=Path, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
