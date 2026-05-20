@@ -41,7 +41,7 @@ import argparse
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -390,13 +390,33 @@ class FIDAccumulator:
             })
         return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
 
-    def compute_real_vs_real(self, n_splits: int = 10, seed: int = 0) -> pd.DataFrame:
-        """Intra-distribution FID floor: split the real feature bag in half
-        (random, ``n_splits`` times) and compute FID between halves.
+    def compute_real_vs_real(self, n_splits: int = 10, seed: int = 0,
+                             n_per_split: Optional[int] = None,
+                             with_replacement: bool = False) -> pd.DataFrame:
+        """Intra-distribution FID floor.
 
-        Reports the median/IQR floor per modality. Use this to contextualise
-        the absolute generator FID — gen-FID / real-vs-real-FID is the
-        domain-agnostic ratio reviewers care about.
+        Two modes:
+
+        ``with_replacement=False`` (default, *unbiased halves*):
+            Split the real bag into two disjoint halves of size
+            ``min(n_per_split, n_real // 2)`` each.  Each half has
+            ``n_real // 2`` samples by default — **note this is smaller than
+            the gen bag** (which has ``n_real`` samples on each side in
+            ``compute()``), so the resulting floor is *inflated* by sample-
+            size bias and is **not** directly comparable to gen-vs-real FID.
+            Use it as a *qualitative* floor only.
+
+        ``with_replacement=True`` (*matched bootstrap*):
+            Draw two bootstrap samples of size ``n_per_split`` (default
+            ``n_real``, i.e. matching the gen bag size used by ``compute``)
+            from the real bag *with replacement*.  This yields a floor
+            estimate at the **same sample size as the gen-vs-real numerator**
+            and is the correct denominator for a FID ratio.  Use
+            :meth:`compute_real_vs_real_matched` for a one-call version that
+            automatically matches each ``(modality, cfg)`` gen bag.
+
+        FID is positively biased at small N (bias ≈ d² / N for feat-dim d);
+        any ratio that does not match N on both sides is meaningless.
         """
         rng = np.random.default_rng(seed)
         rows = []
@@ -405,15 +425,27 @@ class FIDAccumulator:
             n = fr.shape[0]
             if n < 4:
                 continue
-            half = n // 2
-            fids = []
-            for _ in range(n_splits):
-                perm = rng.permutation(n)
-                a = fr[perm[:half]]
-                b = fr[perm[half:2 * half]]
-                mu_a, sig_a = _stats(a)
-                mu_b, sig_b = _stats(b)
-                fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+            if with_replacement:
+                bag_n = int(n_per_split or n)
+                fids = []
+                for _ in range(n_splits):
+                    a = fr[rng.integers(0, n, size=bag_n)]
+                    b = fr[rng.integers(0, n, size=bag_n)]
+                    mu_a, sig_a = _stats(a)
+                    mu_b, sig_b = _stats(b)
+                    fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+            else:
+                half = int(n_per_split or (n // 2))
+                half = min(half, n // 2)
+                fids = []
+                for _ in range(n_splits):
+                    perm = rng.permutation(n)
+                    a = fr[perm[:half]]
+                    b = fr[perm[half:2 * half]]
+                    mu_a, sig_a = _stats(a)
+                    mu_b, sig_b = _stats(b)
+                    fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+                bag_n = half
             fids = np.asarray(fids, dtype=np.float64)
             rows.append({
                 "modality": mod,
@@ -423,12 +455,56 @@ class FIDAccumulator:
                 "fid_real_vs_real_min": float(fids.min()),
                 "fid_real_vs_real_max": float(fids.max()),
                 "n_real": int(n),
-                "half_size": int(half),
+                "bag_size": int(bag_n),
+                "with_replacement": bool(with_replacement),
                 "n_splits": int(n_splits),
                 "feat_dim": int(fr.shape[1]),
                 "mode": self.mode,
             })
         return pd.DataFrame(rows).sort_values("modality").reset_index(drop=True)
+
+    def compute_real_vs_real_matched(self, n_splits: int = 50, seed: int = 0) -> pd.DataFrame:
+        """Sample-size-matched intra-distribution FID floor for ratios.
+
+        For each ``(modality, cfg)`` present in the gen bag, draws ``n_splits``
+        pairs of bootstrap samples from the real bag, **each of size equal
+        to the corresponding gen bag**, and reports the median FID.  The
+        resulting floor estimate has the same sample-size bias as the
+        numerator, so ``fid / fid_real_vs_real_matched_median`` is a
+        bias-cancelled ratio that can be compared across modalities and
+        backbones.
+        """
+        rng = np.random.default_rng(seed)
+        rows = []
+        for (mod, cfg), gbag in self._gen.items():
+            rbag = self._real.get(mod)
+            if rbag is None or not rbag.feats:
+                continue
+            fr = rbag.stack()
+            n_r = fr.shape[0]
+            n_g = int(gbag.stack().shape[0])
+            if n_r < 4 or n_g < 4:
+                continue
+            fids = []
+            for _ in range(n_splits):
+                a = fr[rng.integers(0, n_r, size=n_g)]
+                b = fr[rng.integers(0, n_r, size=n_g)]
+                mu_a, sig_a = _stats(a)
+                mu_b, sig_b = _stats(b)
+                fids.append(_frechet_distance(mu_a, sig_a, mu_b, sig_b))
+            fids = np.asarray(fids, dtype=np.float64)
+            rows.append({
+                "modality": mod, "cfg": cfg,
+                "fid_real_vs_real_matched_median": float(np.median(fids)),
+                "fid_real_vs_real_matched_q25":    float(np.quantile(fids, 0.25)),
+                "fid_real_vs_real_matched_q75":    float(np.quantile(fids, 0.75)),
+                "bag_size": int(n_g),
+                "n_real":   int(n_r),
+                "n_splits": int(n_splits),
+                "feat_dim": int(fr.shape[1]),
+                "mode": self.mode,
+            })
+        return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
 
 
 # ---------- CLI ----------
