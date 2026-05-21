@@ -6,8 +6,9 @@ model:
   adv_weight: 0.0
   kl_weight: 0.0000000001
   l1_weight: 2.0
+  grad_accum_steps: 8
   autoencoder_warm_up_n_epochs: 0   # train G alone for this many epochs before enabling D
-  r1_gamma: 10.0                     # R1 gradient penalty weight (0 = disabled; try 1.0-10.0)
+  r1_gamma: 0.0                     # R1 gradient penalty weight (0 = disabled; try 1.0-10.0)
   kl_warmup_epochs: 0               # linearly ramp kl_weight from 0 over this many epochs (0 = disabled)
   kl_max: 0.0                       # clamp per-batch KL to this value (0 = disabled; try 1e4-1e5)
   adaptive_adv_weight: false        # keep off for pure reconstruction objective
@@ -18,9 +19,9 @@ model:
     spatial_dims: 3
     in_channels: 4             # T1, T1CE, T2, FLAIR
     out_channels: 4
-    num_channels: [128, 256, 512, 512]
-    latent_channels: 8       # must match UNet in stage 2 config
-    num_res_blocks: 3
+    num_channels: [96, 192, 384, 512]
+    latent_channels: 6       # must match UNet in stage 2 config
+    num_res_blocks: 2
     attention_levels: [False, False, False, True]
     with_encoder_nonlocal_attn: True
     with_decoder_nonlocal_attn: True

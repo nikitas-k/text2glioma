@@ -60,6 +60,7 @@ DATALIST="${HOME}/text2glioma/datalist_N1510.json"
 
 # ── Pre-flight ──────────────────────────────────────────────────────
 export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
 
 if [ -z "$DATALIST" ]; then
@@ -89,5 +90,4 @@ torchrun --standalone --nproc_per_node=4 \
     --num_epochs 1500 \
     --val_interval 10 \
     --pin_memory \
-    --set model.grad_accum_steps=8 \
     2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"
