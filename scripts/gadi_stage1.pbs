@@ -89,5 +89,6 @@ torchrun --standalone --nproc_per_node=4 \
     --batch_size 1 \
     --num_epochs 1500 \
     --val_interval 10 \
+    --no_augment \
     --pin_memory \
     2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"

@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no_channel_reorder", action="store_true", default=False,
                     help="Skip MSD→pipeline channel reorder (use for non-MSD data "
                          "where channels are already in the desired order).")
+    p.add_argument("--no_augment", action="store_true", default=False,
+                    help="Disable training-time random augmentation transforms.")
     p.add_argument("--val_frac", type=float, default=0.2,
                     help="Fraction of training set reserved for validation.")
     p.add_argument("--batch_size", type=int, default=2)
@@ -224,7 +226,7 @@ def _apply_overrides(config: dict, overrides: list[str]) -> dict:
 # Transforms
 # ---------------------------------------------------------------------------
 
-def get_train_transform(channel_reorder: bool = True) -> T.Compose:
+def get_train_transform(channel_reorder: bool = True, augment: bool = True) -> T.Compose:
     """Training transforms for 4-ch BraTS images."""
     xforms = [
         T.LoadImaged(keys=["image"]),
@@ -242,16 +244,16 @@ def get_train_transform(channel_reorder: bool = True) -> T.Compose:
             keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
             channel_wise=True,
         ),
-        T.RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),
+        T.RandFlipd(keys=["image"], prob=0.5, spatial_axis=0) if augment else None,
         T.RandAffined(
             keys=["image"], prob=0.1,
             translate_range=(1, 1, 1), scale_range=(-0.02, 0.02),
             spatial_size=[160, 224, 160], mode="trilinear",
-        ),
+        ) if augment else None,
         T.RandShiftIntensityd(
             keys=["image"], offsets=0.05, prob=0.1, channel_wise=True,
-        ),
-        T.RandAdjustContrastd(keys=["image"], prob=0.1, gamma=(0.97, 1.03)),
+        ) if augment else None,
+        T.RandAdjustContrastd(keys=["image"], prob=0.1, gamma=(0.97, 1.03)) if augment else None,
         T.ToTensord(keys=["image"]),
     ])
     return T.Compose([x for x in xforms if x is not None])
@@ -299,6 +301,8 @@ def main():
     # Dataset
     # ------------------------------------------------------------------
     channel_reorder = not args.no_channel_reorder
+    augment = not args.no_augment
+    print0(f"Train augmentation: {'ON' if augment else 'OFF'}", rank)
 
     if args.datalist:
         # ── Custom JSON datalist ─────────────────────────────────────
@@ -309,7 +313,7 @@ def main():
         val_data = datalist["validation"]
         print0(f"  {len(train_data)} training, {len(val_data)} validation entries", rank)
 
-        train_ds = Dataset(data=train_data, transform=get_train_transform(channel_reorder))
+        train_ds = Dataset(data=train_data, transform=get_train_transform(channel_reorder, augment=augment))
         val_ds = Dataset(data=val_data, transform=get_val_transform(channel_reorder))
     else:
         # ── DecathlonDataset (BraTS) ─────────────────────────────────
@@ -328,7 +332,7 @@ def main():
             download=download,
             seed=args.seed,
             val_frac=args.val_frac,
-            transform=get_train_transform(channel_reorder),
+            transform=get_train_transform(channel_reorder, augment=augment),
             num_workers=args.num_workers,
         )
         if distributed:
