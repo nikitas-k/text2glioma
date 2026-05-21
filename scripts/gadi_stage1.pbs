@@ -56,7 +56,7 @@ DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
 #       --labels '/g/data/hl36/mhf/monai/Task03_BrainTumourDx/labelsTr/nnUNetv2-*.nii.gz' \
 #       -o datalist.json
 # Then set DATALIST below and uncomment "--datalist" / "--no_channel_reorder".
-DATALIST=""  # e.g. ${HOME}/text2glioma/datalist.json
+DATALIST="${HOME}/text2glioma/datalist_N1510.json"
 
 # ── Pre-flight ──────────────────────────────────────────────────────
 export TORCH_HOME=${RUN_DIR}/cache
@@ -83,9 +83,11 @@ torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
     --config  "$CONFIG" \
     --run_dir "$RUN_DIR" \
+    --run_name stage1_overfit_memsafe \
     $EXTRA_ARGS \
-    --batch_size 4 \
-    --num_epochs 500 \
-    --val_interval 5 \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
     --pin_memory \
+    --set model.grad_accum_steps=8 \
     2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}.log"

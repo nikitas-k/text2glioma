@@ -408,7 +408,10 @@ class FIDAccumulator:
                 "feat_dim": int(fr.shape[1]),
                 "mode": self.mode,
             })
-        return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        return df.sort_values(["modality", "cfg"]).reset_index(drop=True)
 
     def compute_real_vs_real(self, n_splits: int = 20, seed: int = 0,
                              n_per_split: Optional[int] = None,
@@ -496,7 +499,10 @@ class FIDAccumulator:
                 "feat_dim": int(self._real[mod].stack().shape[1]),
                 "mode": self.mode,
             })
-        return pd.DataFrame(rows).sort_values("modality").reset_index(drop=True)
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        return df.sort_values("modality").reset_index(drop=True)
 
     def compute_real_vs_real_matched(self, n_splits: int = 50, seed: int = 0,
                                      workers: int = 1) -> pd.DataFrame:
@@ -549,7 +555,10 @@ class FIDAccumulator:
                 "feat_dim": int(self._real[mod].stack().shape[1]),
                 "mode": self.mode,
             })
-        return pd.DataFrame(rows).sort_values(["modality", "cfg"]).reset_index(drop=True)
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        return df.sort_values(["modality", "cfg"]).reset_index(drop=True)
 
 
 # ---------- CLI ----------
