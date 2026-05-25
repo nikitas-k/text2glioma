@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stg1_of_nonlocal_off
+
+# Ablation A: disable encoder/decoder nonlocal attention to test ventricular lensing artifact.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
+    --config "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --run_name stage1_overfit_ablate_nonlocal_off \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --no_augment \
+    --pin_memory \
+    --set model.params.with_encoder_nonlocal_attn=False model.params.with_decoder_nonlocal_attn=False \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_stage1_overfit_ablate_nonlocal_off.log"
