@@ -1,0 +1,60 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stg1_of_attn_kl1e6
+
+# Ablation D: combined fix for the central registered-data memorization artifact.
+#   - All bottleneck self-attention OFF (attention_levels=[F,F,F,F], nonlocal off).
+#   - kl_weight raised from 1e-10 to 1e-6 (Stable-Diffusion-VAE range).
+# Decoder DC-prior probe showed a_zero is a featureless cube but b_mean
+# reproduces the artifact: the encoder is memorizing a fixed central template
+# into the latent because there is effectively no KL penalty. Raising
+# kl_weight forces per-sample latent variation and should eliminate the
+# centered oval template.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
+    --config "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --run_name stage1_overfit_ablate_attn_off_kl1e6 \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --no_augment \
+    --pin_memory \
+    --set 'model.params.attention_levels=[False,False,False,False]' \
+          model.params.with_encoder_nonlocal_attn=False \
+          model.params.with_decoder_nonlocal_attn=False \
+          model.kl_weight=1e-6 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_stage1_overfit_ablate_attn_off_kl1e6.log"
