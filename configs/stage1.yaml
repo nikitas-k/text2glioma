@@ -4,7 +4,9 @@ model:
   # Overfit profile: prioritise exact reconstruction over latent regularisation.
   perceptual_weight: 0.25
   adv_weight: 0.0
-  kl_weight: 0.0000000001
+  # NOTE: kl_weight < 1e-6 causes encoder to memorize a fixed centered template
+  # on registered, center-cropped data (see stage1_overfit_ablate_attn_off_kl1e6).
+  kl_weight: 0.000001
   l1_weight: 2.0
   grad_accum_steps: 8
   autoencoder_warm_up_n_epochs: 0   # train G alone for this many epochs before enabling D
