@@ -1,0 +1,65 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=50GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=00:20:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N decprior_kl1e6
+
+# ── Decoder DC-prior probe — kl=1e-6 (attention-ON) ablation ───────
+# Same probe as gadi_decoder_prior_probe.pbs, pointed at the Ablation E
+# run (stage1_overfit_ablate_kl1e6: full attention stack ON, kl_weight
+# raised from 1e-10 to 1e-6). Decides whether the kl bump alone
+# eliminates the central-template artifact when attention is left in.
+# If b_mean is a featureless mean-intensity blob, attention-on + kl=1e-6
+# is strictly preferable to attention-off + kl=1e-6 (same fix, more
+# representational capacity).
+
+# ── Environment ─────────────────────────────────────────────────────
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+# ── Run ─────────────────────────────────────────────────────────────
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6
+DATALIST_SRC=${HOME}/text2glioma/datalist_N1510.json
+mkdir -p "${HOME}/job_logs"
+TMP_DATALIST="${HOME}/job_logs/datalist_first5_probe_kl1e6_${PBS_JOBID}.json"
+
+python - <<PY
+import json
+from pathlib import Path
+
+src = Path("${DATALIST_SRC}").expanduser()
+dst = Path("${TMP_DATALIST}").expanduser()
+
+d = json.loads(src.read_text())
+d["training"] = d.get("training", [])[:5]
+d["validation"] = d.get("validation", [])[:5]
+d["n_training"] = len(d["training"])
+d["n_validation"] = len(d["validation"])
+d["n_subjs"] = d["n_training"] + d["n_validation"]
+
+dst.write_text(json.dumps(d, indent=2))
+print(f"Wrote mini datalist to {dst}")
+PY
+
+cd ${HOME}/text2glioma/scripts
+
+python ${HOME}/text2glioma/scripts/decoder_prior_probe.py \
+    --run_dir "$RUN_DIR" \
+    --datalist "$TMP_DATALIST" \
+    --no_channel_reorder \
+    --n_samples 5 \
+    --center_block 2 \
+    --center_frac 0.25 \
+    --num_workers 2 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_decoder_prior_probe_kl1e6.log"
