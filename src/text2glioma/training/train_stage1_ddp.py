@@ -313,6 +313,13 @@ def main():
         print_config()
 
     # ------------------------------------------------------------------
+    # Config (loaded early so dataset transforms can read tumor_weight)
+    # ------------------------------------------------------------------
+    config = load_config(args.config)
+    if args.set:
+        config = _apply_overrides(config, args.set)
+
+    # ------------------------------------------------------------------
     # Dataset
     # ------------------------------------------------------------------
     channel_reorder = not args.no_channel_reorder
@@ -395,9 +402,6 @@ def main():
     # ------------------------------------------------------------------
     # Model, discriminator, perceptual loss
     # ------------------------------------------------------------------
-    config = load_config(args.config)
-    if args.set:
-        config = _apply_overrides(config, args.set)
     model_type = config["model"]["name"]
     model = get_model(model_type, config, args.pretrained)
 
