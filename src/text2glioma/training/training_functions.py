@@ -430,6 +430,32 @@ def _safe_perceptual_loss(
         return torch.tensor(0.0, device=reconstruction.device, requires_grad=True)
     return total / counted
 
+
+def _tumor_weighted_l1(
+    reconstruction: torch.Tensor,
+    target: torch.Tensor,
+    label: Optional[torch.Tensor],
+    tumor_weight: float,
+) -> torch.Tensor:
+    """Per-voxel L1 with optional upweighting of tumor voxels.
+
+    `label` is expected to be shape ``[B, 1, D, H, W]`` with non-zero values
+    inside tumor (BraTS convention: classes 1/2/3/4 all map to tumor). When
+    ``label`` is None or ``tumor_weight == 1.0`` this reduces to plain
+    ``F.l1_loss`` (identical numerics).
+    """
+    if label is None or tumor_weight == 1.0:
+        return F.l1_loss(reconstruction.float(), target.float())
+    rec = reconstruction.float()
+    tgt = target.float()
+    per_voxel = (rec - tgt).abs()  # [B, C, D, H, W]
+    tumor = (label > 0).to(per_voxel.dtype)  # [B, 1, D, H, W]
+    weights = 1.0 + (tumor_weight - 1.0) * tumor  # broadcasts over C
+    # Weighted mean over channels and spatial dims (sum over weighted
+    # numerator / sum over weights, broadcast to C channels).
+    n_ch = per_voxel.shape[1]
+    return (per_voxel * weights).sum() / (weights.sum() * n_ch)
+
 @torch.no_grad()
 def encode_text(tokenizer, text_encoder, texts, pad_to_max=True, device='cpu'):
     """Encode a list of texts into text embeddings using the provided tokenizer and text encoder."""
@@ -496,6 +522,7 @@ def train_autoencoder(
     adv_anneal_start: int = 0,
     adv_anneal_epochs: int = 0,
     early_stop_patience: int = 0,
+    tumor_weight: float = 1.0,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -532,6 +559,7 @@ def train_autoencoder(
         wavelet_detail_weight=wavelet_detail_weight,
         wavelet_name=wavelet_name,
         conditional_disc=conditional_disc,
+        tumor_weight=tumor_weight,
     )
 
     patience_counter = 0
@@ -576,6 +604,7 @@ def train_autoencoder(
             l2sp_weight=l2sp_weight,
             pretrained_decoder_weights=pretrained_decoder_weights,
             conditional_disc=conditional_disc,
+            tumor_weight=tumor_weight,
         )
 
         # Step LR schedulers (per-epoch)
@@ -602,6 +631,7 @@ def train_autoencoder(
                 wavelet_detail_weight=wavelet_detail_weight,
                 wavelet_name=wavelet_name,
                 conditional_disc=conditional_disc,
+                tumor_weight=tumor_weight,
             )
             print_gpu_memory_report()
 
@@ -665,6 +695,7 @@ def train_epoch_autoencoder(
     l2sp_weight: float = 0.0,
     pretrained_decoder_weights: Optional[dict] = None,
     conditional_disc: bool = False,
+    tumor_weight: float = 1.0,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -755,6 +786,7 @@ def train_epoch_autoencoder(
     n_steps = len(loader)
     for step, x in pbar:
         images = x["image"].to(device)
+        label_map = x["label"].to(device) if (tumor_weight != 1.0 and "label" in x) else None
 
         # Gradient accumulation control
         accum_start = (step % grad_accum_steps == 0)
@@ -852,7 +884,7 @@ def train_epoch_autoencoder(
         if accum_start:
             optimizer_g.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            l1_loss = F.l1_loss(reconstruction.float(), images.float())
+            l1_loss = _tumor_weighted_l1(reconstruction, images, label_map, tumor_weight)
             # MedicalNet perceptual loss: per-channel (MedicalNet expects 1-ch)
             # with div-by-zero guard for near-constant channels.
             p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)
@@ -998,6 +1030,7 @@ def eval_autoencoder(
     wavelet_detail_weight: float = 2.0,
     wavelet_name: str = "haar",
     conditional_disc: bool = False,
+    tumor_weight: float = 1.0,
 ) -> float:
     model.eval()
     discriminator.eval()
@@ -1007,11 +1040,12 @@ def eval_autoencoder(
     n_samples = 0
     for x in loader:
         images = x["image"].to(device)
+        label_map = x["label"].to(device) if (tumor_weight != 1.0 and "label" in x) else None
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             # GENERATOR
             reconstruction, z_mu, z_sigma = model(x=images)
-            l1_loss = F.l1_loss(reconstruction.float(), images.float())
+            l1_loss = _tumor_weighted_l1(reconstruction, images, label_map, tumor_weight)
             # MedicalNet perceptual loss: per-channel (MedicalNet expects 1-ch)
             # with div-by-zero guard for near-constant channels.
             p_loss = _safe_perceptual_loss(perceptual_loss, reconstruction, images)

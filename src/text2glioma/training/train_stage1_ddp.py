@@ -226,58 +226,73 @@ def _apply_overrides(config: dict, overrides: list[str]) -> dict:
 # Transforms
 # ---------------------------------------------------------------------------
 
-def get_train_transform(channel_reorder: bool = True, augment: bool = True) -> T.Compose:
-    """Training transforms for 4-ch BraTS images."""
-    xforms = [
-        T.LoadImaged(keys=["image"]),
+def get_train_transform(channel_reorder: bool = True, augment: bool = True, load_label: bool = False) -> T.Compose:
+    """Training transforms for 4-ch BraTS images.
+
+    When ``load_label`` is True, the matching segmentation label is loaded
+    and carried through every spatial transform with nearest-neighbour
+    interpolation, so the per-voxel label map stays aligned with the
+    image and can be used for ROI-weighted reconstruction losses.
+    """
+    img_keys = ["image", "label"] if load_label else ["image"]
+    xforms: list = [
+        T.LoadImaged(keys=img_keys),
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
-        T.EnsureTyped(keys=["image"], dtype=torch.float32),
     ]
+    if load_label:
+        xforms.append(T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"))
+        xforms.append(T.EnsureTyped(keys=["label"], dtype=torch.float32))
+    xforms.append(T.EnsureTyped(keys=["image"], dtype=torch.float32))
     if channel_reorder:
         xforms.append(T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]))
     xforms.extend([
-        T.Orientationd(keys=["image"], axcodes="LPS"),
-        T.CropForegroundd(keys=["image"], source_key="image"),
-        T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
-        T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
+        T.Orientationd(keys=img_keys, axcodes="LPS"),
+        T.CropForegroundd(keys=img_keys, source_key="image"),
+        T.SpatialPadd(keys=img_keys, spatial_size=(160, 224, 160), mode="constant"),
+        T.CenterSpatialCropd(keys=img_keys, roi_size=(160, 224, 160)),
         T.ScaleIntensityRangePercentilesd(
             keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
             channel_wise=True,
         ),
-        T.RandFlipd(keys=["image"], prob=0.5, spatial_axis=0) if augment else None,
+        T.RandFlipd(keys=img_keys, prob=0.5, spatial_axis=0) if augment else None,
         T.RandAffined(
-            keys=["image"], prob=0.1,
+            keys=img_keys, prob=0.1,
             translate_range=(1, 1, 1), scale_range=(-0.02, 0.02),
-            spatial_size=[160, 224, 160], mode="trilinear",
+            spatial_size=[160, 224, 160],
+            mode=(["trilinear", "nearest"] if load_label else "trilinear"),
         ) if augment else None,
         T.RandShiftIntensityd(
             keys=["image"], offsets=0.05, prob=0.1, channel_wise=True,
         ) if augment else None,
         T.RandAdjustContrastd(keys=["image"], prob=0.1, gamma=(0.97, 1.03)) if augment else None,
-        T.ToTensord(keys=["image"]),
+        T.ToTensord(keys=img_keys),
     ])
     return T.Compose([x for x in xforms if x is not None])
 
 
-def get_val_transform(channel_reorder: bool = True) -> T.Compose:
+def get_val_transform(channel_reorder: bool = True, load_label: bool = False) -> T.Compose:
     """Validation transforms (deterministic)."""
-    xforms = [
-        T.LoadImaged(keys=["image"]),
+    img_keys = ["image", "label"] if load_label else ["image"]
+    xforms: list = [
+        T.LoadImaged(keys=img_keys),
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
-        T.EnsureTyped(keys=["image"], dtype=torch.float32),
     ]
+    if load_label:
+        xforms.append(T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"))
+        xforms.append(T.EnsureTyped(keys=["label"], dtype=torch.float32))
+    xforms.append(T.EnsureTyped(keys=["image"], dtype=torch.float32))
     if channel_reorder:
         xforms.append(T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]))
     xforms.extend([
-        T.Orientationd(keys=["image"], axcodes="LPS"),
-        T.CropForegroundd(keys=["image"], source_key="image"),
-        T.SpatialPadd(keys=["image"], spatial_size=(160, 224, 160), mode="constant"),
-        T.CenterSpatialCropd(keys=["image"], roi_size=(160, 224, 160)),
+        T.Orientationd(keys=img_keys, axcodes="LPS"),
+        T.CropForegroundd(keys=img_keys, source_key="image"),
+        T.SpatialPadd(keys=img_keys, spatial_size=(160, 224, 160), mode="constant"),
+        T.CenterSpatialCropd(keys=img_keys, roi_size=(160, 224, 160)),
         T.ScaleIntensityRangePercentilesd(
             keys=["image"], lower=0, upper=99.5, b_min=0, b_max=1,
             channel_wise=True,
         ),
-        T.ToTensord(keys=["image"]),
+        T.ToTensord(keys=img_keys),
     ])
     return T.Compose([x for x in xforms if x is not None])
 
@@ -304,8 +319,13 @@ def main():
     augment = not args.no_augment
     print0(f"Train augmentation: {'ON' if augment else 'OFF'}", rank)
 
+    tumor_weight = float(config["model"].get("tumor_weight", 1.0))
+    load_label = tumor_weight != 1.0
+    if load_label:
+        print0(f"[TUMOR-WEIGHT] L1 upweighted {tumor_weight:.2f}× inside tumor (label > 0)", rank)
+
     if args.datalist:
-        # ── Custom JSON datalist ─────────────────────────────────────
+        # ── Custom JSON datalist ────────────────────────────────
         print0(f"Loading datalist from {args.datalist}", rank)
         with open(args.datalist) as f:
             datalist = json.load(f)
@@ -313,8 +333,8 @@ def main():
         val_data = datalist["validation"]
         print0(f"  {len(train_data)} training, {len(val_data)} validation entries", rank)
 
-        train_ds = Dataset(data=train_data, transform=get_train_transform(channel_reorder, augment=augment))
-        val_ds = Dataset(data=val_data, transform=get_val_transform(channel_reorder))
+        train_ds = Dataset(data=train_data, transform=get_train_transform(channel_reorder, augment=augment, load_label=load_label))
+        val_ds = Dataset(data=val_data, transform=get_val_transform(channel_reorder, load_label=load_label))
     else:
         # ── DecathlonDataset (BraTS) ─────────────────────────────────
         if is_main(rank):
@@ -332,7 +352,7 @@ def main():
             download=download,
             seed=args.seed,
             val_frac=args.val_frac,
-            transform=get_train_transform(channel_reorder, augment=augment),
+            transform=get_train_transform(channel_reorder, augment=augment, load_label=load_label),
             num_workers=args.num_workers,
         )
         if distributed:
@@ -345,7 +365,7 @@ def main():
             download=False,
             seed=args.seed,
             val_frac=args.val_frac,
-            transform=get_val_transform(channel_reorder),
+            transform=get_val_transform(channel_reorder, load_label=load_label),
             num_workers=args.num_workers,
         )
 
@@ -484,6 +504,7 @@ def main():
         wavelet_loss_weight=config["model"].get("wavelet_loss_weight", 0.0),
         wavelet_detail_weight=config["model"].get("wavelet_detail_weight", 2.0),
         wavelet_name=config["model"].get("wavelet_name", "haar"),
+        tumor_weight=tumor_weight,
     )
     print0(f"Training finished.  Best val loss: {val_loss:.4f}", rank)
     cleanup()
