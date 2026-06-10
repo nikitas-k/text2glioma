@@ -23,7 +23,7 @@ import copy
 import json
 import os
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import torch
@@ -121,7 +121,13 @@ def setup_distributed(backend: str) -> tuple[int, int, int]:
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=backend, init_method="env://")
+    # 30-minute NCCL timeout (default 10 min) — survives transient Gadi
+    # /g/data NFS/Lustre stalls during rank-0 TB writes / checkpoint saves.
+    dist.init_process_group(
+        backend=backend,
+        init_method="env://",
+        timeout=timedelta(minutes=30),
+    )
     dist.barrier()
     return rank, world_size, local_rank
 

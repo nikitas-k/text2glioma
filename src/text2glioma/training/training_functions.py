@@ -635,20 +635,22 @@ def train_autoencoder(
             )
             print_gpu_memory_report()
 
-            # Save checkpoint
-            checkpoint = {
-                "epoch": epoch + 1,
-                "state_dict": model.state_dict(),
-                "discriminator": discriminator.state_dict(),
-                "optimizer_g": optimizer_g.state_dict(),
-                "optimizer_d": optimizer_d.state_dict(),
-                "best_loss": best_loss,
-            }
-            if scheduler_g is not None:
-                checkpoint["scheduler_g"] = scheduler_g.state_dict()
-            if scheduler_d is not None:
-                checkpoint["scheduler_d"] = scheduler_d.state_dict()
-            torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
+            # Save checkpoint (rank-0 only — all ranks share the same path)
+            _is_main = not dist.is_initialized() or dist.get_rank() == 0
+            if _is_main:
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "discriminator": discriminator.state_dict(),
+                    "optimizer_g": optimizer_g.state_dict(),
+                    "optimizer_d": optimizer_d.state_dict(),
+                    "best_loss": best_loss,
+                }
+                if scheduler_g is not None:
+                    checkpoint["scheduler_g"] = scheduler_g.state_dict()
+                if scheduler_d is not None:
+                    checkpoint["scheduler_d"] = scheduler_d.state_dict()
+                torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
 
             if val_loss <= best_loss:
                 print(f"New best val loss {val_loss}")
