@@ -1,0 +1,58 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l jobfs=50GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=00:20:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N offmet_kl1e6_tw5
+
+# Offline metrics for ablation G (kl=1e-6 + tumor-weighted L1 ×5)
+# on first 5 train+val cases.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6_tumorw5
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST_SRC=${HOME}/text2glioma/datalist_N1510.json
+mkdir -p "${HOME}/job_logs"
+TMP_DATALIST="${HOME}/job_logs/datalist_first5_train_val_${PBS_JOBID}.json"
+
+python - <<PY
+import json
+from pathlib import Path
+
+src = Path("${DATALIST_SRC}").expanduser()
+dst = Path("${TMP_DATALIST}").expanduser()
+
+d = json.loads(src.read_text())
+d["training"] = d.get("training", [])[:5]
+d["validation"] = d.get("validation", [])[:5]
+
+d["n_training"] = len(d["training"])
+d["n_validation"] = len(d["validation"])
+d["n_subjs"] = d.get("n_training", 0) + d.get("n_validation", 0)
+
+dst.write_text(json.dumps(d, indent=2))
+print(f"Wrote mini datalist to {dst}")
+PY
+
+python ${HOME}/text2glioma/scripts/offline_val_metrics.py \
+    --run_dir "$RUN_DIR" \
+    --data_dir "$DATA_DIR" \
+    --datalist "$TMP_DATALIST" \
+    --no_channel_reorder \
+    --train_samples 5 \
+    --batch_size 2 \
+    --num_workers 4 \
+    --save_samples 5 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_offmet_kl1e6_tw5.log"
