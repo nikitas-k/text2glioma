@@ -222,3 +222,76 @@ def apply_inpainting_mask(
     else:
         m = mask
     return image * (1.0 - m) + fill_value * m
+
+
+# ---------------------------------------------------------------------------
+# Longitudinal pair mask sampler (BraTS-GLI 2025)
+# ---------------------------------------------------------------------------
+
+def sample_pair_inpainting_mask(
+    image_a: torch.Tensor,
+    label_a: torch.Tensor,
+    label_b: torch.Tensor,
+    rng: Optional[np.random.Generator] = None,
+    dilation_mm: float = 18.0,
+    voxel_size_mm: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> torch.Tensor:
+    """Dilated union of (M_A ∪ M_B) — the ROI within which the future tumour
+    must live. Used for paired (visit-A → visit-B) training.
+
+    image_a : (C, D, H, W) — passed for shape only.
+    label_a : (1, D, H, W) or (D, H, W) integer tensor — visit A tumour.
+    label_b : same for visit B (the target).
+    dilation_mm : how far outside the union of A and B the ROI may extend.
+        Larger = more spatial freedom at inference; smaller = tighter prediction.
+
+    Returns (1, D, H, W) float mask in {0, 1}.
+    """
+    del rng  # deterministic given the labels; kept for signature consistency
+    brain = _brain_mask(image_a)
+    union = _label_mask(label_a) | _label_mask(label_b)
+    if not union.any():
+        # both timepoints had no tumour; fall back to a tight brain-centre blob
+        return torch.zeros((1, *brain.shape), dtype=torch.float32)
+    iters = max(1, int(round(dilation_mm / max(voxel_size_mm))))
+    dilated = binary_dilation(union, iterations=iters) & brain
+    return torch.from_numpy(dilated.astype(np.float32))[None]
+
+
+# ---------------------------------------------------------------------------
+# Trajectory classification
+# ---------------------------------------------------------------------------
+
+TRAJECTORY_CLASSES: tuple[str, ...] = ("response", "stable", "progression", "novel")
+RESPONSE_DV_THRESHOLD: float = -0.30
+PROGRESSION_DV_THRESHOLD: float = 0.30
+
+
+def classify_trajectory(
+    label_a: torch.Tensor,
+    label_b: torch.Tensor,
+    response_thresh: float = RESPONSE_DV_THRESHOLD,
+    progression_thresh: float = PROGRESSION_DV_THRESHOLD,
+) -> str:
+    """Categorise the (A -> B) trajectory from segmentation deltas.
+
+    Uses RANO-like relative volume change:
+      - response    : ΔV / V_A <= response_thresh         (default -0.30)
+      - stable      : in between
+      - progression : ΔV / V_A >= progression_thresh      (default +0.30)
+      - novel       : V_A == 0 and V_B > 0  (tumour emerged in post)
+
+    If both volumes are zero, returns 'stable' as a safe default.
+    """
+    va = float(_label_mask(label_a).sum())
+    vb = float(_label_mask(label_b).sum())
+    if va == 0 and vb == 0:
+        return "stable"
+    if va == 0 and vb > 0:
+        return "novel"
+    rel = (vb - va) / max(va, 1.0)
+    if rel <= response_thresh:
+        return "response"
+    if rel >= progression_thresh:
+        return "progression"
+    return "stable"
