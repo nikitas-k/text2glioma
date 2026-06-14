@@ -103,6 +103,11 @@ def parse_args() -> argparse.Namespace:
                     help="Override text dropout probability (default: from config).")
     p.add_argument("--cache_dir", type=str, default=None,
                     help="Cache directory for HuggingFace models / tokenizers.")
+    p.add_argument("--stage2_run_dir", type=str, default=None,
+                    help="Explicit Stage-2 output directory. When set, this is used "
+                         "verbatim and the auto-resolution from --stage1_uri is skipped. "
+                         "Useful when training multiple Stage-2 variants off the same "
+                         "Stage-1 run (e.g. checkpoint.pth vs final_model.pth).")
     return p.parse_args()
 
 
@@ -146,16 +151,23 @@ def print0(msg: str, rank: int):
         print(msg)
 
 
-def _resolve_stage2_run_dir(stage1_uri: str, run_dir_arg: str) -> Path:
+def _resolve_stage2_run_dir(
+    stage1_uri: str,
+    run_dir_arg: str,
+    explicit_override: Optional[str] = None,
+) -> Path:
     """Resolve Stage-2 run directory.
 
-    Preferred layout: infer from Stage-1 checkpoint path so runs stay grouped
-    by experiment, e.g.:
-      .../runs/v4/autoencoder_stage1/output/models/best_model.pth
-        -> .../runs/v4/ldm_stage2
-
-    Fallback: use the explicit --run_dir argument with an ldm_stage2 suffix.
+    Resolution order:
+      1. ``explicit_override`` (from ``--stage2_run_dir``) — used verbatim.
+      2. Infer from Stage-1 checkpoint path so runs stay grouped by experiment:
+           .../runs/v4/autoencoder_stage1/output/models/best_model.pth
+             -> .../runs/v4/ldm_stage2
+      3. Fallback: ``run_dir_arg`` with an ``ldm_stage2`` suffix.
     """
+    if explicit_override:
+        return Path(explicit_override).expanduser().resolve()
+
     stage1_path = Path(stage1_uri).expanduser().resolve()
 
     parts = stage1_path.parts
@@ -501,7 +513,11 @@ def main():
     # ------------------------------------------------------------------
     # Directories
     # ------------------------------------------------------------------
-    run_dir = _resolve_stage2_run_dir(args.stage1_uri, args.run_dir)
+    run_dir = _resolve_stage2_run_dir(
+        args.stage1_uri,
+        args.run_dir,
+        explicit_override=args.stage2_run_dir,
+    )
     output_dir = run_dir / "output"
     model_dir = output_dir / "models"
     log_dir = output_dir / "logs"

@@ -1,0 +1,133 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_kl1e6c
+
+# Stage-2 LDM on top of the kl=1e-6 over-fitted Stage-1 VAE, using the
+# in-flight rolling checkpoint (checkpoint.pth) instead of the post-training
+# final_model.pth — lets us kick off Stage-2 while Stage-1 is still running.
+#
+# Checkpoint loading
+#   checkpoint.pth has the format
+#     {"epoch", "state_dict", "discriminator", "optimizer_g", "optimizer_d", ...}
+#   (see training_functions.py:641-653). It is saved BEFORE unwrapping DDP, so
+#   state_dict keys carry a "module." prefix.
+#
+#   get_model(..., from_file=...) calls:
+#     _extract_state_dict_from_checkpoint  → picks "state_dict" out of the dict
+#     _normalise_autoencoder_state_dict    → strips "module." / "module.vae." /
+#                                             "vae." prefix
+#   So pointing STAGE1_URI at checkpoint.pth is supported transparently.
+#
+# Channel reconciliation
+#   train_stage2_ddp.py does a live forward-pass probe to detect the Stage-1
+#   latent channels (=6 for the kl1e6 VAE), then rewrites the UNet config to
+#   in_channels=10 (6 latent + 4 mask one-hot) and out_channels=6. The YAML
+#   hard-coded values are harmless.
+#
+# scale_factor
+#   Auto-computed from a few training batches at startup. Critical because
+#   kl_weight=1e-6 gives latent std >> 1; scale_factor=1.0 would miscalibrate
+#   the noise schedule (see /memories/repo: "LDM training" note).
+#
+# Run dir
+#   Auto-resolution from STAGE1_URI would otherwise collide with the
+#   final_model-based run (both → .../stage1_overfit_ablate_kl1e6/ldm_stage2).
+#   We pass --stage2_run_dir explicitly to override that and route this run to
+#   .../stage1_overfit_ablate_kl1e6/ldm_stage2_ckpt instead.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/autoencoder_stage1/checkpoint.pth
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+# Keep this Stage-2 run distinct from the one based on final_model.pth.
+# _resolve_stage2_run_dir() builds .../<run>/ldm_stage2 by default; we override
+# via --run_dir_suffix-style appending by passing the resolved path explicitly.
+STAGE2_RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/ldm_stage2_ckpt
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "$STAGE2_RUN_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    echo "The in-flight checkpoint.pth is written by rank 0 each val_interval."
+    echo "Wait for the first checkpoint, or fall back to final_model.pth."
+    exit 1
+fi
+
+# Sanity-check the checkpoint format before launching torchrun so we fail
+# fast (rather than after 4 GPUs have spun up and loaded the dataset).
+python - <<'PY'
+import os, sys, torch
+path = os.environ.get("STAGE1_URI")
+ckpt = torch.load(path, map_location="cpu", weights_only=False)
+if not isinstance(ckpt, dict):
+    print(f"[sanity] {path} is not a dict (got {type(ckpt).__name__})", file=sys.stderr)
+    sys.exit(2)
+keys = list(ckpt.keys())
+print(f"[sanity] checkpoint top-level keys: {keys}")
+sd_key = None
+for k in ("state_dict", "model", "autoencoder", "vae"):
+    if isinstance(ckpt.get(k), dict) and ckpt[k]:
+        sd_key = k
+        break
+if sd_key is None:
+    if all(torch.is_tensor(v) for v in ckpt.values()):
+        sd_key = "<root>"
+    else:
+        print("[sanity] no usable state_dict key found", file=sys.stderr)
+        sys.exit(3)
+sd = ckpt if sd_key == "<root>" else ckpt[sd_key]
+sample_keys = list(sd.keys())[:3]
+print(f"[sanity] using key='{sd_key}'  n_params={len(sd)}  sample={sample_keys}")
+if "epoch" in ckpt:
+    print(f"[sanity] checkpoint epoch={ckpt['epoch']}")
+PY
+SANITY_RC=$?
+if [ $SANITY_RC -ne 0 ]; then
+    echo "ERROR: Stage-1 checkpoint sanity check failed (rc=${SANITY_RC})"
+    exit $SANITY_RC
+fi
+export STAGE1_URI
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    --stage2_run_dir "$STAGE2_RUN_DIR" \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --val_interval 5 \
+    --batch_size 16 \
+    --num_epochs 1000 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_kl1e6_ckpt.log"
