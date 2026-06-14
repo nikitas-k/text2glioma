@@ -1,0 +1,74 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_kl1e6
+
+# Stage-2 LDM on top of the kl=1e-6 over-fitted Stage-1 VAE
+# (run name: stage1_overfit_ablate_kl1e6).
+#
+# Notes
+#   - Stage-1 has latent_channels=6 (not the 4 hard-coded in the YAML).
+#     train_stage2_ddp.py auto-adjusts UNet in_channels (6 latent + 4 mask
+#     one-hot = 10), out_channels (6), and config["model"]["latent_channels"]
+#     at runtime from the checkpoint, so the YAML mismatch is harmless.
+#   - scale_factor is auto-computed from a few training batches at startup
+#     (compute_scale_factor) — critical because kl_weight=1e-6 gives
+#     latent std >> 1; using scale_factor=1.0 would miscalibrate the noise
+#     schedule (see /memories/repo: "LDM training" note).
+#   - Run dir is inferred from STAGE1_URI →
+#     /g/data/vp06/$USER/.../stage1_overfit_ablate_kl1e6/ldm_stage2
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/autoencoder_stage1/final_model.pth
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    echo "Wait for stage1_overfit_ablate_kl1e6 to finish, or point STAGE1_URI"
+    echo "at the in-flight checkpoint.pth (get_model handles both formats)."
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --val_interval 5 \
+    --batch_size 16 \
+    --num_epochs 1000 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_kl1e6.log"
