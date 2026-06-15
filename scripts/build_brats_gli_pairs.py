@@ -51,7 +51,7 @@ The output schema (per pair):
     "label_b":             "...",
     "treatment_status_a":  "pre"  | "post",
     "treatment_status_b":  "pre"  | "post",
-    "trajectory":          "response" | "stable" | "progression" | "novel",
+    "trajectory":          "response" | "stable" | "progression",
     "vol_a":               int,
     "vol_b":               int,
     "rel_change":          float
@@ -92,10 +92,13 @@ def _treatment_status(tp: str) -> str:
 
 
 def _classify_from_volumes(va: int, vb: int) -> tuple[str, float]:
+    # Mirrors text2glioma.preprocessing.inpainting_masks.classify_trajectory.
+    # The 'novel' (va==0, vb>0) corner case is folded into 'progression';
+    # it is empirically absent in BraTS-GLI 2025 (no pair has vol_a == 0).
     if va == 0 and vb == 0:
         return "stable", 0.0
     if va == 0 and vb > 0:
-        return "novel", float("inf")
+        return "progression", float("inf")
     rel = (vb - va) / max(va, 1)
     if rel <= RESPONSE_DV_THRESHOLD:
         return "response", rel

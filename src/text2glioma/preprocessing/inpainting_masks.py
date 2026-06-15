@@ -262,7 +262,7 @@ def sample_pair_inpainting_mask(
 # Trajectory classification
 # ---------------------------------------------------------------------------
 
-TRAJECTORY_CLASSES: tuple[str, ...] = ("response", "stable", "progression", "novel")
+TRAJECTORY_CLASSES: tuple[str, ...] = ("response", "stable", "progression")
 RESPONSE_DV_THRESHOLD: float = -0.30
 PROGRESSION_DV_THRESHOLD: float = 0.30
 
@@ -279,16 +279,20 @@ def classify_trajectory(
       - response    : ΔV / V_A <= response_thresh         (default -0.30)
       - stable      : in between
       - progression : ΔV / V_A >= progression_thresh      (default +0.30)
-      - novel       : V_A == 0 and V_B > 0  (tumour emerged in post)
 
-    If both volumes are zero, returns 'stable' as a safe default.
+    Corner cases:
+      - V_A == 0 and V_B == 0 : 'stable' (no disease either side).
+      - V_A == 0 and V_B  > 0 : 'progression' (growth from zero baseline).
+        This 'novel-tumour' case is empirically absent in BraTS-GLI 2025
+        (no pair has vol_a == 0), but the mapping keeps the classifier
+        total and avoids reintroducing a degenerate fourth class.
     """
     va = float(_label_mask(label_a).sum())
     vb = float(_label_mask(label_b).sum())
     if va == 0 and vb == 0:
         return "stable"
     if va == 0 and vb > 0:
-        return "novel"
+        return "progression"
     rel = (vb - va) / max(va, 1.0)
     if rel <= response_thresh:
         return "response"
