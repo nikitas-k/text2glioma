@@ -13,12 +13,29 @@ For each subject with ≥2 timepoints, emit chronologically ordered pairs (A, B)
 For each pair, classify the trajectory from segmentation deltas, and stamp the
 pre-/post-op treatment status from the codes.
 
+Pair-enumeration modes (``--pair_mode``):
+  consecutive       Only adjacent timepoints in chronological order.
+                    A subject with K timepoints contributes K-1 pairs.
+                    Default. Recommended for trajectory modelling because each
+                    pair spans a single inter-scan interval, so the volume
+                    delta corresponds to one treatment / observation window.
+  baseline_anchored Pair the earliest timepoint with every later one
+                    (K-1 pairs per subject, always sharing tps[0] as A).
+                    Useful for "distance from baseline" experiments.
+  all               Enumerate every ordered pair (i < j).  K*(K-1)/2 pairs.
+                    Matches the previous behaviour of this script.  Inflates
+                    pair counts on subjects with many timepoints (e.g. one
+                    10-timepoint subject → 45 pairs) and conflates multiple
+                    intervals into a single delta — use only when explicitly
+                    needed.
+
 Usage (run on Gadi where the dataset lives):
 
   python scripts/build_brats_gli_pairs.py \
       --dataset_root /g/data/hl36/.../BraTS2025-GLI \
       --image_pattern "{sid_tp}/{sid_tp}-{mod}.nii.gz" \
       --label_pattern "{sid_tp}/{sid_tp}-seg.nii.gz" \
+      --pair_mode consecutive \
       --out datalist_brats_gli_2025_pairs.json
 
 Then split with `split_validation_80_20.py` analogue, or merge with N1510.
@@ -120,6 +137,19 @@ def _discover_subjects(root: Path) -> dict[str, list[str]]:
     return dict(by_subject)
 
 
+def _enumerate_pairs(tps: list[str], mode: str) -> list[tuple[str, str]]:
+    """Return ordered (tp_a, tp_b) pairs for one subject under the given mode."""
+    if len(tps) < 2:
+        return []
+    if mode == "consecutive":
+        return list(zip(tps[:-1], tps[1:]))
+    if mode == "baseline_anchored":
+        return [(tps[0], tp) for tp in tps[1:]]
+    if mode == "all":
+        return [(tps[i], tps[j]) for i in range(len(tps) - 1) for j in range(i + 1, len(tps))]
+    raise ValueError(f"Unknown pair_mode={mode!r}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--dataset_root", type=Path, required=True,
@@ -133,6 +163,10 @@ def main() -> None:
                    default="BraTS-GLI-{sid_tp}/BraTS-GLI-{sid_tp}-seg.nii.gz")
     p.add_argument("--out", type=Path,
                    default=ROOT / "datalist_brats_gli_2025_pairs.json")
+    p.add_argument("--pair_mode", type=str, default="consecutive",
+                   choices=("consecutive", "baseline_anchored", "all"),
+                   help="How to enumerate (A, B) pairs per subject. "
+                        "See module docstring for semantics. Default: consecutive.")
     p.add_argument("--no_traj", action="store_true",
                    help="Skip trajectory classification (no nibabel reads). "
                         "Useful for a fast structure-only audit.")
@@ -161,39 +195,44 @@ def main() -> None:
         if len(tps) < 2:
             skipped_no_pair += 1
             continue
-        # Enumerate all chronological consecutive pairs (A -> B with B later).
-        for i, tp_a in enumerate(tps[:-1]):
-            for tp_b in tps[i + 1:]:
-                sid_tp_a = f"{sid.removeprefix('BraTS-GLI-')}-{tp_a}"
-                sid_tp_b = f"{sid.removeprefix('BraTS-GLI-')}-{tp_b}"
-                imgs_a, lbl_a = _resolve_paths(args.dataset_root, sid_tp_a,
-                                               args.image_pattern, args.label_pattern)
-                imgs_b, lbl_b = _resolve_paths(args.dataset_root, sid_tp_b,
-                                               args.image_pattern, args.label_pattern)
-                if any(not p.exists() for p in (*imgs_a, *imgs_b, lbl_a, lbl_b)):
-                    skipped_missing_file += 1
-                    continue
-                if args.no_traj:
-                    traj, rel, va, vb = "unknown", 0.0, 0, 0
-                else:
-                    va = _label_voxel_count(lbl_a)
-                    vb = _label_voxel_count(lbl_b)
-                    traj, rel = _classify_from_volumes(va, vb)
-                pairs.append({
-                    "subject_id":         sid,
-                    "timepoint_a":        tp_a,
-                    "timepoint_b":        tp_b,
-                    "image_a":            [str(p) for p in imgs_a],
-                    "label_a":            str(lbl_a),
-                    "image_b":            [str(p) for p in imgs_b],
-                    "label_b":            str(lbl_b),
-                    "treatment_status_a": _treatment_status(tp_a),
-                    "treatment_status_b": _treatment_status(tp_b),
-                    "trajectory":         traj,
-                    "vol_a":              va,
-                    "vol_b":              vb,
-                    "rel_change":         rel if rel != float("inf") else None,
-                })
+        for tp_a, tp_b in _enumerate_pairs(tps, args.pair_mode):
+            sid_tp_a = f"{sid.removeprefix('BraTS-GLI-')}-{tp_a}"
+            sid_tp_b = f"{sid.removeprefix('BraTS-GLI-')}-{tp_b}"
+            imgs_a, lbl_a = _resolve_paths(args.dataset_root, sid_tp_a,
+                                           args.image_pattern, args.label_pattern)
+            imgs_b, lbl_b = _resolve_paths(args.dataset_root, sid_tp_b,
+                                           args.image_pattern, args.label_pattern)
+            if any(not p.exists() for p in (*imgs_a, *imgs_b, lbl_a, lbl_b)):
+                skipped_missing_file += 1
+                continue
+            if args.no_traj:
+                traj, rel, va, vb = "unknown", 0.0, 0, 0
+            else:
+                va = _label_voxel_count(lbl_a)
+                vb = _label_voxel_count(lbl_b)
+                traj, rel = _classify_from_volumes(va, vb)
+            pairs.append({
+                "subject_id":         sid,
+                "timepoint_a":        tp_a,
+                "timepoint_b":        tp_b,
+                "image_a":            [str(p) for p in imgs_a],
+                "label_a":            str(lbl_a),
+                "image_b":            [str(p) for p in imgs_b],
+                "label_b":            str(lbl_b),
+                "treatment_status_a": _treatment_status(tp_a),
+                "treatment_status_b": _treatment_status(tp_b),
+                "trajectory":         traj,
+                "vol_a":              va,
+                "vol_b":              vb,
+                "rel_change":         rel if rel != float("inf") else None,
+            })
+
+    treatment_direction_counts = dict(Counter(
+        f"{p['treatment_status_a']}->{p['treatment_status_b']}" for p in pairs
+    ))
+    timepoint_pair_counts = dict(Counter(
+        f"{p['timepoint_a']}->{p['timepoint_b']}" for p in pairs
+    ).most_common(20))
 
     out = {
         "pairs":  pairs,
@@ -201,17 +240,21 @@ def main() -> None:
         "n_subjects_total":      len(by_subject),
         "n_subjects_with_pairs": len(by_subject) - skipped_no_pair,
         "skipped_missing_file":  skipped_missing_file,
+        "pair_mode":             args.pair_mode,
         "trajectory_counts":     dict(Counter(p["trajectory"] for p in pairs)),
-        "timepoints_per_subject_histogram": dict(timepoint_counts),
+        "treatment_direction_counts":         treatment_direction_counts,
+        "timepoint_pair_counts_top20":        timepoint_pair_counts,
+        "timepoints_per_subject_histogram":   dict(timepoint_counts),
         "_thresholds": {
             "response_dv":    RESPONSE_DV_THRESHOLD,
             "progression_dv": PROGRESSION_DV_THRESHOLD,
         },
     }
     args.out.write_text(json.dumps(out, indent=2))
-    print(f"\nWrote {len(pairs)} pairs from {out['n_subjects_with_pairs']} subjects")
-    print(f"  trajectory: {out['trajectory_counts']}")
-    print(f"  timepoints/subject histogram: {out['timepoints_per_subject_histogram']}")
+    print(f"\nWrote {len(pairs)} pairs from {out['n_subjects_with_pairs']} subjects (mode={args.pair_mode})")
+    print(f"  trajectory:          {out['trajectory_counts']}")
+    print(f"  treatment direction: {out['treatment_direction_counts']}")
+    print(f"  timepoints/subject:  {out['timepoints_per_subject_histogram']}")
     print(f"  skipped (singleton subject): {skipped_no_pair}")
     print(f"  skipped (missing file):      {skipped_missing_file}")
     print(f"  -> {args.out}")
