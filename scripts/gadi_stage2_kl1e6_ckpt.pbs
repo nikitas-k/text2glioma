@@ -81,9 +81,12 @@ fi
 
 # Sanity-check the checkpoint format before launching torchrun so we fail
 # fast (rather than after 4 GPUs have spun up and loaded the dataset).
-python - <<'PY'
-import os, sys, torch
-path = os.environ.get("STAGE1_URI")
+# Pass STAGE1_URI as argv[1] rather than via os.environ — relying on the
+# shell variable being exported to the heredoc's child env is a footgun
+# (export at the bottom of the file is too late).
+python - "$STAGE1_URI" <<'PY'
+import sys, torch
+path = sys.argv[1]
 ckpt = torch.load(path, map_location="cpu", weights_only=False)
 if not isinstance(ckpt, dict):
     print(f"[sanity] {path} is not a dict (got {type(ckpt).__name__})", file=sys.stderr)
@@ -112,7 +115,6 @@ if [ $SANITY_RC -ne 0 ]; then
     echo "ERROR: Stage-1 checkpoint sanity check failed (rc=${SANITY_RC})"
     exit $SANITY_RC
 fi
-export STAGE1_URI
 
 torchrun --standalone --nproc_per_node=4 \
     ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
