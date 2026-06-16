@@ -5,7 +5,10 @@ model:
   perceptual_weight: 0.25
   adv_weight: 0.0
   # NOTE: kl_weight < 1e-6 causes encoder to memorize a fixed centered template
-  # on registered, center-cropped data (see stage1_overfit_ablate_attn_off_kl1e6).
+  # on registered, center-cropped data. Confirmed via decoder_prior_probe on
+  # stage1_overfit_ablate_kl1e6 (kl=1e-6 alone, full attention stack on)
+  # — b_mean shows no miniature template and per-subject reconstructions
+  # remain anatomically distinct. Attention is not causal to the artifact.
   kl_weight: 0.000001
   l1_weight: 2.0
   grad_accum_steps: 8
@@ -13,6 +16,7 @@ model:
   r1_gamma: 0.0                     # R1 gradient penalty weight (0 = disabled; try 1.0-10.0)
   kl_warmup_epochs: 0               # linearly ramp kl_weight from 0 over this many epochs (0 = disabled)
   kl_max: 0.0                       # clamp per-batch KL to this value (0 = disabled; try 1e4-1e5)
+  tumor_weight: 1.0                 # >1.0 upweights L1 inside tumor (label > 0); requires 'label' in datalist
   adaptive_adv_weight: false        # keep off for pure reconstruction objective
   #wavelet_loss_weight: 1.0          # reinforce fine detail / high-frequency recovery
   #wavelet_detail_weight: 4.0        # stronger high-freq emphasis for detail retention
