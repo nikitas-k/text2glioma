@@ -1,0 +1,70 @@
+# Pixel-space inpainting DDM config (Paper B baseline)
+#
+# Direct image-space diffusion inpainter. Trained on the SAME longitudinal
+# pairs and conditioning signal as the latent-diffusion inpainter
+# (configs/inpainting.yaml) so the comparison isolates exactly one axis:
+# latent (VAE-compressed) vs pixel.
+#
+# What is different from configs/inpainting.yaml
+#   - No Stage-1 VAE. UNet operates on raw images, mask at native resolution.
+#   - UNet in_channels  = 2 * image_channels + 1 = 9   (noisy_b + masked_a + mask)
+#     UNet out_channels = image_channels         = 4   (v / epsilon)
+#   - Narrower channel widths and fewer res-blocks per level. The LDM works
+#     on 20x28x20 latents and can afford [256, 512, 768] × 2 res-blocks;
+#     at native pixel resolution (160x224x160) those widths OOM even on
+#     80 GB cards. The pixel-DDM matches the LDM in *depth* (4 levels,
+#     8× downsample → same 20x28x20 bottleneck) but trades channel width
+#     for spatial extent.
+#
+# What is identical to configs/inpainting.yaml
+#   - DDIMScheduler with scaled_linear_beta, 1000 train steps, v-prediction.
+#   - Categorical conditioning encoder (CategoricalConditioningEncoder).
+#   - CFG dropout rates (p_traj, p_treat) and mask_weight.
+#   - Cross-attention dimension (256) so the same cond encoder slots in.
+#
+# Memory note
+#   At 160x224x160, batch 1 fits on an 80 GB H100 with this config under
+#   bf16 autocast. For 40 GB cards either (a) drop spatial_size to
+#   [128, 160, 128] (also multiples of 16 → still 8× downsample to a
+#   16x20x16 bottleneck), or (b) drop num_channels to [32, 64, 96, 128].
+
+model:
+  name: "DiffusionModelUNet"
+  base_lr: 0.0001
+  image_channels: 4                   # 4 modalities (t1c, t1n, t2f, t2w)
+  params:
+    spatial_dims: 3
+    in_channels: 9                    # 4 noisy_b + 4 masked_a + 1 mask
+    out_channels: 4                   # v / epsilon in pixel space
+    num_res_blocks: 1
+    num_channels: [64, 128, 192, 256] # 4 levels → 3 downsamples → 8× factor
+    attention_levels: [false, false, false, true]   # attention only at 20x28x20 bottleneck
+    with_conditioning: true
+    resblock_updown: true
+    cross_attention_dim: 256          # MUST match cond encoder embed_dim
+    num_head_channels: [0, 0, 0, 64]
+    upcast_attention: true
+    use_flash_attention: false
+    transformer_num_layers: 1
+    norm_num_groups: 32
+    norm_eps: 1.0e-6
+
+scheduler:
+  name: "DDIMScheduler"
+  params:
+    schedule: "scaled_linear_beta"
+    num_train_timesteps: 1000
+    beta_start: 0.0015
+    beta_end: 0.0205
+    prediction_type: "v_prediction"
+    clip_sample: false
+
+cfg:
+  p_traj: 0.20
+  p_treat: 0.20
+
+loss:
+  mask_weight: 4.0
+
+data:
+  spatial_size: [160, 224, 160]
