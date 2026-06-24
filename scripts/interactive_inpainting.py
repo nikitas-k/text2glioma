@@ -106,6 +106,24 @@ FOLD = "testing"  # change to 'validation' or 'training' if you want
 records = prepare_pair_records(datalist[FOLD])
 print(f"  {FOLD}: {len(records)} pairs")
 
+# Optional: filter by treatment direction.
+# Note: This datalist is 100% longitudinal pairs (different timepoints).
+# To filter, set FILTER_DIRECTION to one of: 'pre->post', 'post->post', 'pre->pre', 'post->pre'.
+# Set to None to keep all pairs.
+FILTER_DIRECTION = None   # e.g. 'pre->post', 'post->post', 'pre->pre', 'post->pre', or None
+if FILTER_DIRECTION:
+    dir_map = {
+        'pre->post': (0, 1),
+        'post->post': (1, 1),
+        'pre->pre': (0, 0),
+        'post->pre': (1, 0),
+    }
+    if FILTER_DIRECTION in dir_map:
+        ta_target, tb_target = dir_map[FILTER_DIRECTION]
+        records = [r for r in records 
+                  if int(r['treatment_a']) == ta_target and int(r['treatment_b']) == tb_target]
+        print(f"  after filtering (direction={FILTER_DIRECTION}): {len(records)} pairs")
+
 DILATION_MM = 18.0
 SPATIAL_SIZE = tuple(config.get("data", {}).get("spatial_size", (160, 224, 160)))
 xforms = build_pair_transforms(training=False, dilation_mm=DILATION_MM,
@@ -511,16 +529,16 @@ for batch in p2p_train_loader:
         break
 
     masked_a_b = batch["masked_image_a"].to(DEVICE, non_blocking=True)
-    image_b_b  = batch["image_b"].to(DEVICE, non_blocking=True)
+    image_a_b  = batch["image_a"].to(DEVICE, non_blocking=True)
     mask_b     = batch["mask"].to(DEVICE, non_blocking=True)
 
-    masked_a_b, image_b_b, mask_b = _resize_volumes(masked_a_b, image_b_b, mask_b, size=P2P_SPATIAL)
+    masked_a_b, image_a_b, mask_b = _resize_volumes(masked_a_b, image_a_b, mask_b, size=P2P_SPATIAL)
     cond = torch.cat([masked_a_b, mask_b], dim=1)   # (B, 5, D, H, W)
 
     # --- D step ----------------------------------------------------
     with torch.no_grad():
         fake = G(cond)
-    real_pair = torch.cat([cond, image_b_b], dim=1)
+    real_pair = torch.cat([cond, image_a_b], dim=1)
     fake_pair = torch.cat([cond, fake], dim=1)
     d_real = D(real_pair)
     d_fake = D(fake_pair)
@@ -535,7 +553,7 @@ for batch in p2p_train_loader:
     fake_pair = torch.cat([cond, fake], dim=1)
     d_fake_for_g = D(fake_pair)
     loss_G_gan = bce(d_fake_for_g, torch.ones_like(d_fake_for_g))
-    loss_G_l1 = l1(fake, image_b_b)
+    loss_G_l1 = l1(fake, image_a_b)
     loss_G = loss_G_gan + P2P_L1_WEIGHT * loss_G_l1
     opt_G.zero_grad(set_to_none=True)
     loss_G.backward()
@@ -562,30 +580,44 @@ ax.set_xlabel("iter"); ax.set_ylabel("loss"); ax.legend(); ax.grid(True, alpha=0
 plt.tight_layout(); plt.show()
 
 # %% Pix2pix — inference on the currently-selected sample
+def _match_batch_dim(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Repeat singleton batch to match ref batch; otherwise require equal batch."""
+    if x.shape[0] == ref.shape[0]:
+        return x
+    if x.shape[0] == 1:
+        reps = [ref.shape[0]] + [1] * (x.ndim - 1)
+        return x.repeat(*reps)
+    raise ValueError(f"Batch mismatch: got {x.shape[0]} vs ref {ref.shape[0]}")
+
+
 G.eval()
 with torch.no_grad():
-    masked_a_lr, image_b_lr, mask_lr = _resize_volumes(
-        masked_a, image_b_real, mask, size=P2P_SPATIAL,
+    # Ensure all tensors share the same batch dim before concat.
+    image_a_infer = _match_batch_dim(image_a_real, masked_a)
+    mask_infer = _match_batch_dim(mask, masked_a)
+
+    masked_a_lr, image_a_lr, mask_lr = _resize_volumes(
+        masked_a, image_a_infer, mask_infer, size=P2P_SPATIAL,
     )
     cond_lr = torch.cat([masked_a_lr, mask_lr], dim=1)
     pred_lr = G(cond_lr)
     # Up-sample back to original spatial size for an apples-to-apples SSIM.
     pix2pix_pred = F.interpolate(pred_lr, size=SPATIAL_SIZE, mode="trilinear", align_corners=False)
 
-ssim_p2p = compute_ssim_per_modality(pix2pix_pred[0], image_b_real[0], mask=mask[0])
+ssim_p2p = compute_ssim_per_modality(pix2pix_pred[0], image_a_real[0], mask=mask[0])
 ssim_ldm = compute_ssim_per_modality(last_pred[0], image_b_real[0], mask=mask[0])
 
 print(f"\n--- Sample {SAMPLE_IDX}  ({IDX_TO_TRAJECTORY[int(true_traj)]}) ---")
-print(f"  pix2pix   global={ssim_p2p['ssim_global_mean']:.4f}  roi={ssim_p2p['ssim_roi_mean']:.4f}")
-print(f"  LDM       global={ssim_ldm['ssim_global_mean']:.4f}  roi={ssim_ldm['ssim_roi_mean']:.4f}")
+print(f"  pix2pix (same-time)   global={ssim_p2p['ssim_global_mean']:.4f}  roi={ssim_p2p['ssim_roi_mean']:.4f}")
+print(f"  LDM (future-time)     global={ssim_ldm['ssim_global_mean']:.4f}  roi={ssim_ldm['ssim_roi_mean']:.4f}")
 
 show_slices(
     {"masked_a":      _to_np(masked_a),
      "pix2pix":       _to_np(pix2pix_pred),
-     "LDM":           _to_np(last_pred),
-     "real_b":        _to_np(image_b_real)},
+     "LDM (future)":  _to_np(last_pred),
+     "real_a":        _to_np(image_a_real)},
     slice_axis=2, modality=0, mask_np=mask_np,
-    suptitle=f"pix2pix vs LDM   sample {SAMPLE_IDX}   "
+    suptitle=f"pix2pix (recon a) vs LDM (pred b)   sample {SAMPLE_IDX}   "
              f"traj={IDX_TO_TRAJECTORY[int(true_traj)]}",
 )
 

@@ -358,17 +358,25 @@ class FIDAccumulator:
         return np.concatenate(feats, axis=0)
 
     def _features_3d(self, vol: torch.Tensor, mask: torch.Tensor) -> np.ndarray:
-        # crop tumour bbox to remove background
+        # crop tumour bbox to remove background.
+        # vol is either [H,W,D] (single channel) or [C,H,W,D] (multi-channel,
+        # used by the 3d_autoencoder backbone whose encoder expects C>1).
         nz = torch.nonzero(mask > 0, as_tuple=False)
         if nz.numel() == 0:
             return np.zeros((0, 0))
         mins = nz.min(0).values.tolist()
         maxs = (nz.max(0).values + 1).tolist()
-        crop = vol[mins[0]:maxs[0], mins[1]:maxs[1], mins[2]:maxs[2]]
-        # pad to multiple of 16 (covers both encoder /8 and MedicalNet maxpool/strides)
-        pad = [(0, (-s) % 16) for s in crop.shape]
-        crop = F.pad(crop, [p for ab in pad[::-1] for p in ab])
-        crop = crop.unsqueeze(0).unsqueeze(0).to(self.device).float()
+        if vol.ndim == 4:
+            crop = vol[:, mins[0]:maxs[0], mins[1]:maxs[1], mins[2]:maxs[2]]
+            spatial = crop.shape[1:]
+            pad = [(0, (-s) % 16) for s in spatial]
+            crop = F.pad(crop, [p for ab in pad[::-1] for p in ab])
+            crop = crop.unsqueeze(0).to(self.device).float()           # [1,C,H,W,D]
+        else:
+            crop = vol[mins[0]:maxs[0], mins[1]:maxs[1], mins[2]:maxs[2]]
+            pad = [(0, (-s) % 16) for s in crop.shape]
+            crop = F.pad(crop, [p for ab in pad[::-1] for p in ab])
+            crop = crop.unsqueeze(0).unsqueeze(0).to(self.device).float()  # [1,1,H,W,D]
         if self.mode == "3d_medicalnet":
             # MedicalNet expects z-scored input (trained on z-scored CT/MR volumes).
             m, s = crop.mean(), crop.std().clamp_min(1e-6)
