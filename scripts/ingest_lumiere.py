@@ -204,6 +204,31 @@ def discover_sessions(root: Path) -> list[dict]:
     return sessions
 
 
+def discover_sessions_from_registered(reg_dir: Path) -> list[dict]:
+    """Discover sessions from the flat ``register_lumiere_to_sri24.py`` output.
+
+    Layout expected: ``reg_dir/<Patient-XXX>_<session>/{T1,T1CE,T2,FLAIR,label}.nii.gz``.
+    Used as a fallback when ``--lumiere_root`` does not contain the original
+    per-subject/per-session BIDS-like tree.
+    """
+    sessions: list[dict] = []
+    for case_dir in sorted(reg_dir.iterdir()):
+        if not case_dir.is_dir():
+            continue
+        name = case_dir.name
+        m = re.match(r"(?i)(Patient[-_]?\d+)[_-](.+)$", name)
+        if m is None:
+            continue
+        subject, session = m.group(1), m.group(2)
+        files = {mod: case_dir / f"{mod}.nii.gz" for mod in PIPELINE_MODALITIES}
+        files["label"] = case_dir / "label.nii.gz"
+        if not all(p.exists() for p in files.values()):
+            log.warning("Registered case %s missing one or more files; skipped.", case_dir)
+            continue
+        sessions.append({**files, "subject": subject, "session": session})
+    return sessions
+
+
 # ---------------------------------------------------------------------------
 # Per-session ingestion
 # ---------------------------------------------------------------------------
@@ -352,14 +377,21 @@ def main() -> None:
     (out / "images").mkdir(exist_ok=True)
     (out / "labels").mkdir(exist_ok=True)
 
+    reg_dir = args.registered_dir.expanduser().resolve() if args.registered_dir else None
+    if reg_dir is not None and not reg_dir.is_dir():
+        sys.exit(f"--registered_dir not found: {reg_dir}")
+
     log.info("Discovering sessions under %s ...", root)
     sessions = discover_sessions(root)
+    if not sessions and reg_dir is not None:
+        log.info("No sessions found under --lumiere_root; falling back to --registered_dir layout (%s) ...", reg_dir)
+        sessions = discover_sessions_from_registered(reg_dir)
     if args.limit:
         sessions = sessions[: args.limit]
     log.info("Found %d sessions across %d subjects.",
              len(sessions), len({s["subject"] for s in sessions}))
     if not sessions:
-        sys.exit("No LUMIERE sessions discovered — check --lumiere_root layout.")
+        sys.exit("No LUMIERE sessions discovered — check --lumiere_root layout (or --registered_dir).")
 
     vasari_kwargs = {}
     if args.atlas_dir is not None:
@@ -370,10 +402,6 @@ def main() -> None:
         log.warning("Reducing workers to 1 — VASARI-auto is not always fork-safe. "
                     "Use --no_prompts to ingest in parallel and run prompt generation as a second pass.")
         args.workers = 1
-
-    reg_dir = args.registered_dir.expanduser().resolve() if args.registered_dir else None
-    if reg_dir is not None and not reg_dir.is_dir():
-        sys.exit(f"--registered_dir not found: {reg_dir}")
 
     if args.workers > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
