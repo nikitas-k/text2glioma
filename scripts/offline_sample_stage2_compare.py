@@ -89,6 +89,17 @@ def parse_args() -> argparse.Namespace:
             "datalist provides a label. Use to probe text-only generation."
         ),
     )
+    p.add_argument("--latent_smooth_sigma", type=float, default=0.0,
+                   help="Isotropic Gaussian blur sigma (in latent voxels) applied "
+                        "to the sampled latent. 0 disables. Diagnoses whether the "
+                        "stage-1 latent's high-frequency content is what breaks the "
+                        "LDM's output (see §3.5 diagnostic).")
+    p.add_argument("--latent_smooth_mode", type=str, default="end",
+                   choices=["end", "each_step"],
+                   help="'end' blurs the final latent once before decoding. "
+                        "'each_step' blurs inside the diffusion loop after every "
+                        "scheduler.step() so the trajectory stays in a smoother "
+                        "latent subspace throughout denoising.")
     return p.parse_args()
 
 
@@ -166,6 +177,43 @@ def _infer_stage1_latent_channels(checkpoint_path: str) -> None:
     return None
 
 
+def _gaussian_kernel_1d(sigma: float, dtype: torch.dtype, device: torch.device,
+                        truncate: float = 4.0) -> torch.Tensor:
+    """Return a normalised 1-D Gaussian kernel of appropriate length."""
+    r = max(1, int(truncate * sigma + 0.5))
+    x = torch.arange(-r, r + 1, dtype=torch.float32, device=device)
+    k = torch.exp(-(x * x) / (2.0 * sigma * sigma))
+    k = k / k.sum()
+    return k.to(dtype)
+
+
+def _gaussian_blur_3d(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Isotropic 3-D Gaussian blur applied per channel to an NCDHW tensor.
+
+    Separable: three 1-D convolutions along D, H, W with reflection padding.
+    Returns a tensor with the same shape / dtype / device as `x`. When
+    ``sigma <= 0`` returns ``x`` unchanged.
+    """
+    if sigma <= 0:
+        return x
+    if x.ndim != 5:
+        raise ValueError(f"expected NCDHW, got shape {tuple(x.shape)}")
+    k = _gaussian_kernel_1d(sigma, x.dtype, x.device)
+    r = k.numel() // 2
+    C = x.shape[1]
+    for spatial_dim in (2, 3, 4):
+        kshape = [1, 1, 1, 1, 1]
+        kshape[spatial_dim] = k.numel()
+        kernel = k.reshape(kshape).expand(C, 1, *kshape[2:]).contiguous()
+        pad = [0, 0, 0, 0, 0, 0]  # padding for (W_l, W_r, H_l, H_r, D_l, D_r)
+        pad_index = 2 * (4 - spatial_dim)
+        pad[pad_index] = r
+        pad[pad_index + 1] = r
+        x = F.pad(x, pad, mode="replicate")
+        x = F.conv3d(x, kernel, groups=C)
+    return x
+
+
 def _sample_latent(
     model,
     scheduler,
@@ -177,6 +225,8 @@ def _sample_latent(
     uncond_mask_cond: torch.Tensor = None,
     guidance_scale: float = 1.0,
     cfg_mode: str = "text_only",
+    smooth_sigma: float = 0.0,
+    smooth_each_step: bool = False,
 ):
     """Run DDIM sampling with optional classifier-free guidance.
 
@@ -223,6 +273,10 @@ def _sample_latent(
             model_input = torch.cat([latent, mask_cond], dim=1)
             noise_pred = model(x=model_input, timesteps=ts, context=prompt_embeds)
         latent, _ = scheduler.step(noise_pred, t, latent)
+        if smooth_each_step and smooth_sigma > 0:
+            latent = _gaussian_blur_3d(latent, smooth_sigma)
+    if smooth_sigma > 0 and not smooth_each_step:
+        latent = _gaussian_blur_3d(latent, smooth_sigma)
     return latent
 
 
@@ -561,6 +615,7 @@ def main() -> None:
             uncond_embeds = _encode_text(tokenizer, text_encoder, "", device)
 
             scheduler.set_timesteps(min(args.steps, scheduler.num_train_timesteps))
+            _smooth_each_step = args.latent_smooth_mode == "each_step"
             latent_cond = _sample_latent(
                 model,
                 scheduler,
@@ -572,8 +627,14 @@ def main() -> None:
                 uncond_mask_cond=mask_uncond,
                 guidance_scale=float(args.cfg_scale),
                 cfg_mode=str(args.cfg_mode),
+                smooth_sigma=float(args.latent_smooth_sigma),
+                smooth_each_step=_smooth_each_step,
             )
-            latent_uncond = _sample_latent(model, scheduler, latent0, mask_uncond, uncond_embeds, device)
+            latent_uncond = _sample_latent(
+                model, scheduler, latent0, mask_uncond, uncond_embeds, device,
+                smooth_sigma=float(args.latent_smooth_sigma),
+                smooth_each_step=_smooth_each_step,
+            )
 
             x_cond = stage1.decode(latent_cond / scale_factor).float().clamp(0.0, 1.0)
             x_uncond = stage1.decode(latent_uncond / scale_factor).float().clamp(0.0, 1.0)
