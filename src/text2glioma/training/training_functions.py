@@ -1192,6 +1192,7 @@ def train_ldm(
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
+    joint_dropout_p: float = 0.0,
     latent_channels: int = 3,
     warmup_epochs: int = 10,
     ema_decay: float = 0.9999,
@@ -1292,6 +1293,7 @@ def train_ldm(
             scale_factor=scale_factor,
             num_mask_classes=num_mask_classes,
             mask_dropout_p=mask_dropout_p,
+            joint_dropout_p=joint_dropout_p,
             lr_scheduler=lr_scheduler,
             ema_model=ema_model,
             ema_decay=ema_decay,
@@ -1360,6 +1362,7 @@ def train_epoch_ldm(
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     mask_dropout_p: float = 0.2,
+    joint_dropout_p: float = 0.0,
     max_grad_norm: float = 1.0,
     lr_scheduler: Any = None,
     ema_model: Any = None,
@@ -1402,7 +1405,22 @@ def train_epoch_ldm(
                 ).to(device)
 
             # Prepare text conditioning (with independent text dropout)
-            cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
+            cond, uncond = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
+
+            # Joint uncond dropout: on top of the independent text/mask dropouts,
+            # force BOTH branches to their uncond state on a per-sample Bernoulli
+            # draw with probability joint_dropout_p. This directly trains the
+            # fully-unconditional pathway that classifier-free guidance uses at
+            # inference and prevents mode collapse of the unconditional prior
+            # (see §3.5 in the manuscript).
+            if joint_dropout_p > 0.0:
+                B = images.size(0)
+                joint_drop = (torch.rand(B, device=device) < joint_dropout_p)
+                if joint_drop.any():
+                    m_mask = joint_drop.view(B, 1, 1, 1, 1).to(mask_cond.dtype)
+                    mask_cond = mask_cond * (1.0 - m_mask)
+                    m_text = joint_drop.view(B, 1, 1).to(cond.dtype)
+                    cond = cond * (1.0 - m_text) + uncond * m_text
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)

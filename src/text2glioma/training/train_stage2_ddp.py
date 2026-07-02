@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", action="store_true", default=False,
                     help="Resume from checkpoint.pth in run_dir.")
+    p.add_argument("--warm_start_stage2", type=str, default=None,
+                    help="Load LDM (and EMA if present) weights from this path, then "
+                         "start a fresh training run (epoch 0, fresh optimizer). Use to "
+                         "seed a schedule-change experiment (e.g. joint-dropout retrain) "
+                         "from an existing checkpoint without inheriting its optimizer state.")
     p.add_argument("--dist_backend", type=str, default="nccl",
                     choices=["nccl", "gloo"],
                     help="Distributed backend (nccl for GPU, gloo for CPU/fallback).")
@@ -101,6 +106,10 @@ def parse_args() -> argparse.Namespace:
                     help="Override mask dropout probability (default: from config).")
     p.add_argument("--text_dropout_p", type=float, default=None,
                     help="Override text dropout probability (default: from config).")
+    p.add_argument("--joint_dropout_p", type=float, default=0.0,
+                    help="Probability of forcing BOTH text and mask to their uncond "
+                         "state on the same sample, applied on top of the independent "
+                         "dropouts. Directly trains the fully-unconditional CFG branch.")
     p.add_argument("--cache_dir", type=str, default=None,
                     help="Cache directory for HuggingFace models / tokenizers.")
     p.add_argument("--stage2_run_dir", type=str, default=None,
@@ -551,6 +560,19 @@ def main():
         if ema_state_dict is not None:
             print0("  Loaded EMA state from checkpoint.", rank)
         print0(f"Resumed at epoch {start_epoch}", rank)
+    elif args.warm_start_stage2:
+        seed_path = Path(args.warm_start_stage2).expanduser().resolve()
+        if not seed_path.is_file():
+            raise FileNotFoundError(f"--warm_start_stage2 not found: {seed_path}")
+        print0(f"Warm-starting LDM weights from {seed_path} (fresh optimizer, epoch 0)", rank)
+        seed = torch.load(seed_path, map_location="cpu")
+        ldm_state = seed.get("diffusion", seed.get("ldm_state_dict", seed))
+        if not isinstance(ldm_state, dict):
+            raise KeyError("warm-start checkpoint has no recognisable state_dict payload.")
+        ldm.load_state_dict(ldm_state)
+        ema_state_dict = seed.get("ema")
+        if ema_state_dict is not None:
+            print0("  Loaded EMA state from warm-start checkpoint.", rank)
     else:
         print0("Starting fresh training.", rank)
 
@@ -594,6 +616,7 @@ def main():
         scale_factor=scale_factor,
         num_mask_classes=num_mask_classes,
         mask_dropout_p=mask_dropout,
+        joint_dropout_p=float(args.joint_dropout_p),
         latent_channels=stage1_latent_ch,
         ema_state_dict=ema_state_dict,
     )

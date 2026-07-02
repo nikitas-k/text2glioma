@@ -129,7 +129,7 @@ torchrun --standalone --nproc_per_node=4 \
     --text_dropout_p 0.35 \
     --mask_dropout_p 0.30 \
     --val_interval 5 \
-    --batch_size 16 \
+    --batch_size 8 \
     --num_epochs 1000 \
     --pin_memory \
     2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_kl1e6_ckpt.log"

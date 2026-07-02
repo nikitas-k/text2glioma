@@ -1,0 +1,89 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=12:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_kl1e6_jd
+
+# MaxFeat (kl=1e-6) stage-2 LDM, resumed with joint-dropout to strengthen
+# the fully-unconditional CFG branch. Tests §3.5 hypothesis: is the
+# occipital-lesion attractor a training-regime artefact (P(both dropped)
+# was ~10% under the original 0.35/0.30 independent schedule) or is it
+# intrinsic to the KL=1e-6 latent geometry?
+#
+# Schedule change:
+#   original: text_dropout=0.35, mask_dropout=0.30, independent
+#             -> P(both dropped) = 0.105
+#   this run: same independent dropouts + joint_dropout_p=0.30 on top
+#             -> P(both dropped) >= 0.30 + 0.105*(1 - 0.30) = ~0.37
+#
+# Outputs go to a NEW run subdir (`stage1_overfit_ablate_kl1e6_jointdrop`)
+# so the original checkpoint at `stage1_overfit_ablate_kl1e6/inpainting_ldm/`
+# is preserved. Rendering scripts point at the new subdir via
+# --stage2_run_dir once training finishes.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/autoencoder_stage1/checkpoint.pth
+# Original text-conditional stage-2 checkpoint we resume the diffusion
+# weights from. NB: this is `ldm_stage2_ckpt/`, NOT `inpainting_ldm/`
+# (which holds the categorical Paper-B inpainting LDM).
+STAGE2_SEED_CKPT=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/ldm_stage2_ckpt/best_model.pth
+# New output dir for the joint-dropout variant.
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+STAGE2_RUN_DIR=${RUN_DIR}/stage1_overfit_ablate_kl1e6/ldm_stage2_jd_resume
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$STAGE2_RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE2_SEED_CKPT}" ]; then
+    echo "ERROR: Original MaxFeat text-conditional stage-2 checkpoint not found at ${STAGE2_SEED_CKPT}"
+    echo "(Expected the ldm_stage2_ckpt/ output, not the inpainting_ldm/ output.)"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    --stage2_run_dir "$STAGE2_RUN_DIR" \
+    --warm_start_stage2 "$STAGE2_SEED_CKPT" \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --joint_dropout_p 0.30 \
+    --val_interval 5 \
+    --batch_size 16 \
+    --num_epochs 300 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_kl1e6_jd.log"
