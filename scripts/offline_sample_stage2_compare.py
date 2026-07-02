@@ -55,6 +55,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--no_channel_reorder", action="store_true", default=False)
+    p.add_argument(
+        "--custom_prompt",
+        type=str,
+        default=None,
+        help=(
+            "If set, override each case's text field with this string before "
+            "sampling. Use together with --output_suffix to avoid overwriting "
+            "the standard cfg-sweep output filenames."
+        ),
+    )
+    p.add_argument(
+        "--output_suffix",
+        type=str,
+        default=None,
+        help=(
+            "Optional slug appended to output filenames "
+            "(e.g. sample_cond_native_{case_idx}_{suffix}.nii.gz). "
+            "Recommended whenever --custom_prompt is used."
+        ),
+    )
     return p.parse_args()
 
 
@@ -467,6 +487,8 @@ def main() -> None:
         transform = _build_val_transform(channel_reorder=not args.no_channel_reorder, has_label=has_label)
         batch = transform(item)
 
+        _suffix = f"_{args.output_suffix}" if args.output_suffix else ""
+
         image = batch["image"].unsqueeze(0).to(device)
         label = batch["label"].unsqueeze(0).to(device) if has_label else None
 
@@ -475,6 +497,8 @@ def main() -> None:
             fallback = "findings" if args.text_field == "impression" else "impression"
             prompt = item.get(fallback, "")
         prompt = str(prompt)
+        if args.custom_prompt is not None:
+            prompt = str(args.custom_prompt)
 
         with torch.no_grad():
             z = stage1(image)
@@ -600,19 +624,19 @@ def main() -> None:
         )
         fig.tight_layout(rect=[0, 0, 1, max(0.0, 1 - 0.018 * _n_prompt_lines)])
 
-        out_png = output_dir / f"sample_compare_{case_i:04d}.png"
+        out_png = output_dir / f"sample_compare_{case_i:04d}{_suffix}.png"
         fig.savefig(out_png, dpi=300)
         plt.close(fig)
 
-        out_nifti_cond = output_dir / f"sample_cond_{case_i:04d}.nii.gz"
-        out_nifti_uncond = output_dir / f"sample_uncond_{case_i:04d}.nii.gz"
+        out_nifti_cond = output_dir / f"sample_cond_{case_i:04d}{_suffix}.nii.gz"
+        out_nifti_uncond = output_dir / f"sample_uncond_{case_i:04d}{_suffix}.nii.gz"
         _save_sample_nifti(x_cond, item["image"], out_nifti_cond)
         _save_sample_nifti(x_uncond, item["image"], out_nifti_uncond)
 
         proc_affine = _get_tensor_affine(batch["image"])
-        out_nifti_orig_proc = output_dir / f"sample_original_processed_{case_i:04d}.nii.gz"
-        out_nifti_cond_native = output_dir / f"sample_cond_native_{case_i:04d}.nii.gz"
-        out_nifti_uncond_native = output_dir / f"sample_uncond_native_{case_i:04d}.nii.gz"
+        out_nifti_orig_proc = output_dir / f"sample_original_processed_{case_i:04d}{_suffix}.nii.gz"
+        out_nifti_cond_native = output_dir / f"sample_cond_native_{case_i:04d}{_suffix}.nii.gz"
+        out_nifti_uncond_native = output_dir / f"sample_uncond_native_{case_i:04d}{_suffix}.nii.gz"
         _save_tensor_nifti_native(image, out_nifti_orig_proc, proc_affine)
         _save_tensor_nifti_native(x_cond, out_nifti_cond_native, proc_affine)
         _save_tensor_nifti_native(x_uncond, out_nifti_uncond_native, proc_affine)
