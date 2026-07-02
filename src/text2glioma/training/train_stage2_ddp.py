@@ -547,13 +547,18 @@ def main():
     ckpt_path = run_dir / "checkpoint.pth"
 
     ema_state_dict = None
+    # ldm may already be DDP-wrapped, in which case its state_dict keys are
+    # prefixed with `module.`. Checkpoints saved by this trainer use
+    # raw_model.state_dict() (no prefix), so load into the underlying module
+    # to keep resume and warm-start robust to wrapping.
+    raw_ldm = ldm.module if hasattr(ldm, "module") else ldm
     if args.resume and ckpt_path.exists():
         print0(f"Resuming from {ckpt_path}", rank)
         ckpt = torch.load(ckpt_path, map_location="cpu")
         ldm_state = ckpt.get("diffusion", ckpt.get("ldm_state_dict"))
         if ldm_state is None:
             raise KeyError("Checkpoint missing 'diffusion' or 'ldm_state_dict' key.")
-        ldm.load_state_dict(ldm_state)
+        raw_ldm.load_state_dict(ldm_state)
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"]
         ema_state_dict = ckpt.get("ema")
@@ -569,7 +574,7 @@ def main():
         ldm_state = seed.get("diffusion", seed.get("ldm_state_dict", seed))
         if not isinstance(ldm_state, dict):
             raise KeyError("warm-start checkpoint has no recognisable state_dict payload.")
-        ldm.load_state_dict(ldm_state)
+        raw_ldm.load_state_dict(ldm_state)
         ema_state_dict = seed.get("ema")
         if ema_state_dict is not None:
             print0("  Loaded EMA state from warm-start checkpoint.", rank)
