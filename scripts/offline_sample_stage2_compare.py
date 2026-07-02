@@ -75,6 +75,15 @@ def parse_args() -> argparse.Namespace:
             "Recommended whenever --custom_prompt is used."
         ),
     )
+    p.add_argument(
+        "--drop_mask",
+        action="store_true",
+        default=False,
+        help=(
+            "If set, zero-out the mask conditioning channels even when the "
+            "datalist provides a label. Use to probe text-only generation."
+        ),
+    )
     return p.parse_args()
 
 
@@ -518,6 +527,8 @@ def main() -> None:
                     dropout_p=0.0,
                 ).to(device)
             else:
+                mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
+            if args.drop_mask:
                 mask_cond = torch.zeros((1, num_mask_classes) + latent_spatial, device=device)
             mask_uncond = torch.zeros_like(mask_cond)
 
