@@ -1,0 +1,99 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_kl1e6_whitened
+
+# MaxFeat (kl=1e-6) stage-2 LDM retrained with a channel-wise ZCA whitening
+# layer sitting between stage-1 and the LDM. Tests §3.5 hypothesis: MaxFeat's
+# low-KL latent is diffusion-unfriendly *because* it is un-whitened (non-
+# isotropic in channel space). If whitening alone gets val/loss meaningfully
+# below 1.0 (matching BrainLDM-FT's convergence behaviour), the trainability
+# gap between the two stage-1 designs is closed at inference time without
+# retraining stage-1.
+#
+# Prereq: run scripts/fit_latent_whitening.py first to produce the .pt file
+# pointed at by LATENT_WHITENING below.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/autoencoder_stage1/checkpoint.pth
+STAGE2_SEED_CKPT=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/ldm_stage2_ckpt/best_model.pth
+LATENT_WHITENING=/g/data/vp06/$USER/text2glioma_train/runs/stage1_overfit_ablate_kl1e6/autoencoder_stage1/latent_whitening.pt
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+STAGE2_RUN_DIR=${RUN_DIR}/stage1_overfit_ablate_kl1e6/ldm_stage2_whitened
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$STAGE2_RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    exit 1
+fi
+
+if [ ! -f "${LATENT_WHITENING}" ]; then
+    echo "ERROR: Whitening file not found at ${LATENT_WHITENING}"
+    echo "Fit it first with:"
+    echo "  python ~/text2glioma/scripts/fit_latent_whitening.py \\"
+    echo "      --datalist ${DATALIST} \\"
+    echo "      --stage1_config ${STAGE1_CONFIG} \\"
+    echo "      --stage1_uri ${STAGE1_URI} \\"
+    echo "      --num_subjects 200 \\"
+    echo "      --out ${LATENT_WHITENING}"
+    exit 1
+fi
+
+# Warm-start from the existing stage-2 weights so we exploit any conditional-
+# path learning; the whitening will simply reshape the input latent distribution.
+# If MaxFeat's LDM is truly not learning, warm-starting is harmless and we save
+# a few hundred epochs. If the LDM was learning but at the wrong scale, this
+# reuses that progress.
+WARM_ARG=""
+if [ -f "${STAGE2_SEED_CKPT}" ]; then
+    WARM_ARG="--warm_start_stage2 ${STAGE2_SEED_CKPT}"
+    echo "Warm-starting stage-2 weights from ${STAGE2_SEED_CKPT}"
+else
+    echo "No seed checkpoint; training stage-2 from scratch."
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    --stage2_run_dir "$STAGE2_RUN_DIR" \
+    --latent_whitening_path "$LATENT_WHITENING" \
+    ${WARM_ARG} \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --val_interval 5 \
+    --batch_size 8 \
+    --num_epochs 500 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_kl1e6_whitened.log"

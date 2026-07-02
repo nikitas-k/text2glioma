@@ -44,6 +44,7 @@ from text2glioma.utils import (
     load_config,
     load_text_encoder_and_tokenizer,
     stage1_ify,
+    WhiteningStage1Wrapper,
 )
 
 warnings.filterwarnings("ignore")
@@ -99,6 +100,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scale_factor", type=float, default=None,
                     help="Latent scale factor. If omitted, auto-computed as "
                          "1/std(latents) over training data (recommended).")
+    p.add_argument("--latent_whitening_path", type=str, default=None,
+                    help="Path to a whitening .pt produced by "
+                         "scripts/fit_latent_whitening.py. If set, the stage-1 "
+                         "encoder is wrapped so it emits ZCA-whitened latents "
+                         "and its decode() inverts the whitening. --scale_factor "
+                         "is forced to 1.0 when this is set (whitening handles "
+                         "normalisation).")
     p.add_argument("--train_spec", type=str, default="impression",
                     choices=["impression", "findings"],
                     help="Text field used for conditioning.")
@@ -382,6 +390,29 @@ def main():
     stage1 = stage1.to(device)
 
     # ------------------------------------------------------------------
+    # Optional: wrap Stage-1 with a ZCA whitening layer so the LDM sees
+    # a latent whose channels are decorrelated and unit-variance. Fitted
+    # once offline via scripts/fit_latent_whitening.py.
+    # ------------------------------------------------------------------
+    if args.latent_whitening_path is not None:
+        whit_path = Path(args.latent_whitening_path).expanduser().resolve()
+        if not whit_path.is_file():
+            raise FileNotFoundError(f"--latent_whitening_path not found: {whit_path}")
+        print0(f"Loading latent whitening from {whit_path}", rank)
+        whit = torch.load(str(whit_path), map_location="cpu")
+        stage1 = WhiteningStage1Wrapper(
+            stage1,
+            mu=whit["mu"].to(device),
+            W=whit["W"].to(device),
+            W_inv=whit["W_inv"].to(device),
+        ).to(device)
+        stage1.eval()
+        for param in stage1.parameters():
+            param.requires_grad = False
+        print0(f"  latent_channels = {stage1.latent_channels}, "
+               f"fit on {whit.get('n_samples', '?')} voxels, kind={whit.get('kind', '?')}", rank)
+
+    # ------------------------------------------------------------------
     # Reconcile latent channels between Stage-1 checkpoint and Stage-2
     # ------------------------------------------------------------------
     num_mask_classes = int(config.get("mask", {}).get("num_classes", 4))
@@ -509,7 +540,11 @@ def main():
     # ------------------------------------------------------------------
     # Latent scale factor
     # ------------------------------------------------------------------
-    if args.scale_factor is not None:
+    if args.latent_whitening_path is not None:
+        # Whitening enforces unit-variance channels; scale_factor should be 1.
+        scale_factor = 1.0
+        print0("Whitening active: forcing scale_factor = 1.0", rank)
+    elif args.scale_factor is not None:
         scale_factor = args.scale_factor
         print0(f"Using user-specified scale_factor = {scale_factor:.4f}", rank)
     else:

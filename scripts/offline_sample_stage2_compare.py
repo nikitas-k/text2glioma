@@ -19,6 +19,7 @@ from text2glioma.utils import (
     load_text_encoder_and_tokenizer,
     prepare_mask_conditioning,
     stage1_ify,
+    WhiteningStage1Wrapper,
 )
 
 
@@ -42,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--scale_factor", type=float, default=None, help="Override scale factor.")
+    p.add_argument("--latent_whitening_path", type=str, default=None,
+                   help="Optional whitening .pt (from scripts/fit_latent_whitening.py). "
+                        "When set, stage-1 is wrapped so its output is whitened and "
+                        "decode() inverts the whitening. scale_factor is forced to 1.0.")
     p.add_argument("--cfg_scale", type=float, default=1.0, help="Classifier-free guidance scale for conditioned sampling.")
     p.add_argument(
         "--cfg_mode",
@@ -428,6 +433,23 @@ def main() -> None:
     for p in stage1.parameters():
         p.requires_grad = False
 
+    # Wrap stage-1 with whitening if requested (must be applied *before* any
+    # channel-count probing so downstream code sees the whitened channel count).
+    if args.latent_whitening_path is not None:
+        whit_path = Path(args.latent_whitening_path).expanduser().resolve()
+        if not whit_path.is_file():
+            raise FileNotFoundError(f"--latent_whitening_path not found: {whit_path}")
+        print(f"Loading latent whitening from {whit_path}")
+        whit = torch.load(str(whit_path), map_location="cpu")
+        stage1 = WhiteningStage1Wrapper(
+            stage1,
+            mu=whit["mu"].to(device),
+            W=whit["W"].to(device),
+            W_inv=whit["W_inv"].to(device),
+        ).to(device).eval()
+        for p in stage1.parameters():
+            p.requires_grad = False
+
     # Probe actual latent channel count through Stage1Wrapper forward.
     # This is robust when a 1-ch Pinaya VAE is wrapped to process 4-ch inputs
     # channel-wise (effective latent channels become 4 * base_latent_channels).
@@ -511,7 +533,10 @@ def main() -> None:
 
         with torch.no_grad():
             z = stage1(image)
-            if args.scale_factor is None:
+            if args.latent_whitening_path is not None:
+                # Whitening enforces unit-variance channels; keep sf = 1.0.
+                scale_factor = 1.0
+            elif args.scale_factor is None:
                 scale_factor = 1.0 / max(z.std().item(), 1e-8)
             else:
                 scale_factor = float(args.scale_factor)

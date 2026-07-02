@@ -1440,6 +1440,15 @@ def train_epoch_ldm(
             mse = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
             mse = mse.mean(dim=list(range(1, mse.ndim)))  # [B]
 
+            # Unweighted mean MSE — a convergence indicator whose absolute value
+            # is comparable across stage-1 configurations. The min-SNR-γ
+            # weighted loss below sits near a fixed floor (~E_t[w(t)]) whenever
+            # the model output is near zero, which happens when the latent is
+            # hard for the LDM to model (see §3.5 discussion of KL vs
+            # trainability); loss_raw does not have that floor and trends down
+            # only when the model is genuinely learning to denoise.
+            raw_mse = mse.mean().detach()
+
             # Min-SNR-γ weighting (Hang et al., 2023) — down-weights
             # high-noise timesteps that produce noisy, unhelpful gradients.
             if min_snr_weights is not None:
@@ -1448,7 +1457,7 @@ def train_epoch_ldm(
             else:
                 loss = mse.mean()
 
-        losses = OrderedDict(loss=loss)
+        losses = OrderedDict(loss=loss, loss_raw=raw_mse)
 
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -1469,7 +1478,12 @@ def train_epoch_ldm(
             for k, v in losses.items():
                 writer.add_scalar(f"{k}", v.item(), epoch * len(loader) + step)
 
-        pbar.set_postfix({"epoch": epoch, "loss": f"{losses['loss'].item():.5f}", "lr": f"{get_lr(optimizer):.6f}"})
+        pbar.set_postfix({
+            "epoch": epoch,
+            "loss": f"{losses['loss'].item():.5f}",
+            "raw": f"{losses['loss_raw'].item():.5f}",
+            "lr": f"{get_lr(optimizer):.6f}",
+        })
 
 
 def _get_reports_from_batch(batch: dict[str, Any], text_field: str):

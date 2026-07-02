@@ -129,6 +129,64 @@ class Stage1Wrapper(nn.Module):
             f"Stage-1 latent channel mismatch: base latent={base_latent}, got {z.shape[1]}"
         )
 
+
+class WhiteningStage1Wrapper(nn.Module):
+    """Wrap a Stage1Wrapper (or compatible) with a channel-wise ZCA whitening.
+
+    On encode, replaces `z = stage1(x)` with `z_w = W @ (z - mu)` per voxel.
+    On decode, inverts: `stage1.decode(W_inv @ z_w + mu)`.
+
+    Whitening tensors are registered as non-persistent buffers so they follow
+    device / dtype conversions but do not clash with a downstream state_dict
+    load. Mismatched channel counts raise a clear error at construction time.
+    """
+
+    def __init__(self, stage1: nn.Module, mu: torch.Tensor,
+                 W: torch.Tensor, W_inv: torch.Tensor):
+        super().__init__()
+        if mu.ndim != 1:
+            raise ValueError(f"mu must be 1-D, got shape {tuple(mu.shape)}")
+        C = mu.shape[0]
+        if W.shape != (C, C) or W_inv.shape != (C, C):
+            raise ValueError(
+                f"W/W_inv must be [{C},{C}], got W={tuple(W.shape)} "
+                f"W_inv={tuple(W_inv.shape)}"
+            )
+        self.stage1 = stage1
+        self.register_buffer("mu", mu.float())
+        self.register_buffer("W", W.float())
+        self.register_buffer("W_inv", W_inv.float())
+        self.latent_channels = int(C)
+
+    def _whiten(self, z: torch.Tensor) -> torch.Tensor:
+        C = z.shape[1]
+        if C != self.latent_channels:
+            raise ValueError(
+                f"latent channels {C} != whitening channels {self.latent_channels}"
+            )
+        mu = self.mu.view(1, C, 1, 1, 1).to(z.dtype)
+        Wm = self.W.to(z.dtype)
+        z_centered = z - mu
+        # z_w[b, c, x, y, z] = sum_d W[c, d] * (z[b, d, x, y, z] - mu[d])
+        return torch.einsum("cd, bdxyz -> bcxyz", Wm, z_centered)
+
+    def _unwhiten(self, z_w: torch.Tensor) -> torch.Tensor:
+        C = z_w.shape[1]
+        if C != self.latent_channels:
+            raise ValueError(
+                f"latent channels {C} != whitening channels {self.latent_channels}"
+            )
+        mu = self.mu.view(1, C, 1, 1, 1).to(z_w.dtype)
+        Wi = self.W_inv.to(z_w.dtype)
+        z = torch.einsum("cd, bdxyz -> bcxyz", Wi, z_w)
+        return z + mu
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._whiten(self.stage1(x))
+
+    def decode(self, z_w: torch.Tensor) -> torch.Tensor:
+        return self.stage1.decode(self._unwhiten(z_w))
+
 # ── Mask conditioning utilities ──────────────────────────────────────────────
 
 def masks_to_onehot(labels: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
