@@ -1,0 +1,62 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stg1_lc3
+
+# MaxFeat variant: kl_weight=1e-6, NO free bits, latent_channels=3.
+# Isolates the channel-reduction effect from the free-bits effect. Combined
+# with the existing MaxFeat run (lc=6, free_bits=0) and the two free-bits
+# runs (lc=6+FB, lc=3+FB) this forms a 2x2 factorial on the two levers:
+#
+#                       free_bits = 0                free_bits = 0.05
+#     latent_ch = 6     stage1_overfit_ablate_kl1e6  stage1_kl1e6_freebits_lc6
+#     latent_ch = 3     stage1_kl1e6_lc3   (this)    stage1_kl1e6_freebits_lc3
+#
+# Comparing the marginal effect of each lever isolates whether channel
+# reduction alone (vs channel reduction + free bits) is sufficient to
+# restore diffusion trainability.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
+    --config "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --run_name stage1_kl1e6_lc3 \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --no_augment \
+    --pin_memory \
+    --set model.kl_weight=1e-6 \
+          model.params.latent_channels=3 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_stage1_kl1e6_lc3.log"
