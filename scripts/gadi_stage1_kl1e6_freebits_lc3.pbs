@@ -1,0 +1,69 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stg1_fb_lc3
+
+# MaxFeat variant: kl_weight=1e-6 with per-channel free bits (0.05 nats)
+# AND latent_channels reduced from 6 -> 3 to match Pinaya's channel count.
+#
+# Story hypothesis (per §3.5 diagnostic): MaxFeat's diffusion-hostility
+# stems in part from packing near-image-level detail across too many
+# latent channels (effective rank 6/6 = fully utilised, no compression).
+# Matching Pinaya's 3 channels forces the encoder to compress. Combined
+# with the model's larger backbone (num_channels=[96, 192, 384, 512] vs
+# Pinaya's [64, 128, 128, 128]), the target regime is:
+#
+#     "Pinaya-shaped latent, MaxFeat-scale encoder"
+#     -> similar diffusion trainability to BrainLDM-FT
+#     -> reconstruction fidelity that exceeds vanilla Pinaya thanks to
+#        the 2x wider backbone
+#
+# Independent from the lc=6 companion (gadi_stage1_kl1e6_freebits_lc6.pbs);
+# comparing the two isolates the channel-count contribution from the
+# free-bits contribution.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
+    --config "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --run_name stage1_kl1e6_freebits_lc3 \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --no_augment \
+    --pin_memory \
+    --set model.kl_weight=1e-6 \
+          model.free_bits=0.05 \
+          model.params.latent_channels=3 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_stage1_kl1e6_freebits_lc3.log"

@@ -515,6 +515,7 @@ def main():
         wavelet_detail_weight=config["model"].get("wavelet_detail_weight", 2.0),
         wavelet_name=config["model"].get("wavelet_name", "haar"),
         tumor_weight=tumor_weight,
+        free_bits=float(config["model"].get("free_bits", 0.0)),
     )
     print0(f"Training finished.  Best val loss: {val_loss:.4f}", rank)
     cleanup()

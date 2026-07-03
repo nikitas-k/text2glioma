@@ -523,6 +523,7 @@ def train_autoencoder(
     adv_anneal_epochs: int = 0,
     early_stop_patience: int = 0,
     tumor_weight: float = 1.0,
+    free_bits: float = 0.0,
     # Deprecated — kept for backwards compatibility with queued jobs.
     # GradScaler is no longer used (bf16 doesn't need loss scaling).
     scaler_g=None,
@@ -605,6 +606,7 @@ def train_autoencoder(
             pretrained_decoder_weights=pretrained_decoder_weights,
             conditional_disc=conditional_disc,
             tumor_weight=tumor_weight,
+            free_bits=free_bits,
         )
 
         # Step LR schedulers (per-epoch)
@@ -698,6 +700,7 @@ def train_epoch_autoencoder(
     pretrained_decoder_weights: Optional[dict] = None,
     conditional_disc: bool = False,
     tumor_weight: float = 1.0,
+    free_bits: float = 0.0,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler_g=None,
     scaler_d=None,
@@ -901,8 +904,28 @@ def train_epoch_autoencoder(
             else:
                 w_loss = torch.tensor(0.0, device=device)
 
-            kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3, 4])
-            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+            kl_per_voxel = 0.5 * (
+                z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1
+            )  # [B, C, D, H, W]
+
+            if free_bits > 0.0:
+                # Free-bits (Kingma et al. 2016): compute the *mean* per-
+                # channel KL across batch and spatial dims, then apply a
+                # per-channel floor `free_bits` (nats) before summing over
+                # channels. Any channel whose mean KL is below the floor
+                # contributes zero gradient to the encoder — preventing
+                # posterior collapse without over-regularising channels
+                # that are already informative. The result is rescaled to
+                # match the loss magnitude of the un-clamped path so
+                # kl_weight does not need retuning.
+                kl_per_channel_mean = kl_per_voxel.mean(dim=[0, 2, 3, 4])  # [C]
+                kl_per_channel_mean = torch.clamp(kl_per_channel_mean, min=free_bits)
+                n_voxels = (
+                    z_mu.shape[2] * z_mu.shape[3] * z_mu.shape[4]
+                )
+                kl_loss = kl_per_channel_mean.sum() * n_voxels
+            else:
+                kl_loss = kl_per_voxel.sum(dim=[1, 2, 3, 4]).mean()
 
             # Clamp KL to prevent individual-batch spikes from
             # overwhelming the loss (common at init or with large kl_weight).
