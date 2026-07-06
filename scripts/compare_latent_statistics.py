@@ -49,9 +49,21 @@ MODELS = {
         "stage1_config": "configs/stage1_pinaya_decoder_only.yaml",
         "stage1_ckpt":   "pinaya_decoder_only_v5_no_disc/autoencoder_stage1/final_model.pth",
     },
-    "MaxFeat": {
+    "MaxFeat_LC=6": {
         "stage1_config": "configs/stage1.yaml",
         "stage1_ckpt":   "stage1_overfit_ablate_kl1e6/autoencoder_stage1/checkpoint.pth",
+    },
+    "MaxFeat_LC=3": {
+        "stage1_config": "configs/stage1.yaml",
+        "stage1_ckpt":   "stage1_kl1e6_lc3/autoencoder_stage1/checkpoint.pth",
+    },
+    "MaxFeat_FB_LC=6": {
+        "stage1_config": "configs/stage1.yaml",
+        "stage1_ckpt":   "stage1_kl1e6_freebits_lc6/autoencoder_stage1/checkpoint.pth",
+    },
+    "MaxFeat_FB_LC=3": {
+        "stage1_config": "configs/stage1.yaml",
+        "stage1_ckpt":   "stage1_kl1e6_freebits_lc3/autoencoder_stage1/checkpoint.pth",
     },
 }
 
