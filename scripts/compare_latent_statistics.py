@@ -47,7 +47,7 @@ MSD_TO_T2G = [1, 2, 3, 0]
 MODELS = {
     "BrainLDM-FT": {
         "stage1_config": "configs/stage1_pinaya_decoder_only.yaml",
-        "stage1_ckpt":   "pinaya_decoder_only_v5_no_disc/autoencoder_stage1/final_model.pth",
+        "stage1_ckpt":   "pinaya_decoder_only_v5_no_disc/autoencoder_stage1/checkpoint.pth",
     },
     "MaxFeat_LC=6": {
         "stage1_config": "configs/stage1.yaml",
