@@ -60,7 +60,7 @@ torchrun --standalone --nproc_per_node=4 \
     --run_name stage1_kl1e6_freebits_permod_lc3 \
     --datalist "$DATALIST" \
     --no_channel_reorder \
-    --batch_size 1 \
+    --batch_size 2 \
     --num_epochs 1500 \
     --val_interval 10 \
     --no_augment \
