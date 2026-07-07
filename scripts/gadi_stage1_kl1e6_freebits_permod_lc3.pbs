@@ -1,0 +1,73 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=48:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N stg1_permod
+#
+# Per-modality MaxFeat: 1-channel-in / 1-channel-out VAE with 3-channel
+# latent, applied *independently* to each of the 4 modalities via
+# Stage1Wrapper's per-channel fallback path (base_in == 1 && x.C > 1).
+# Concatenated latent shape is 12 channels (3 per modality x 4 modalities),
+# matching BrainLDM-FT's latent geometry exactly.
+#
+# Key architectural distinction from the joint-encoding lc=3 variant:
+# per-modality independence forces cross-modality anatomic redundancy
+# into the latent (BrainLDM-FT off-diag corr = 0.37, effective rank
+# 5.6/12), which the diffusion diagnostic identified as the load-
+# bearing property for LDM trainability. The wider backbone
+# (num_channels=[96, 192, 384, 512]) preserves MaxFeat's fidelity
+# envelope. If this stage-1 reproduces BrainLDM-FT's radial-power
+# profile while retaining MaxFeat's reconstruction advantage, the
+# fidelity-vs-trainability frontier is closed on both axes.
+#
+# Discriminator (in_channels=4) is unchanged — it always sees the
+# reconstructed 4-channel image, regardless of encoder architecture.
+# Perceptual loss is already per-channel (see training_functions.py
+# comment), so no change needed there.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$RUN_DIR" "$DATA_DIR" "${HOME}/job_logs" "$TORCH_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage1_ddp.py \
+    --config "$CONFIG" \
+    --run_dir "$RUN_DIR" \
+    --run_name stage1_kl1e6_freebits_permod_lc3 \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --batch_size 1 \
+    --num_epochs 1500 \
+    --val_interval 10 \
+    --no_augment \
+    --pin_memory \
+    --set model.kl_weight=1e-6 \
+          model.free_bits=0.05 \
+          model.params.in_channels=1 \
+          model.params.out_channels=1 \
+          model.params.latent_channels=3 \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_stage1_kl1e6_freebits_permod_lc3.log"

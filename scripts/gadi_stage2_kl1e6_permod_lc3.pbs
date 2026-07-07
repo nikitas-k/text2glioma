@@ -1,0 +1,71 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_permod
+
+# Stage-2 LDM on top of the per-modality MaxFeat stage-1
+# (stage1_kl1e6_freebits_permod_lc3). If the per-modality-independent
+# encoder is what makes BrainLDM-FT's latent diffusion-friendly, this
+# stage-2 should converge just like BrainLDM-FT's (val/loss well below
+# 1.0) while reconstruction quality matches or exceeds MaxFeat's
+# joint-encoded lc=6 model — closing the fidelity-vs-trainability
+# frontier on the architectural axis rather than via post-hoc fixes.
+#
+# The effective latent dimensionality at this stage-2's input is 12
+# (3 latent channels x 4 modalities), same as BrainLDM-FT. The stage-2
+# UNet auto-adjusts to that at runtime.
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_kl1e6_permod_lc3/autoencoder_stage1/checkpoint.pth
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+STAGE2_RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/stage1_kl1e6_freebits_permod_lc3/ldm_stage2
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N1510.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "$STAGE2_RUN_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --run_dir "$RUN_DIR" \
+    --stage2_run_dir "$STAGE2_RUN_DIR" \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --val_interval 5 \
+    --batch_size 8 \
+    --num_epochs 1000 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_permod.log"
