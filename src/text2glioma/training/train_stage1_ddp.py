@@ -41,7 +41,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from text2glioma.training.training_functions import train_autoencoder, MultiScalePatchDiscriminator
-from text2glioma.utils import apply_spectral_norm, get_model, load_config
+from text2glioma.utils import apply_spectral_norm, get_model, load_config, PerChannelVAEWrapper
 
 warnings.filterwarnings("ignore")
 
@@ -410,6 +410,21 @@ def main():
     # ------------------------------------------------------------------
     model_type = config["model"]["name"]
     model = get_model(model_type, config, args.pretrained)
+
+    # Per-modality VAE: when the config declares in_channels=1 but the data
+    # tensors carry N>1 modality channels, wrap so each modality is encoded
+    # independently and the outputs are channel-concatenated. This preserves
+    # the (reconstruction, z_mu, z_sigma) return contract downstream code
+    # depends on. Auto-detected from the config so no CLI change is needed.
+    _cfg_in_ch = int(config.get("model", {}).get("params", {}).get("in_channels", 4))
+    _data_ch = 4  # BraTS / N=1510 datalist convention (T1, T1CE, T2, FLAIR)
+    if _cfg_in_ch == 1 and _data_ch > 1:
+        print0(
+            f"[stage1] wrapping AutoencoderKL(in_channels=1) with "
+            f"PerChannelVAEWrapper(n_channels={_data_ch}) for {_data_ch}-modality data",
+            rank,
+        )
+        model = PerChannelVAEWrapper(model, n_channels=_data_ch)
 
     discriminator = PatchDiscriminator(**config["discriminator"]["params"])
     n_disc_scales = config["discriminator"].get("n_scales", 1)

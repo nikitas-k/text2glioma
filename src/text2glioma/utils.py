@@ -187,6 +187,68 @@ class WhiteningStage1Wrapper(nn.Module):
     def decode(self, z_w: torch.Tensor) -> torch.Tensor:
         return self.stage1.decode(self._unwhiten(z_w))
 
+
+class PerChannelVAEWrapper(nn.Module):
+    """Wraps a 1-channel AutoencoderKL so it can be trained on multi-channel data.
+
+    Runs the wrapped VAE independently on each input channel, concatenates the
+    per-channel outputs along the channel dim, and returns the training-time
+    triple ``(reconstruction, z_mu, z_sigma)`` expected by
+    ``_train_autoencoder_one_epoch`` and ``eval_autoencoder``. Distinct from
+    ``Stage1Wrapper``, which only exposes the ``forward -> latent`` /
+    ``decode(latent) -> image`` interface used at *inference* time.
+
+    Gradient checkpointing is applied per channel-pass so only one modality's
+    activations are held at a time; the other three are recomputed during
+    backward. This lets 4x 160x224x160 forward-backward passes fit on a single
+    H200 GPU at batch size 1.
+    """
+
+    def __init__(self, vae: nn.Module, n_channels: int = 4):
+        super().__init__()
+        self.vae = vae
+        self.n_channels = n_channels
+
+    @property
+    def decoder(self):
+        return self.vae.decoder
+
+    @property
+    def encoder(self):
+        return self.vae.encoder
+
+    def forward(self, x: torch.Tensor):
+        B, C, D, H, W = x.shape
+        if C != self.n_channels:
+            raise ValueError(
+                f"PerChannelVAEWrapper expected {self.n_channels} input channels, "
+                f"got {C}"
+            )
+        recons, z_mus, z_sigmas = [], [], []
+
+        def _run_vae(x_ch):
+            return self.vae(x=x_ch)
+
+        for c in range(C):
+            x_ch = x[:, c:c + 1]
+            r, zm, zs = torch.utils.checkpoint.checkpoint(
+                _run_vae, x_ch, use_reentrant=False,
+            )
+            recons.append(r)
+            z_mus.append(zm)
+            z_sigmas.append(zs)
+        return (
+            torch.cat(recons, dim=1),
+            torch.cat(z_mus, dim=1),
+            torch.cat(z_sigmas, dim=1),
+        )
+
+    def encode(self, x: torch.Tensor):
+        return self.vae.encode(x)
+
+    def decode(self, z: torch.Tensor):
+        return self.vae.decode(z)
+
 # ── Mask conditioning utilities ──────────────────────────────────────────────
 
 def masks_to_onehot(labels: torch.Tensor, num_classes: int = 4) -> torch.Tensor:
