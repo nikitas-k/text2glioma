@@ -377,6 +377,47 @@ def main():
     # Stage-1 VAE (frozen)
     # ------------------------------------------------------------------
     print0("Loading frozen Stage-1 VAE …", rank)
+
+    # The stage-1 config's default latent_channels can disagree with the
+    # actual checkpoint (e.g. a lc=3 stage-1 loaded via the default lc=6
+    # stage1.yaml). Read the true value from the checkpoint before model
+    # construction so load_state_dict does not fail on channel-size
+    # mismatches at quant_conv_mu / post_quant_conv / encoder.blocks[-1]
+    # / decoder.blocks[0].
+    try:
+        _ckpt_probe = torch.load(args.stage1_uri, map_location="cpu", weights_only=False)
+        _sd = _ckpt_probe
+        if isinstance(_ckpt_probe, dict):
+            for _k in ("state_dict", "model", "autoencoder", "vae"):
+                if isinstance(_ckpt_probe.get(_k), dict) and _ckpt_probe[_k]:
+                    _sd = _ckpt_probe[_k]
+                    break
+        _inferred_lc = None
+        for _k in ("quant_conv_mu.conv.weight",
+                   "module.quant_conv_mu.conv.weight",
+                   "model.quant_conv_mu.conv.weight"):
+            _w = _sd.get(_k) if isinstance(_sd, dict) else None
+            if torch.is_tensor(_w):
+                _inferred_lc = int(_w.shape[0])
+                break
+        if _inferred_lc is not None:
+            _cfg_lc = int(
+                stage1_config.get("model", {}).get("params", {}).get("latent_channels", -1)
+            )
+            if _cfg_lc != _inferred_lc:
+                print0(
+                    f"[stage1] latent_channels mismatch: config={_cfg_lc}, "
+                    f"checkpoint={_inferred_lc}. Overriding config with checkpoint value.",
+                    rank,
+                )
+                stage1_config.setdefault("model", {}).setdefault("params", {})[
+                    "latent_channels"
+                ] = _inferred_lc
+        del _ckpt_probe, _sd
+    except Exception as _e:  # pragma: no cover — best-effort probe
+        print0(f"[stage1] latent_channels probe failed ({_e!r}); "
+               "falling back to config value.", rank)
+
     stage1 = stage1_ify(
         get_model(
             model_type="AutoencoderKL",
