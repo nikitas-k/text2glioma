@@ -1,0 +1,72 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=180GB
+#PBS -l jobfs=100GB
+#PBS -q gpuvolta
+#PBS -P vp06
+#PBS -l walltime=12:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+
+# Run scripts/run_synthesise_nonsense.py for the case indices in
+# ${T2G_CASE_INDICES} (comma-separated or range, e.g. "0-4" or "0,5,10").
+# Submit block jobs via scripts/submit_synthesise_nonsense_blocks.sh, which
+# sets both -N (job name) and -v T2G_CASE_INDICES per block.
+
+set -euo pipefail
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/${USER}/venv/monai/bin/activate
+
+REPO=${HOME}/text2glioma
+RUNS_ROOT=/g/data/vp06/${USER}/text2glioma_train/runs
+DATALIST=${REPO}/datalist_N1510.json
+
+export TEXT2GLIOMA_REPO=${REPO}
+export TEXT2GLIOMA_RUNS=${RUNS_ROOT}
+export TORCH_HOME=${RUNS_ROOT}/cache
+export HF_HOME=${RUNS_ROOT}/cache/huggingface
+mkdir -p "${TORCH_HOME}" "${HF_HOME}" "${HOME}/job_logs"
+
+# CASE_INDICES: passed via -v T2G_CASE_INDICES=... at qsub time. Default to 0
+# so the job is a smoke test if the variable isn't set (fail-safe). The
+# submitter encodes commas as underscores because qsub -v uses commas
+# internally as a KEY=VAL separator; run_synthesise_nonsense.py normalises
+# both delimiters, and CFG_VALUES is similarly recoded.
+CASE_INDICES=${T2G_CASE_INDICES:-0}
+STEPS=${T2G_STEPS:-50}
+CFG_VALUES=${T2G_CFG_VALUES:-1.0_4.5_7.0}
+SEED=${T2G_SEED:-42}
+
+# Decode underscores back to commas for the CLI.
+CASE_INDICES_CSV=${CASE_INDICES//_/,}
+CFG_VALUES_CSV=${CFG_VALUES//_/,}
+
+echo "=== gadi_synthesise_nonsense_block ==="
+echo "PBS_JOBID    : ${PBS_JOBID:-unset}"
+echo "CASE_INDICES : ${CASE_INDICES_CSV}"
+echo "CFG_VALUES   : ${CFG_VALUES_CSV}"
+echo "STEPS        : ${STEPS}"
+echo "SEED         : ${SEED}"
+echo "RUNS_ROOT    : ${RUNS_ROOT}"
+echo "DATALIST     : ${DATALIST}"
+nvidia-smi || true
+
+cd "${REPO}"
+
+python scripts/run_synthesise_nonsense.py \
+    --runs_root    "${RUNS_ROOT}" \
+    --datalist     "${DATALIST}" \
+    --split        validation \
+    --case_indices "${CASE_INDICES_CSV}" \
+    --cfg_values   "${CFG_VALUES_CSV}" \
+    --steps        "${STEPS}" \
+    --seed         "${SEED}"
+
+echo "=== done ==="

@@ -449,6 +449,14 @@ def _save_tensor_nifti_native(
 def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    # Hard determinism: without these, cuDNN heuristics and non-deterministic
+    # reductions (e.g. flash attention atomics) can make the uncond trajectory
+    # differ across subprocesses launched with different --cfg_scale values,
+    # even though the uncond forward itself takes no CFG-dependent input.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -616,6 +624,20 @@ def main() -> None:
 
             scheduler.set_timesteps(min(args.steps, scheduler.num_train_timesteps))
             _smooth_each_step = args.latent_smooth_mode == "each_step"
+            # Compute the unconditional trajectory FIRST so its output cannot
+            # depend on --cfg_scale. Non-deterministic CUDA kernels (flash
+            # attention, cuDNN algorithm selection) and allocator/workspace
+            # reuse mean that running latent_cond first perturbs the model's
+            # numerical behaviour on the subsequent uncond forward, even after
+            # scheduler.set_timesteps and torch.manual_seed resets.
+            torch.manual_seed(args.seed)
+            latent_uncond = _sample_latent(
+                model, scheduler, latent0, mask_uncond, uncond_embeds, device,
+                smooth_sigma=float(args.latent_smooth_sigma),
+                smooth_each_step=_smooth_each_step,
+            )
+            scheduler.set_timesteps(min(args.steps, scheduler.num_train_timesteps))
+            torch.manual_seed(args.seed)
             latent_cond = _sample_latent(
                 model,
                 scheduler,
@@ -627,11 +649,6 @@ def main() -> None:
                 uncond_mask_cond=mask_uncond,
                 guidance_scale=float(args.cfg_scale),
                 cfg_mode=str(args.cfg_mode),
-                smooth_sigma=float(args.latent_smooth_sigma),
-                smooth_each_step=_smooth_each_step,
-            )
-            latent_uncond = _sample_latent(
-                model, scheduler, latent0, mask_uncond, uncond_embeds, device,
                 smooth_sigma=float(args.latent_smooth_sigma),
                 smooth_each_step=_smooth_each_step,
             )
