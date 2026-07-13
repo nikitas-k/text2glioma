@@ -49,15 +49,15 @@ MODELS = {
         "run_dir":       "pinaya_decoder_only_v5_no_disc",
         "stage1_config": REPO / "configs" / "stage1_pinaya_decoder_only.yaml",
         "stage2_config": REPO / "configs" / "ldm_radbert_pinaya_decoder_only.yaml",
-        "stage1_ckpt":   None,  # resolved lazily against --runs_root
-        "stage2_ckpt":   None,
+        "stage1_ckpt":   RUNS_ROOT_DEFAULT / "pinaya_decoder_only_v5_no_disc" / "autoencoder_stage1" / "final_model.pth",
+        "stage2_ckpt":   RUNS_ROOT_DEFAULT / "pinaya_decoder_only_v5_no_disc" / "ldm_stage2" / "best_model.pth",
     },
     "MaxFeat": {
         "run_dir":       "stage1_overfit_ablate_kl1e6",
         "stage1_config": REPO / "configs" / "stage1.yaml",
         "stage2_config": REPO / "configs" / "ldm_radbert.yaml",
-        "stage1_ckpt":   None,
-        "stage2_ckpt":   None,
+        "stage1_ckpt":   RUNS_ROOT_DEFAULT / "stage1_overfit_ablate_kl1e6" / "autoencoder_stage1" / "checkpoint.pth",
+        "stage2_ckpt":   RUNS_ROOT_DEFAULT / "stage1_overfit_ablate_kl1e6" / "ldm_stage2" / "best_model.pth",
     },
 }
 
@@ -224,6 +224,8 @@ def main() -> None:
         print(f"\n=== case_idx={case_idx} subj={subj} ===", flush=True)
 
         for model_name, model_cfg in resolved.items():
+            if model_name == "BrainLDM-FT":
+                continue # workaround as BrainLDM-FT ran, but MaxFeat did not, so we only have MaxFeat outputs for the nonsense prompts
             for cfg in cfg_values:
                 for drop_mask in (False, True):
                     # Real-impression reference.
