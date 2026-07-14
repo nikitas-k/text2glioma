@@ -209,6 +209,14 @@ def _w1_in_mask(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> list[float]:
     return out
 
 
+# Global switch: when True, skip the expensive whole-volume SSIM calls in
+# both _emit_pair and _emit_interaction. Whole-volume 1-SSIM is dominated
+# by background and is not used by any of the additive-decomposition
+# estimators (||T||, ||M||, ||I||) or by Figures 5/6. Set via --skip_global_ssim
+# on the CLI.
+SKIP_GLOBAL_SSIM: bool = False
+
+
 def _emit_pair(rows: list[dict], model_name: str, cfg: float, subject_id: str,
                case_idx: int, quantity: str,
                prompt_a: str, prompt_b: str, a: np.ndarray, b: np.ndarray,
@@ -217,21 +225,25 @@ def _emit_pair(rows: list[dict], model_name: str, cfg: float, subject_id: str,
     (a, b) sample pair and append one row per modality per metric.
 
     Metrics emitted:
-      * ``{quantity}_1mSSIM``          (whole-volume 1 - SSIM)
+      * ``{quantity}_1mSSIM``          (whole-volume 1 - SSIM; skipped when
+                                        SKIP_GLOBAL_SSIM is True -- rows are
+                                        omitted entirely, not filled with NaN)
       * ``{quantity}_1mSSIM_in_mask``  (in-mask bbox 1 - SSIM)
       * ``{quantity}_L1_in_mask``      (per-voxel L1 restricted to mask)
       * ``{quantity}_W1_in_mask``      (per-modality 1-Wasserstein on the
                                         mask-region intensity distribution)
     """
-    ssim_glob = _pair_ssim_per_modality(a, b)
     ssim_in   = _pair_ssim_in_mask_per_modality(a, b, mask)
     l1_in     = _in_mask_l1(a, b, mask)
     w1_in     = _w1_in_mask(a, b, mask)
+    ssim_glob = ([float("nan")] * len(MODALITIES) if SKIP_GLOBAL_SSIM
+                 else _pair_ssim_per_modality(a, b))
     for mod, sg, si, l, w in zip(MODALITIES, ssim_glob, ssim_in, l1_in, w1_in):
         base = dict(model=model_name, cfg=cfg, subject_id=subject_id,
                     case_idx=case_idx, prompt_a=prompt_a, prompt_b=prompt_b,
                     modality=mod)
-        rows.append({**base, "quantity": f"{quantity}_1mSSIM",         "value": 1.0 - sg if np.isfinite(sg) else float("nan")})
+        if not SKIP_GLOBAL_SSIM:
+            rows.append({**base, "quantity": f"{quantity}_1mSSIM",     "value": 1.0 - sg if np.isfinite(sg) else float("nan")})
         rows.append({**base, "quantity": f"{quantity}_1mSSIM_in_mask", "value": 1.0 - si if np.isfinite(si) else float("nan")})
         rows.append({**base, "quantity": f"{quantity}_L1_in_mask",     "value": l})
         rows.append({**base, "quantity": f"{quantity}_W1_in_mask",     "value": w})
@@ -262,16 +274,17 @@ def _emit_interaction(rows: list[dict], model_name: str, cfg: float,
     [0, 1] due to the subtraction; we clamp for SSIM but not for L1/W1.
     """
     x_add = x_pi_off + x_empty_on - x_0
-    x_add_ssim = np.clip(x_add, 0.0, 1.0)
-    ssim_glob = _pair_ssim_per_modality(x_pi_on, x_add_ssim)
-    ssim_in   = _pair_ssim_in_mask_per_modality(x_pi_on, x_add_ssim, mask)
+    ssim_in   = _pair_ssim_in_mask_per_modality(x_pi_on, np.clip(x_add, 0.0, 1.0), mask)
     l1_in     = _in_mask_l1(x_pi_on, x_add, mask)
     w1_in     = _w1_in_mask(x_pi_on, x_add, mask)
+    ssim_glob = ([float("nan")] * len(MODALITIES) if SKIP_GLOBAL_SSIM
+                 else _pair_ssim_per_modality(x_pi_on, np.clip(x_add, 0.0, 1.0)))
     for mod, sg, si, l, w in zip(MODALITIES, ssim_glob, ssim_in, l1_in, w1_in):
         base = dict(model=model_name, cfg=cfg, subject_id=subject_id,
                     case_idx=case_idx, prompt_a=prompt, prompt_b=prompt,
                     modality=mod)
-        rows.append({**base, "quantity": "interaction_1mSSIM",         "value": 1.0 - sg if np.isfinite(sg) else float("nan")})
+        if not SKIP_GLOBAL_SSIM:
+            rows.append({**base, "quantity": "interaction_1mSSIM",     "value": 1.0 - sg if np.isfinite(sg) else float("nan")})
         rows.append({**base, "quantity": "interaction_1mSSIM_in_mask", "value": 1.0 - si if np.isfinite(si) else float("nan")})
         rows.append({**base, "quantity": "interaction_L1_in_mask",     "value": l})
         rows.append({**base, "quantity": "interaction_W1_in_mask",     "value": w})
