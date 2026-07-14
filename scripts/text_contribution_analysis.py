@@ -328,8 +328,18 @@ def main() -> None:
                          "slug segment (sample_cond_native_XXXX[_nomask][_cfg...].nii.gz).")
     ap.add_argument("--cfg_values", type=str, default="1.0,4.5,7.0",
                     help="Comma-separated CFG values whose sample files should be scanned.")
+    ap.add_argument("--skip_global_ssim", action="store_true",
+                    help="Skip the expensive whole-volume SSIM computation "
+                         "(dominated by background; not used by the additive-"
+                         "decomposition estimators or Figures 5/6). Cuts the "
+                         "runtime by roughly 5x on large N.")
     ap.add_argument("--out",       type=Path, default=Path("paper/tables/text_contribution.csv"))
     args = ap.parse_args()
+
+    global SKIP_GLOBAL_SSIM
+    SKIP_GLOBAL_SSIM = bool(args.skip_global_ssim)
+    if SKIP_GLOBAL_SSIM:
+        print("[fast] --skip_global_ssim: skipping whole-volume 1-SSIM rows")
 
     slugs = [s.strip() for s in args.slugs.split(",") if s.strip()]
     cfg_values = [float(x) for x in args.cfg_values.split(",") if x.strip()]
