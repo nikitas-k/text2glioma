@@ -123,17 +123,14 @@ def _cfg_from_dirname(name: str) -> Optional[float]:
     return float(f"{w}.{ff}")
 
 
-def _find_pair(case_dir: Path, case_idx: int,
-               prompt_slug: str) -> Optional[tuple[Path, Path]]:
-    """Locate ``sample_cond_native_XXXX*.nii.gz`` and the matching
-    ``sample_original_processed_XXXX*.nii.gz``. Returns ``None`` if
-    either is missing.
+def _find_pred(case_dir: Path, case_idx: int,
+               prompt_slug: str) -> Optional[Path]:
+    """Locate ``sample_cond_native_XXXX*.nii.gz`` in ``case_dir``.
 
-    Tries the plain (no-slug) filename first, since the CFG-sweep pipeline
-    writes ``sample_cond_native_XXXX.nii.gz`` without a slug. If
-    ``prompt_slug`` is non-empty and different from ``''``, the slugged
-    variant is tried as a fallback (for runs invoked with
-    ``--custom_prompt`` / ``--output_suffix``).
+    The CFG-sweep pipeline writes plain (no-slug) files, so the empty
+    suffix is tried first. If ``prompt_slug`` is non-empty the slugged
+    variant is tried as a fallback for runs launched with
+    ``--custom_prompt`` / ``--output_suffix``.
     """
     stem = f"{case_idx:04d}"
     suffixes = [""]
@@ -141,15 +138,25 @@ def _find_pair(case_dir: Path, case_idx: int,
         suffixes.append(f"_{prompt_slug}")
     for suffix in suffixes:
         pred = case_dir / f"sample_cond_native_{stem}{suffix}.nii.gz"
-        real = case_dir / f"sample_original_processed_{stem}{suffix}.nii.gz"
-        if pred.is_file() and real.is_file():
-            return pred, real
-        # Some pipelines only write the "_original_processed" file once per
-        # case (independent of the prompt slug); try that fallback too.
         if pred.is_file():
-            real_flat = case_dir / f"sample_original_processed_{stem}.nii.gz"
-            if real_flat.is_file():
-                return pred, real_flat
+            return pred
+    return None
+
+
+def _find_colocated_real(case_dir: Path, case_idx: int,
+                         prompt_slug: str) -> Optional[Path]:
+    """Locate the paired ``sample_original_processed_XXXX*.nii.gz`` next
+    to the prediction. Returns ``None`` when it is missing (some runs
+    only save this once per case rather than per CFG folder).
+    """
+    stem = f"{case_idx:04d}"
+    suffixes = [""]
+    if prompt_slug:
+        suffixes.append(f"_{prompt_slug}")
+    for suffix in suffixes:
+        candidate = case_dir / f"sample_original_processed_{stem}{suffix}.nii.gz"
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -168,42 +175,60 @@ def _try_import_monai():
         return None
 
 
-def _preprocess_label(item: dict, T,
-                      channel_reorder: bool,
-                      spatial_size: tuple[int, int, int]) -> Optional[np.ndarray]:
-    """Apply the same preprocessing as
-    ``scripts/offline_sample_stage2_compare.py:_build_val_transform`` to the
-    raw image+label pair, and return the label at ``spatial_size`` as a
-    boolean tumour mask ``(X, Y, Z)``.
+def _preprocess_image_and_label(
+    item: dict, T,
+    channel_reorder: bool,
+    spatial_size: tuple[int, int, int],
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Apply the offline sampler's val transform
+    (``scripts/offline_sample_stage2_compare.py:_build_val_transform``) to
+    the raw image (and label, if present) and return
+    ``(image_np, label_mask)`` at ``spatial_size``.
 
-    Uses the raw image only to seed ``CropForegroundd``; it is otherwise
-    discarded.
+    ``image_np`` has shape ``(C, X, Y, Z)`` in T2G channel order with
+    per-channel [0, 1] percentile intensity scaling. ``label_mask`` is a
+    boolean tumour mask ``(X, Y, Z)`` or ``None`` if no label was
+    supplied.
+
+    Returns ``(None, None)`` when the image cannot be loaded.
     """
     import torch
-    if not item.get("label"):
-        return None
-    keys = ["image", "label"]
+    has_label = bool(item.get("label"))
+    keys = ["image"] + (["label"] if has_label else [])
     xforms = [
         T.LoadImaged(keys=keys),
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
     ]
     if channel_reorder:
-        xforms.append(T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G]))
+        xforms.append(
+            T.Lambdad(keys=["image"], func=lambda x: x[MSD_TO_T2G])
+        )
+    if has_label:
+        xforms.extend([
+            T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
+            T.EnsureTyped(keys=["label"], dtype=torch.float32),
+        ])
     xforms.extend([
-        T.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
-        T.EnsureTyped(keys=["label"], dtype=torch.float32),
         T.Orientationd(keys=keys, axcodes="LPS"),
         T.CropForegroundd(keys=keys, source_key="image"),
         T.SpatialPadd(keys=keys, spatial_size=spatial_size, mode="constant"),
         T.CenterSpatialCropd(keys=keys, roi_size=spatial_size),
+        T.ScaleIntensityRangePercentilesd(
+            keys=["image"], lower=0, upper=99.5,
+            b_min=0, b_max=1, channel_wise=True,
+        ),
         T.ToTensord(keys=keys),
     ])
     batch = T.Compose(xforms)(item)
-    label_np = batch["label"].detach().cpu().numpy()
-    if label_np.ndim == 4:
-        label_np = label_np[0]  # drop channel dim
-    return (label_np > 0)
+    image_np = batch["image"].detach().cpu().numpy().astype(np.float32)
+    label_mask: Optional[np.ndarray] = None
+    if has_label:
+        lbl = batch["label"].detach().cpu().numpy()
+        if lbl.ndim == 4:
+            lbl = lbl[0]
+        label_mask = (lbl > 0)
+    return image_np, label_mask
 
 
 # ---------------------------------------------------------------------------
@@ -211,17 +236,18 @@ def _preprocess_label(item: dict, T,
 # ---------------------------------------------------------------------------
 
 def compute_ncc_for_pair(
-    pred_path: Path,
-    real_path: Path,
+    pred: np.ndarray,
+    real: np.ndarray,
     tumour_mask: Optional[np.ndarray] = None,
 ) -> dict[str, dict[str, float]]:
-    """Return ``{modality: {'ncc_brain': v, 'ncc_in_mask': v}}``."""
-    pred = _load_multi_modality_nifti(pred_path)   # (C, X, Y, Z)
-    real = _load_multi_modality_nifti(real_path)
+    """Return ``{modality: {'ncc_brain': v, 'ncc_in_mask': v}}``.
+
+    ``pred`` and ``real`` are ``(C, X, Y, Z)`` numpy arrays that must
+    share shape and channel ordering.
+    """
     if pred.shape != real.shape:
         raise ValueError(
-            f"shape mismatch: pred {pred.shape} vs real {real.shape} "
-            f"({pred_path.name} vs {real_path.name})"
+            f"shape mismatch: pred {pred.shape} vs real {real.shape}"
         )
     if tumour_mask is not None and tumour_mask.shape != pred.shape[1:]:
         raise ValueError(
@@ -328,40 +354,45 @@ def main() -> None:
     if data_items is not None:
         print(f"N cases:  {len(data_items)}  (for in-mask NCC)")
 
-    # Cache preprocessed tumour masks so re-visiting a case at another CFG
-    # doesn't re-run MONAI transforms.
-    tumour_cache: dict[int, Optional[np.ndarray]] = {}
+    # Cache preprocessed (image, tumour_mask) per case so re-visiting a
+    # case at another CFG doesn't re-run MONAI transforms.
+    monai_cache: dict[int, tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
 
-    def _get_tumour_mask(case_idx: int) -> Optional[np.ndarray]:
+    def _get_monai_preproc(case_idx: int
+                           ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Return ``(preprocessed_image, tumour_mask)`` for a case, using
+        MONAI transforms. Cached across CFG values.
+        """
         if T is None or data_items is None:
-            return None
-        if case_idx in tumour_cache:
-            return tumour_cache[case_idx]
+            return None, None
+        if case_idx in monai_cache:
+            return monai_cache[case_idx]
         if case_idx >= len(data_items):
-            tumour_cache[case_idx] = None
-            return None
+            monai_cache[case_idx] = (None, None)
+            return None, None
         try:
-            m = _preprocess_label(
+            pair = _preprocess_image_and_label(
                 dict(data_items[case_idx]), T,
                 channel_reorder=not args.no_channel_reorder,
                 spatial_size=tuple(args.spatial_size),
             )
         except Exception as e:
-            print(f"[warn] preprocessing label for case {case_idx} failed: {e}",
+            print(f"[warn] MONAI preprocessing failed for case {case_idx}: {e}",
                   file=sys.stderr)
-            m = None
-        tumour_cache[case_idx] = m
-        return m
+            pair = (None, None)
+        monai_cache[case_idx] = pair
+        return pair
 
     # Sweep ---------------------------------------------------------------
     rows: list[dict] = []
     for cfg, case_dir in cfg_dirs:
         n_found = n_shape = n_ok = 0
+        n_real_colocated = n_real_monai = n_real_missing = 0
         miss_streak = 0
         max_case = args.limit if args.limit is not None else 3000
         for case_idx in range(max_case):
-            pair = _find_pair(case_dir, case_idx, args.prompt_slug)
-            if pair is None:
+            pred_path = _find_pred(case_dir, case_idx, args.prompt_slug)
+            if pred_path is None:
                 miss_streak += 1
                 # Bail out early after many consecutive misses if we've
                 # already found some samples (typical dataset is a few
@@ -371,11 +402,26 @@ def main() -> None:
                 continue
             miss_streak = 0
             n_found += 1
-            pred_path, real_path = pair
-            tumour_mask = _get_tumour_mask(case_idx)
+
+            # Resolve the paired real image ------------------------------
+            real_path = _find_colocated_real(case_dir, case_idx, args.prompt_slug)
+            tumour_mask: Optional[np.ndarray] = None
+            if real_path is not None:
+                real_arr = _load_multi_modality_nifti(real_path)
+                n_real_colocated += 1
+                # Tumour mask still needs MONAI for in-mask NCC.
+                _, tumour_mask = _get_monai_preproc(case_idx)
+            else:
+                real_arr, tumour_mask = _get_monai_preproc(case_idx)
+                if real_arr is None:
+                    n_real_missing += 1
+                    continue
+                n_real_monai += 1
+
+            # Compute -----------------------------------------------------
             try:
-                per_mod = compute_ncc_for_pair(pred_path, real_path,
-                                               tumour_mask)
+                pred_arr = _load_multi_modality_nifti(pred_path)
+                per_mod = compute_ncc_for_pair(pred_arr, real_arr, tumour_mask)
             except ValueError as e:
                 print(f"[skip] case {case_idx} @ cfg={cfg}: {e}",
                       file=sys.stderr)
@@ -397,7 +443,9 @@ def main() -> None:
                 if args.model_tag is not None:
                     row["model"] = args.model_tag
                 rows.append(row)
-        print(f"  cfg={cfg:>4.1f}  found={n_found:>4}  "
+        real_note = (f"colocated={n_real_colocated:>4}  "
+                     f"monai={n_real_monai:>4}  missing={n_real_missing:>3}")
+        print(f"  cfg={cfg:>4.1f}  found={n_found:>4}  {real_note}  "
               f"shape_err={n_shape:>3}  ok={n_ok:>4}")
 
     if not rows:
