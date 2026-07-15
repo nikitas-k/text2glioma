@@ -127,9 +127,19 @@ def _find_pair(case_dir: Path, case_idx: int,
                prompt_slug: str) -> Optional[tuple[Path, Path]]:
     """Locate ``sample_cond_native_XXXX*.nii.gz`` and the matching
     ``sample_original_processed_XXXX*.nii.gz``. Returns ``None`` if
-    either is missing."""
+    either is missing.
+
+    Tries the plain (no-slug) filename first, since the CFG-sweep pipeline
+    writes ``sample_cond_native_XXXX.nii.gz`` without a slug. If
+    ``prompt_slug`` is non-empty and different from ``''``, the slugged
+    variant is tried as a fallback (for runs invoked with
+    ``--custom_prompt`` / ``--output_suffix``).
+    """
     stem = f"{case_idx:04d}"
-    for suffix in (f"_{prompt_slug}", ""):
+    suffixes = [""]
+    if prompt_slug:
+        suffixes.append(f"_{prompt_slug}")
+    for suffix in suffixes:
         pred = case_dir / f"sample_cond_native_{stem}{suffix}.nii.gz"
         real = case_dir / f"sample_original_processed_{stem}{suffix}.nii.gz"
         if pred.is_file() and real.is_file():
@@ -249,9 +259,13 @@ def main() -> None:
                          "ncc_in_mask is NaN.")
     ap.add_argument("--split", default="validation",
                     help="Datalist split key (only used with --datalist).")
-    ap.add_argument("--prompt_slug", default="real",
-                    help="Prompt slug embedded in the sample filename "
-                         "(default: 'real'). Empty-slug files are also tried.")
+    ap.add_argument("--prompt_slug", default="",
+                    help="Prompt slug embedded in the sample filename. "
+                         "Default is empty (matches plain "
+                         "'sample_cond_native_XXXX.nii.gz' as written by the "
+                         "CFG-sweep pipeline). Set to e.g. 'real' or "
+                         "'a_ood_vocab' to match runs launched with "
+                         "--custom_prompt / --output_suffix.")
     ap.add_argument("--cfg_values", default=None,
                     help="Comma-separated CFG values to include (default: "
                          "auto-discover from cfg_* subdirectories).")
