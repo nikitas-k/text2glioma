@@ -6,7 +6,7 @@
 #PBS -l ngpus=1
 #PBS -l mem=64GB
 #PBS -l walltime=08:00:00
-#PBS -l storage=gdata/vp06+gdata/hl36+gdata/dp63
+#PBS -l storage=gdata/vp06+gdata/hl36
 #PBS -l wd
 #PBS -r y
 #PBS -J 0-19
@@ -52,14 +52,7 @@ STAGE2_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/ldm_stage2/best_model.pth"
 module load cuda/12.3.2 2>/dev/null || true
 module load python3/3.11 2>/dev/null || true
 
-# Prefer venv; fall back to system Python if not present.
-if [[ -f "$REPO/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO/.venv/bin/activate"
-elif [[ -f "$HOME/venv/monai/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$HOME/venv/monai/bin/activate"
-fi
+source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 cd "$REPO"
 export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
