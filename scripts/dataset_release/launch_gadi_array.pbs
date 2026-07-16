@@ -9,8 +9,8 @@
 #PBS -l storage=gdata/vp06+gdata/hl36+gdata/dp63
 #PBS -l wd
 #PBS -J 0-19
-#PBS -o logs/synth_gen_^array_index^.o
-#PBS -e logs/synth_gen_^array_index^.e
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth/logs/synth_gen_^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth/logs/synth_gen_^array_index^.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
@@ -61,7 +61,7 @@ elif [[ -f "$HOME/venv/monai/bin/activate" ]]; then
 fi
 
 cd "$REPO"
-export PYTHONPATH="$REPO/src:$PYTHONPATH"
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
 export HF_HOME=${HF_HOME:-$HOME/.cache/huggingface}
 export TRANSFORMERS_OFFLINE=1     # RadBERT already cached; keep runs offline
 mkdir -p "$OUT_ROOT" logs

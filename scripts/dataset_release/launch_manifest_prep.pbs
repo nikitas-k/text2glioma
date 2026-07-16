@@ -51,7 +51,7 @@ elif [[ -f "$HOME/venv/monai/bin/activate" ]]; then
 fi
 
 cd "$REPO"
-export PYTHONPATH="$REPO/src:$PYTHONPATH"
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
 mkdir -p "$OUT_ROOT" logs
 
 echo "===================================================================="
