@@ -127,11 +127,17 @@ def _load_synth_image(sample_dir: Path) -> np.ndarray:
 
 
 def _load_training_bank(datalist_path: Path, split: str,
-                        device: torch.device) -> tuple[torch.Tensor, list[str], list[str]]:
-    """Load and preprocess every training case into a stacked tensor on GPU.
+                        device: torch.device,
+                        half: bool = False,
+                        keep_on_cpu: bool = True,
+                        ) -> tuple[torch.Tensor, list[str], list[str]]:
+    """Load and preprocess every training case into a stacked tensor.
 
     Returns:
-        bank:    (N, 4, X, Y, Z) tensor in [0, 1]
+        bank:    (N, 4, X, Y, Z) tensor in [0, 1]. Kept on **CPU** by default
+                 (~54 GB fp16 for N=1187 on the standard 160x224x160 grid) so
+                 it fits alongside a GPU that only has ~32 GB. Chunks are
+                 transferred to GPU on demand inside ``audit_one_sample``.
         paths:   list of source image paths (for reporting nn_train_path)
         subjs:   list of subject_ids (for nn_train_subj)
 
@@ -160,6 +166,9 @@ def _load_training_bank(datalist_path: Path, split: str,
         T.ToTensord(keys=["image"]),
     ])
 
+    target_dtype = torch.float16 if half else torch.float32
+    target_device = torch.device("cpu") if keep_on_cpu else device
+
     stacked: list[torch.Tensor] = []
     paths: list[str] = []
     subjs: list[str] = []
@@ -169,34 +178,45 @@ def _load_training_bank(datalist_path: Path, split: str,
         except Exception as e:
             print(f"[warn] skipping {item.get('subject_id', i)}: {e}", file=sys.stderr)
             continue
-        stacked.append(batch["image"].to(device).clamp(0.0, 1.0))
+        # Cast + move immediately to keep peak memory bounded.
+        img = batch["image"].as_subclass(torch.Tensor).to(
+            device=target_device, dtype=target_dtype, copy=False
+        ).clamp(0.0, 1.0)
+        stacked.append(img)
         paths.append(str(item["image"]))
         subjs.append(str(item.get("subject_id", f"idx_{i}")))
         if (i + 1) % 100 == 0:
-            print(f"  loaded {i+1}/{len(items)} training images", flush=True)
+            print(f"  loaded {i+1}/{len(items)} training images "
+                  f"(bank so far: {sum(t.element_size()*t.numel() for t in stacked)/1e9:.1f} GB)",
+                  flush=True)
     if not stacked:
         raise RuntimeError("no training images could be loaded")
     bank = torch.stack(stacked, dim=0)  # (N, 4, X, Y, Z)
-    print(f"training bank: {bank.shape}, {bank.element_size()*bank.numel()/1e9:.1f} GB on {device}")
+    print(f"training bank: {bank.shape} dtype={bank.dtype} on {bank.device}   "
+          f"{bank.element_size()*bank.numel()/1e9:.1f} GB")
     return bank, paths, subjs
 
 
 def audit_one_sample(
-    synth_img: torch.Tensor,   # (4, X, Y, Z)
-    bank: torch.Tensor,         # (N, 4, X, Y, Z)
+    synth_img: torch.Tensor,   # (4, X, Y, Z), on GPU
+    bank: torch.Tensor,         # (N, 4, X, Y, Z), typically on CPU
     bank_paths: list[str],
     bank_subjs: list[str],
     sample_id: str,
     chunk_size: int = 32,
+    gpu_device: torch.device | None = None,
 ) -> list[dict]:
     """For each modality, find the nearest training image (by SSIM) and
     return one row per modality.
 
-    Uses batched SSIM (``_ssim_3d_batched``) with a chunked scan over the
-    bank so peak GPU memory stays bounded regardless of N. On a V100 with
-    chunk_size=32 and N=1187, this is ~15-50x faster than the one-at-a-
-    time loop while producing bitwise-identical SSIM values.
+    The bank stays on CPU (fp16, ~54 GB for N=1187); each chunk is
+    transferred to GPU on demand so peak GPU memory is only
+    ``chunk_size × 4 × 160 × 224 × 160 × dtype_bytes`` plus SSIM
+    intermediates. On a V100 with chunk_size=32 and fp16, that's ~1.5 GB
+    per chunk, easily fitting alongside the current sample.
     """
+    if gpu_device is None:
+        gpu_device = synth_img.device
     rows: list[dict] = []
     N = bank.shape[0]
     for c, mod in enumerate(MODALITIES):
@@ -205,13 +225,18 @@ def audit_one_sample(
         best_idx = -1
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
-            s_ref = bank[start:end, c:c+1]                # (B, 1, X, Y, Z)
+            # Move only this chunk to GPU. If the bank is already on the
+            # GPU (e.g. small N + fp16 fits), the .to() is a no-op alias.
+            s_ref = bank[start:end, c:c+1].to(
+                device=gpu_device, dtype=s_pred.dtype, non_blocking=True
+            )
             v = _ssim_3d_batched(s_pred, s_ref)           # (B,)
             local_max, local_arg = torch.max(v, dim=0)
             local_max_f = float(local_max.item())
             if local_max_f > best_ssim:
                 best_ssim = local_max_f
                 best_idx = start + int(local_arg.item())
+            del s_ref, v
         rows.append({
             "sample_id": sample_id,
             "modality":  mod,
@@ -273,13 +298,14 @@ def main() -> None:
         synth_dirs = synth_dirs[: args.max_samples]
         print(f"capped to first {len(synth_dirs)} samples")
 
-    # Load training bank (once).
+    # Load training bank (once). Kept on CPU (fp16 if --half) to fit
+    # alongside the GPU; chunks are transferred to GPU inside
+    # audit_one_sample() as they're needed.
     print(f"\nloading training bank from {args.datalist}...", flush=True)
-    bank, bank_paths, bank_subjs = _load_training_bank(args.datalist, args.split, device)
-    if args.half and device.type == "cuda":
-        bank = bank.half()
-        print(f"cast bank to fp16: {bank.element_size()*bank.numel()/1e9:.1f} GB",
-              flush=True)
+    bank, bank_paths, bank_subjs = _load_training_bank(
+        args.datalist, args.split, device,
+        half=args.half, keep_on_cpu=True,
+    )
 
     rows: list[dict] = []
     t0 = time.time()
@@ -291,7 +317,8 @@ def main() -> None:
                 img = img.half()
             sample_id = sample_dir.name
             rows.extend(audit_one_sample(img, bank, bank_paths, bank_subjs,
-                                          sample_id, chunk_size=args.chunk_size))
+                                          sample_id, chunk_size=args.chunk_size,
+                                          gpu_device=device))
         except Exception as e:
             print(f"[warn] {sample_dir}: {e}", file=sys.stderr)
             continue

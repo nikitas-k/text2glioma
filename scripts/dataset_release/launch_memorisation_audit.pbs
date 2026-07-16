@@ -4,7 +4,7 @@
 #PBS -q gpuvolta
 #PBS -l ncpus=12
 #PBS -l ngpus=1
-#PBS -l mem=64GB
+#PBS -l mem=128GB
 #PBS -l walltime=08:00:00
 #PBS -l storage=gdata/vp06+gdata/hl36
 #PBS -l wd
@@ -52,6 +52,7 @@ source /g/data/hl36/nk9793/venv/monai/bin/activate
 cd "$REPO"
 export HF_HOME=/g/data/vp06/nk9793/text2glioma_train/runs/cache/huggingface
 export TRANSFORMERS_OFFLINE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$OUT_ROOT/audit" "$OUT_ROOT/logs"
 
 # ---- Diagnostics -----------------------------------------------------
