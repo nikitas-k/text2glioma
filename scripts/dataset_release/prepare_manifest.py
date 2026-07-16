@@ -63,7 +63,8 @@ from mask_deformer import (         # noqa: E402
 
 
 def _run_one(job: dict) -> dict:
-    """Process one manifest row: deform mask, run VASARI-auto, compose prompt.
+    """Process one manifest row: deform mask, run VASARI-auto, compose prompt,
+    and persist the deformed raw mask to its final sample directory.
 
     Returns a dict with either a fully-populated row, or an error string in
     the ``error`` key. Errors are logged but not fatal — the worker retries
@@ -72,15 +73,27 @@ def _run_one(job: dict) -> dict:
     from text2glioma.preprocessing.utils import compose_radiology_prompts
 
     idx: int = job["idx"]
+    sample_id: str = job["sample_id"]
+    shard: int = job["shard"]
     mask_path: str = job["mask_path"]
     subj: str = job["subj"]
     max_retries: int = job.get("max_retries", 5)
     deform_seed_start: int = job["deform_seed"]
+    out_root = Path(job["out_root"])
+
+    sample_dir = out_root / f"shard_{shard:04d}" / sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    final_mask_path = sample_dir / "_mask_raw.nii.gz"
+
+    # Idempotency: if this sample already has a persisted mask AND we can
+    # recover its metadata via the manifest, skip. But since we're building
+    # the manifest fresh, we always regenerate to keep the returned row in
+    # sync. We DO reuse the disk write path.
 
     try:
         lbl_nii = nib.load(mask_path)
         lbl = np.asanyarray(lbl_nii.dataobj).astype(np.int16)
-    except Exception as e:  # unreadable label file
+    except Exception as e:
         return {"idx": idx, "error": f"load mask: {type(e).__name__}: {e}"}
 
     last_err: str | None = None
@@ -99,7 +112,8 @@ def _run_one(job: dict) -> dict:
                         f"ratio={info.get('ratio', '?')})")
             continue
 
-        # Write the deformed mask to a temp file and pass it to VASARI-auto.
+        # Write the deformed mask to a temp file so VASARI-auto can read it,
+        # and to its final sample directory so generation can consume it.
         tmp_dir = job.get("tmp_dir") or tempfile.gettempdir()
         tmp_path = Path(tmp_dir) / f"deformed_pid{os.getpid()}_i{idx:07d}.nii.gz"
         try:
@@ -107,7 +121,6 @@ def _run_one(job: dict) -> dict:
                 nib.Nifti1Image(deformed.astype(np.int16), lbl_nii.affine, lbl_nii.header),
                 str(tmp_path),
             )
-            # `image_path` is unused by compose_radiology_prompts internally.
             prompts = compose_radiology_prompts(
                 image_path=str(tmp_path),
                 label_path=str(tmp_path),
@@ -117,20 +130,36 @@ def _run_one(job: dict) -> dict:
             )
         except Exception as e:
             last_err = f"compose: {type(e).__name__}: {e}"
+            try: tmp_path.unlink(missing_ok=True)
+            except Exception: pass
             continue
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
         prompt = (prompts.get("short") or "").strip()
         if not prompt:
             last_err = "empty prompt"
+            try: tmp_path.unlink(missing_ok=True)
+            except Exception: pass
             continue
+
+        # SUCCESS: persist the deformed mask to the sample directory (this is
+        # the file the generation driver will read). Then remove the temp.
+        try:
+            nib.save(
+                nib.Nifti1Image(deformed.astype(np.int16), lbl_nii.affine, lbl_nii.header),
+                str(final_mask_path),
+            )
+        except Exception as e:
+            last_err = f"save final mask: {type(e).__name__}: {e}"
+            try: tmp_path.unlink(missing_ok=True)
+            except Exception: pass
+            continue
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
 
         return {
             "idx": idx,
+            "sample_id": sample_id,
+            "shard": shard,
             "prompt": prompt,
             "findings": (prompts.get("long") or "").strip(),
             "mask_source_path": mask_path,
@@ -145,9 +174,11 @@ def _run_one(job: dict) -> dict:
             "deform_scale": deform.scale,
             "deform_attempts": attempt + 1,
             "deform_ratio": float(info.get("ratio", 1.0)),
+            "mask_persisted_path": str(final_mask_path),
         }
 
-    return {"idx": idx, "error": last_err or "no successful deform after retries"}
+    return {"idx": idx, "sample_id": sample_id, "shard": shard,
+            "error": last_err or "no successful deform after retries"}
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +215,17 @@ def main() -> None:
     ap.add_argument("--tmp_dir", type=Path, default=None,
                     help="Directory for temporary deformed masks. "
                          "On Gadi set to $PBS_JOBFS for local SSD.")
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out_root", type=Path, required=True,
+                    help="Release root; deformed masks are persisted at "
+                         "<out_root>/shard_XXXX/sample_YYYYYYY/_mask_raw.nii.gz "
+                         "and the generation driver reads them from there.")
+    ap.add_argument("--out", type=Path, required=True,
+                    help="Manifest CSV output path.")
     args = ap.parse_args()
 
     if args.tmp_dir is not None:
         args.tmp_dir.mkdir(parents=True, exist_ok=True)
+    args.out_root.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(args.seed)
 
@@ -210,10 +247,13 @@ def main() -> None:
         mp_idx = int(mask_indices[i])
         jobs.append({
             "idx": i,
+            "sample_id":   f"sample_{i:07d}",
+            "shard":       int(i % args.num_shards),
             "mask_path":   mask_pool[mp_idx][0],
             "subj":        mask_pool[mp_idx][1],
             "deform_seed": int(deform_seeds[i]),
             "tmp_dir":     str(args.tmp_dir) if args.tmp_dir else None,
+            "out_root":    str(args.out_root),
         })
 
     results: list[dict | None] = [None] * args.n_samples
@@ -252,18 +292,22 @@ def main() -> None:
 
     good.sort(key=lambda r: r["idx"])
     n = len(good)
-    shards = (np.arange(n) % args.num_shards).astype(int)
+
+    # Note: sample_id and shard are assigned deterministically from idx in the
+    # planning step (before workers run). Failures leave holes in the sample_id
+    # sequence, which is the honest signal. No post-hoc renumbering.
 
     rows: list[dict] = []
-    for i, r in enumerate(good):
+    for r in good:
         rows.append({
-            "sample_id":        f"sample_{i:07d}",
-            "shard":            int(shards[i]),
+            "sample_id":        r["sample_id"],
+            "shard":            int(r["shard"]),
             "prompt":           r["prompt"],
             "findings":         r["findings"],
             "prompt_source":    "mask_derived",
             "mask_source_path": r["mask_source_path"],
             "mask_source_subj": r["mask_source_subj"],
+            "mask_persisted_path": r["mask_persisted_path"],
             "deform_seed":      int(r["deform_seed"]),
             "deform_rot_deg_x": r["deform_rot_deg_x"],
             "deform_rot_deg_y": r["deform_rot_deg_y"],

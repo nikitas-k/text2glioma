@@ -74,6 +74,7 @@ python scripts/dataset_release/prepare_manifest.py \
     --seed "$SEED" \
     --workers 16 \
     --tmp_dir "$PBS_JOBFS/t2g_manifest_tmp" \
+    --out_root "$OUT_ROOT" \
     --out "$OUT_ROOT/manifest.csv"
 
 echo "manifest written to $OUT_ROOT/manifest.csv"

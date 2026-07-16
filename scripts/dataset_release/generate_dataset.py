@@ -5,11 +5,17 @@ one shard's worth of rows, resumes from partial state (skips samples
 whose output already exists), and writes one small sample directory per
 row.
 
+The mask geometry has ALREADY been deformed at manifest-prep time and
+persisted to ``<out_root>/shard_XXXX/sample_YYYYYYY/_mask_raw.nii.gz``.
+This driver only loads that mask, runs the LDM sampler, and writes the
+paired image + preprocessed mask + metadata. The raw mask file is
+consumed (deleted on success) so only the released files remain.
+
 Output layout per sample::
 
     <out_root>/<shard_id>/<sample_id>/
         image.nii.gz       (4 modalities stacked on channel axis; shape (160, 224, 160, 4))
-        mask.nii.gz        (deformed integer segmentation, same 160x224x160 space)
+        mask.nii.gz        (integer segmentation preprocessed to 160x224x160, paired with image)
         metadata.json      (prompt, seeds, deform params, model version, checkpoint hash)
 
 Shard-level completion marker::
@@ -51,26 +57,16 @@ import pandas as pd
 
 # Repo-relative imports
 sys.path.insert(0, str(Path(__file__).parent))
-from mask_deformer import DeformParams, apply_deformation, deformation_is_valid  # noqa: E402
+# NOTE: deformation is done once at manifest-prep time and persisted to
+# <out_root>/shard_XXXX/sample_YYYYYYY/_mask_raw.nii.gz. We do not re-apply
+# any deform here to eliminate the possibility of computational drift
+# between the mask VASARI-auto saw and the mask conditioning the LDM.
 
 # Package import
 from text2glioma.inference.engine import Text2GliomaEngine, GenerationResult  # noqa: E402
 
 
 MODALITIES = ("T1", "T1CE", "T2", "FLAIR")
-
-
-def _row_to_deform(row: pd.Series) -> DeformParams:
-    return DeformParams(
-        seed=int(row.deform_seed),
-        rotation_deg=(float(row.deform_rot_deg_x),
-                      float(row.deform_rot_deg_y),
-                      float(row.deform_rot_deg_z)),
-        translation_vox=(float(row.deform_trans_x),
-                         float(row.deform_trans_y),
-                         float(row.deform_trans_z)),
-        scale=float(row.deform_scale),
-    )
 
 
 def _hash_file(path: Path, chunk: int = 1 << 20) -> str:
@@ -98,25 +94,6 @@ def _save_mask(mask: np.ndarray, affine: np.ndarray, out_path: Path) -> None:
     nib.save(nib.Nifti1Image(mask.astype(np.int16), affine=affine), str(out_path))
 
 
-def _apply_deform_and_write_temp(
-    raw_mask_path: Path,
-    deform: DeformParams,
-    tmp_dir: Path,
-    sample_id: str,
-) -> tuple[Path, dict]:
-    """Load raw mask, apply affine deformation, write to temp file, and
-    return (path, validity_info)."""
-    lbl_nii = nib.load(str(raw_mask_path))
-    lbl = lbl_nii.get_fdata().astype(np.int16)
-    deformed = apply_deformation(lbl, deform, order=0)
-    ok, info = deformation_is_valid(lbl, deformed)
-    info["valid"] = ok
-    tmp_path = tmp_dir / f"{sample_id}_deformed_mask.nii.gz"
-    nib.save(nib.Nifti1Image(deformed.astype(np.int16), lbl_nii.affine,
-                              lbl_nii.header.copy()), str(tmp_path))
-    return tmp_path, info
-
-
 def process_shard(
     engine: Text2GliomaEngine,
     manifest: pd.DataFrame,
@@ -135,8 +112,6 @@ def process_shard(
 
     shard_dir = out_root / f"shard_{shard:04d}"
     shard_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = shard_dir / "_tmp"
-    tmp_dir.mkdir(exist_ok=True)
 
     # Provenance hashes: compute once per shard, reused for every sample.
     provenance = {
@@ -160,25 +135,26 @@ def process_shard(
         image_path = sample_dir / "image.nii.gz"
         mask_path  = sample_dir / "mask.nii.gz"
         meta_path  = sample_dir / "metadata.json"
+        raw_mask_path = sample_dir / "_mask_raw.nii.gz"  # written by prepare_manifest.py
 
         if not overwrite and image_path.exists() and mask_path.exists() and meta_path.exists():
             n_skipped += 1
+            # If the raw mask survived a previous failed run, clean it up now.
+            try: raw_mask_path.unlink(missing_ok=True)
+            except OSError: pass
+            continue
+
+        if not raw_mask_path.exists():
+            print(f"[shard {shard}] {sample_id}  missing _mask_raw.nii.gz "
+                  f"(run prepare_manifest.py with --out_root pointing here)",
+                  file=sys.stderr, flush=True)
+            n_failed += 1
             continue
 
         try:
-            deform = _row_to_deform(row)
-            deformed_mask_tmp, valid_info = _apply_deform_and_write_temp(
-                Path(row.mask_source_path), deform, tmp_dir, sample_id,
-            )
-            if not valid_info.get("valid", False):
-                print(f"[shard {shard}] {sample_id}  invalid deformation: {valid_info}",
-                      file=sys.stderr, flush=True)
-                n_failed += 1
-                continue
-
             result: GenerationResult = engine.generate(
                 prompt=row.prompt,
-                mask_nifti_path=str(deformed_mask_tmp),
+                mask_nifti_path=str(raw_mask_path),
                 cfg=float(row.cfg),
                 seed=int(row.ldm_seed),
                 steps=steps,
@@ -186,13 +162,8 @@ def process_shard(
             )
             image_np = result.images[0].detach().cpu().numpy()   # (4, X, Y, Z)
 
-            # Load the preprocessed mask that the engine used (via MONAI) at
-            # the same spatial size so we save the mask that PAIRS with the
-            # generated image.
-            # Simplest: re-preprocess with the same transforms as the engine.
-            # Since apply_deformation was on raw space, and the engine already
-            # took it through MONAI's crop+pad+centercrop (no interpolation),
-            # we mirror that here to save a preprocessed-space mask.
+            # Save the mask in the same preprocessed space as the image so
+            # downstream (mask, image) pairs are directly usable.
             from monai import transforms as T
             xforms = T.Compose([
                 T.LoadImage(image_only=True),
@@ -201,7 +172,7 @@ def process_shard(
                 T.SpatialPad(spatial_size=(160, 224, 160), mode="constant"),
                 T.CenterSpatialCrop(roi_size=(160, 224, 160)),
             ])
-            mask_pp = xforms(str(deformed_mask_tmp)).detach().cpu().numpy()
+            mask_pp = xforms(str(raw_mask_path)).detach().cpu().numpy()
             if mask_pp.ndim == 4:
                 mask_pp = mask_pp[0]
             mask_pp = mask_pp.astype(np.int16)
@@ -212,12 +183,22 @@ def process_shard(
             metadata = {
                 "sample_id": sample_id,
                 "prompt": row.prompt,
-                "prompt_source": row.prompt_source,
-                "prompt_meta": json.loads(row.prompt_meta_json),
+                "prompt_source": row.get("prompt_source", "mask_derived"),
+                "findings": row.get("findings", ""),
                 "mask_source_path": row.mask_source_path,
                 "mask_source_subj": row.mask_source_subj,
-                "deform": deform.to_dict(),
-                "deform_validity": valid_info,
+                "deform": {
+                    "seed":            int(row.deform_seed),
+                    "rotation_deg":    [float(row.deform_rot_deg_x),
+                                        float(row.deform_rot_deg_y),
+                                        float(row.deform_rot_deg_z)],
+                    "translation_vox": [float(row.deform_trans_x),
+                                        float(row.deform_trans_y),
+                                        float(row.deform_trans_z)],
+                    "scale":           float(row.deform_scale),
+                    "attempts":        int(row.get("deform_attempts", 1)),
+                    "ratio":           float(row.get("deform_ratio", 1.0)),
+                },
                 "ldm_seed": int(row.ldm_seed),
                 "cfg": float(row.cfg),
                 "modalities": list(MODALITIES),
@@ -228,8 +209,8 @@ def process_shard(
             }
             meta_path.write_text(json.dumps(metadata, indent=2))
 
-            # Clean up the temp mask.
-            try: deformed_mask_tmp.unlink()
+            # Consumed: remove the raw mask so only the released files remain.
+            try: raw_mask_path.unlink()
             except OSError: pass
 
             n_done += 1
