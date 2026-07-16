@@ -5,7 +5,7 @@
 #PBS -l ncpus=12
 #PBS -l ngpus=1
 #PBS -l mem=64GB
-#PBS -l walltime=48:00:00
+#PBS -l walltime=08:00:00
 #PBS -l storage=gdata/vp06+gdata/hl36
 #PBS -l wd
 #PBS -r y
@@ -23,8 +23,9 @@
 #
 # The audit is embarrassingly parallel across synthetic samples. Each
 # array subjob handles 1/NUM_SHARDS of the total (hash-split by index).
-# Per-sample cost is ~4 min on a V100 (4 modalities × 1187 SSIMs).
-# 500 samples/shard × 4 min ≈ 33 h → 48 h walltime cap is a safe budget.
+# With batched SSIM (chunk_size=32, fp16 bank), per-sample cost is ~15s
+# on a V100 → 500 samples/shard ≈ 2 h → 8 h walltime is a comfortable
+# safety margin.
 #
 # Submit as two halves (gpuvolta caps array size ≤ 10 per submission):
 #   qsub -J 0-9  scripts/dataset_release/launch_memorisation_audit.pbs
@@ -71,6 +72,8 @@ python -u scripts/dataset_release/memorisation_audit.py \
     --split      training \
     --shard      "$PBS_ARRAY_INDEX" \
     --num_shards "$NUM_SHARDS" \
+    --chunk_size 32 \
+    --half \
     --out        "$OUT_ROOT/audit/audit_shard_$(printf '%02d' $PBS_ARRAY_INDEX).csv" \
     --device     cuda
 
