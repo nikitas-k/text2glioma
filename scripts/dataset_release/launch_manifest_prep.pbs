@@ -5,11 +5,11 @@
 #PBS -l ncpus=16
 #PBS -l mem=64GB
 #PBS -l walltime=04:00:00
-#PBS -l storage=gdata/vp06+gdata/hl36+gdata/dp63
+#PBS -l storage=gdata/vp06+gdata/hl36
 #PBS -l jobfs=100GB
 #PBS -l wd
-#PBS -o logs/manifest_prep.o
-#PBS -e logs/manifest_prep.e
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth/logs/manifest_prep.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth/logs/manifest_prep.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
