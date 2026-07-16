@@ -8,6 +8,7 @@
 #PBS -l walltime=08:00:00
 #PBS -l storage=gdata/vp06+gdata/hl36+gdata/dp63
 #PBS -l wd
+#PBS -r y
 #PBS -J 0-19
 #PBS -o /g/data/vp06/nk9793/text2glioma_synth/logs/synth_gen_^array_index^.o
 #PBS -e /g/data/vp06/nk9793/text2glioma_synth/logs/synth_gen_^array_index^.e
@@ -39,7 +40,7 @@ set -euo pipefail
 # ---- Paths (edit as needed) ------------------------------------------
 REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
 RUNS_ROOT=${TEXT2GLIOMA_RUNS:-/g/data/vp06/$USER/text2glioma_train/runs}
-OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_release/synth_10k}
+OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth}
 MANIFEST=${T2G_SYNTH_MANIFEST:-$OUT_ROOT/manifest.csv}
 
 STAGE1_CONFIG="$REPO/configs/stage1.yaml"
