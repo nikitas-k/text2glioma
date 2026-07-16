@@ -1,5 +1,16 @@
 """Prompt-pool builder for the Text2Glioma synthetic dataset release.
 
+.. deprecated::
+   The v1 release pipeline switched to a **mask-first prompt derivation**:
+   every prompt is now composed by running VASARI-auto on the deformed
+   mask via ``text2glioma.preprocessing.utils.compose_radiology_prompts``
+   (see ``scripts/dataset_release/prepare_manifest.py``). This guarantees
+   prompt-mask consistency by construction. The verbatim + novel-recomposition
+   sampler in this module is retained for reference and for future use in
+   experiments where independent prompt sampling is intentional
+   (e.g. mask-conditional CFG ablations). **Do not use for the v1 release
+   manifest** — use ``prepare_manifest.py`` instead.
+
 Assembles two pools:
 
     * ``real`` \u2014 verbatim VASARI impressions from the training split, used

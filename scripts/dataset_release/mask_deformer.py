@@ -79,11 +79,19 @@ def _matrix_from_params(p: DeformParams) -> np.ndarray:
 
 def sample_deform_params(
     seed: int,
-    max_rot_deg: float = 3.0,
-    max_trans_vox: float = 2.0,
-    max_scale: float = 0.03,
+    max_rot_deg: float = 8.0,
+    max_trans_vox: float = 6.0,
+    max_scale: float = 0.08,
 ) -> DeformParams:
-    """Draw a deterministic deformation from the seed."""
+    """Draw a deterministic deformation from the seed.
+
+    Default magnitudes were widened (rot 3->8°, trans 2->6vox, scale 3->8%)
+    for the release pipeline: with the mask-first prompt derivation, the
+    deformation is the primary source of geometric novelty in the release,
+    so more amplitude is preferred provided the tumour stays inside the
+    brain envelope. The `deformation_is_valid` check will reject deforms
+    that push the volume out of the 0.65-1.35x band.
+    """
     rng = np.random.default_rng(seed)
     rx = float(rng.uniform(-max_rot_deg, max_rot_deg))
     ry = float(rng.uniform(-max_rot_deg, max_rot_deg))
@@ -147,8 +155,8 @@ def apply_deformation(
 def deformation_is_valid(
     original: np.ndarray,
     deformed: np.ndarray,
-    min_volume_ratio: float = 0.75,
-    max_volume_ratio: float = 1.25,
+    min_volume_ratio: float = 0.65,
+    max_volume_ratio: float = 1.35,
 ) -> tuple[bool, dict]:
     """Check the deformation didn't destroy or explode the tumour."""
     orig_vol = int((original > 0).sum())
