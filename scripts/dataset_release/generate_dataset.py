@@ -245,11 +245,19 @@ def process_shard(
                   file=sys.stderr, flush=True)
             n_failed += 1
 
-    # Shard-level completion marker only if we actually processed everything.
-    if n_failed == 0 and (n_done + n_skipped) == n_total:
+    # Shard-level completion marker only if we actually processed the FULL
+    # shard, not just a subset via --max_samples. This prevents smoke tests
+    # (e.g. --max_samples 3) from prematurely marking the shard as done.
+    shard_total = len(shard_df)
+    processed_full_shard = (max_samples is None) or (max_samples >= shard_total)
+    if n_failed == 0 and (n_done + n_skipped) == n_total and processed_full_shard:
         (shard_dir / "_DONE").touch()
         print(f"[shard {shard}] complete: done={n_done}, skipped={n_skipped}, "
               f"total={n_total}, elapsed={ (time.time()-t0)/60:.1f} min",
+              flush=True)
+    elif n_failed == 0 and (n_done + n_skipped) == n_total:
+        print(f"[shard {shard}] partial run OK: done={n_done}, skipped={n_skipped}, "
+              f"total={n_total} (of {shard_total} in shard) — _DONE NOT written",
               flush=True)
     else:
         print(f"[shard {shard}] finished with failures: done={n_done}, "
