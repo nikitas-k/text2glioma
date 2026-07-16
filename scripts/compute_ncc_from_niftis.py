@@ -11,14 +11,20 @@ NCC is the Pearson correlation of flattened voxel intensities:
 
     NCC(X, Y) = <X - mean(X), Y - mean(Y)> / (||X - mean(X)|| * ||Y - mean(Y)||)
 
-Two variants per (case, cfg, modality) are reported:
+Two variants per (case, cfg, modality) are reported, both using the
+"pred-zeroed-outside-then-whole-volume-NCC" convention: multiply pred
+and real element-wise by a binary mask, then compute NCC over the
+resulting whole volume (no vector restriction). This is closest to how
+translation methods that report whole-brain NCC score (Eidex et al.
+2024, arXiv 2409.01622, reported 0.908 for TA-ViT), because a
+translation model's output inherits the source-modality's zero-outside
+brain structure automatically; masking Text2Glioma's generative output
+puts the two on comparable footing.
 
-    * ``ncc_brain``   — computed over voxels where the paired real image
-                        is non-zero (brain-content mask). This matches the
-                        convention in Eidex et al. 2024 (arXiv 2409.01622)
-                        for whole-brain NCC and is the value to compare
-                        against their reported 0.908.
-    * ``ncc_in_mask`` — restricted to the tumour segmentation. Requires
+    * ``ncc_brain``   — mask = union of real modalities > ``brain_threshold``.
+                        The "whole-brain" comparator against Eidex 2024.
+    * ``ncc_in_mask`` — mask = tumour segmentation (label > 0). Matches
+                        Eidex's "tumor region" convention. Requires
                         MONAI + the datalist to bring the raw label into
                         the preprocessed spatial size; skipped (NaN) if
                         MONAI is unavailable or ``--datalist`` is omitted.
@@ -239,11 +245,24 @@ def compute_ncc_for_pair(
     pred: np.ndarray,
     real: np.ndarray,
     tumour_mask: Optional[np.ndarray] = None,
+    brain_threshold: float = 0.0,
 ) -> dict[str, dict[str, float]]:
     """Return ``{modality: {'ncc_brain': v, 'ncc_in_mask': v}}``.
 
     ``pred`` and ``real`` are ``(C, X, Y, Z)`` numpy arrays that must
     share shape and channel ordering.
+
+    Both metrics use the "pred-zeroed-outside-then-whole-volume-NCC"
+    convention: pred and real are element-wise multiplied by the mask,
+    then NCC is taken over the whole (mostly-zero-outside-mask) volume.
+    On this pipeline the real image is skull-stripped so it is
+    already zero outside brain; the multiplication just enforces the
+    same domain on the pred (which has small residual leakage from
+    convolutional decoding).
+
+    * ``ncc_brain``   uses the union brain mask across the real image's
+                       modalities (``real > brain_threshold``).
+    * ``ncc_in_mask`` uses the tumour segmentation as the mask.
     """
     if pred.shape != real.shape:
         raise ValueError(
@@ -255,19 +274,28 @@ def compute_ncc_for_pair(
             f"spatial shape {pred.shape[1:]}"
         )
 
+    # Union brain mask across modalities.
+    brain_mask_f = (real > brain_threshold).any(axis=0).astype(np.float32)
+    tumour_mask_f = (tumour_mask.astype(np.float32)
+                     if tumour_mask is not None else None)
+
     out: dict[str, dict[str, float]] = {}
     for c in range(pred.shape[0]):
         name = MODALITY_NAMES[c] if c < len(MODALITY_NAMES) else f"ch{c}"
         p = pred[c]
         r = real[c]
-        # Brain-content mask derived from the real image: excludes the
-        # zero-padded skull-stripped background so the correlation is
-        # not dominated by matching zeros.
-        brain_mask = (r > 1e-6)
+        # Whole-brain: element-wise mask both then whole-volume NCC.
+        # Real is already ≈ zero outside brain; masking pred forces the
+        # same domain and eliminates convolutional-decoding leakage.
+        w_brain = ncc(p * brain_mask_f, r * brain_mask_f)
+        # Tumour region: same convention with the tumour mask.
+        if tumour_mask_f is not None and tumour_mask_f.any():
+            w_tumour = ncc(p * tumour_mask_f, r * tumour_mask_f)
+        else:
+            w_tumour = float("nan")
         out[name] = {
-            "ncc_brain":   ncc(p, r, mask=brain_mask),
-            "ncc_in_mask": (ncc(p, r, mask=tumour_mask)
-                            if tumour_mask is not None else float("nan")),
+            "ncc_brain":   w_brain,
+            "ncc_in_mask": w_tumour,
         }
     return out
 
@@ -301,11 +329,22 @@ def main() -> None:
     ap.add_argument("--model_tag", default=None,
                     help="Optional model identifier stored in the 'model' "
                          "column of the output CSV.")
-    ap.add_argument("--no_channel_reorder", action="store_true", default=False,
-                    help="Skip MSD->T2G channel reorder when preprocessing the "
-                         "label (default: apply, matching offline sampler).")
+    ap.add_argument("--channel_reorder", action="store_true", default=False,
+                    help="Apply the MSD -> T2G channel reorder "
+                         "(indices [1, 2, 3, 0]) when preprocessing the raw "
+                         "image via MONAI. Default off: the raw NIfTIs for "
+                         "this dataset are already in [T1, T1CE, T2, FLAIR] "
+                         "order (matching the CFG-sweep notebook's default "
+                         "NO_CHAN_REORDER=1). Only pass this if you know the "
+                         "raw data is in MSD [FLAIR, T1, T1CE, T2] order and "
+                         "the model was trained with the reorder applied.")
     ap.add_argument("--spatial_size", type=int, nargs=3, default=(160, 224, 160),
                     help="Preprocessed spatial size for label preprocessing.")
+    ap.add_argument("--brain_threshold", type=float, default=0.0,
+                    help="Voxel-intensity threshold used to derive the "
+                         "brain mask from the real image "
+                         "(union across modalities of real > threshold). "
+                         "Default 0 = any non-zero voxel counts as brain.")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--limit", type=int, default=None,
                     help="Debug: limit to the first N cases.")
@@ -373,7 +412,7 @@ def main() -> None:
         try:
             pair = _preprocess_image_and_label(
                 dict(data_items[case_idx]), T,
-                channel_reorder=not args.no_channel_reorder,
+                channel_reorder=args.channel_reorder,
                 spatial_size=tuple(args.spatial_size),
             )
         except Exception as e:
@@ -421,7 +460,10 @@ def main() -> None:
             # Compute -----------------------------------------------------
             try:
                 pred_arr = _load_multi_modality_nifti(pred_path)
-                per_mod = compute_ncc_for_pair(pred_arr, real_arr, tumour_mask)
+                per_mod = compute_ncc_for_pair(
+                    pred_arr, real_arr, tumour_mask,
+                    brain_threshold=args.brain_threshold,
+                )
             except ValueError as e:
                 print(f"[skip] case {case_idx} @ cfg={cfg}: {e}",
                       file=sys.stderr)
