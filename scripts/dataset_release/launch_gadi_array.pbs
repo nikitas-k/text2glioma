@@ -49,14 +49,12 @@ STAGE1_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/autoencoder_stage1/checkpoint.
 STAGE2_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/ldm_stage2/best_model.pth"
 
 # ---- Environment -----------------------------------------------------
-module load cuda/12.3.2 2>/dev/null || true
-module load python3/3.11 2>/dev/null || true
+module load python3/3.9.2
 
 source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 cd "$REPO"
-export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
-export HF_HOME=${HF_HOME:-$HOME/.cache/huggingface}
+export HF_HOME=/g/data/vp06/nk9793/text2glioma_train/runs/cache/huggingface
 export TRANSFORMERS_OFFLINE=1     # RadBERT already cached; keep runs offline
 mkdir -p "$OUT_ROOT" logs
 
