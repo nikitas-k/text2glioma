@@ -1421,6 +1421,8 @@ def train_epoch_ldm(
         )
     model.train()
     raw_model = model.module if hasattr(model, "module") else model
+    if molecular_head is not None:
+        molecular_head.train()
 
     # Only show progress bar on rank 0 to avoid interleaved output
     is_main = not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
@@ -1455,10 +1457,14 @@ def train_epoch_ldm(
             # sync when it fires. The molecular head applies its own
             # per-field dropout-to-unknown internally in training mode.
             if molecular_head is not None:
+                # Unwrap DDP for non-forward attribute access (null_tokens).
+                # The forward call still goes through the DDP wrapper so
+                # gradients get synchronised across ranks.
+                mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
                 idh  = x["idh"].to(device).long()
                 mgmt = x["mgmt"].to(device).long()
                 mol_tokens = molecular_head(idh, mgmt)                        # (B, 2, D)
-                mol_null   = molecular_head.null_tokens(
+                mol_null   = mh_raw.null_tokens(
                     images.size(0), device=device, dtype=cond.dtype)          # (B, 2, D)
                 cond   = torch.cat([cond,   mol_tokens.to(cond.dtype)],   dim=1)  # (B, 128+2, D)
                 uncond = torch.cat([uncond, mol_null.to(uncond.dtype)], dim=1)  # (B, 128+2, D)
@@ -1578,6 +1584,8 @@ def eval_ldm(
     molecular_head: Optional[nn.Module] = None,
 ) -> float:
     model.eval()
+    if molecular_head is not None:
+        molecular_head.eval()
     total_losses = OrderedDict()
     n_samples = 0
     sample_label = None
