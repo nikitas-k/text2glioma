@@ -152,6 +152,14 @@ def process_shard(
             continue
 
         try:
+            # Manifest may or may not carry molecular fields. -1 sentinel
+            # means "no molecular conditioning requested" -> pass None to
+            # the engine, which ignores the head entirely.
+            row_idh  = int(row.get("idh",  -1)) if hasattr(row, "get") else int(getattr(row, "idh",  -1))
+            row_mgmt = int(row.get("mgmt", -1)) if hasattr(row, "get") else int(getattr(row, "mgmt", -1))
+            idh_arg  = None if row_idh  < 0 else row_idh
+            mgmt_arg = None if row_mgmt < 0 else row_mgmt
+
             result: GenerationResult = engine.generate(
                 prompt=row.prompt,
                 mask_nifti_path=str(raw_mask_path),
@@ -159,6 +167,8 @@ def process_shard(
                 seed=int(row.ldm_seed),
                 steps=steps,
                 mode="text+mask",
+                idh=idh_arg,
+                mgmt=mgmt_arg,
             )
             image_np = result.images[0].detach().cpu().numpy()   # (4, X, Y, Z)
 
@@ -201,6 +211,8 @@ def process_shard(
                 },
                 "ldm_seed": int(row.ldm_seed),
                 "cfg": float(row.cfg),
+                "idh":  row_idh,
+                "mgmt": row_mgmt,
                 "modalities": list(MODALITIES),
                 "image_shape": list(image_np.shape),
                 "image_dtype": "float32",

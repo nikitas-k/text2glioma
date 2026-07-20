@@ -27,8 +27,12 @@
 # Temporary deformed masks are written to $PBS_JOBFS (local SSD) to avoid
 # hammering /g/data.
 #
-# Submit:
+# Submit (vanilla, no molecular conditioning):
 #   qsub scripts/dataset_release/launch_manifest_prep.pbs
+#
+# Submit (with molecular conditioning, balanced 4-cell (IDH,MGMT) grid):
+#   qsub -v USE_MOLECULAR=1,BALANCE_MODE=joint \
+#        scripts/dataset_release/launch_manifest_prep.pbs
 # ----------------------------------------------------------------------
 
 set -euo pipefail
@@ -40,6 +44,10 @@ DATALIST=${T2G_DATALIST:-$REPO/datalist_N1510.json}
 N_SAMPLES=${T2G_N_SAMPLES:-10000}
 NUM_SHARDS=${T2G_NUM_SHARDS:-20}
 SEED=${T2G_MANIFEST_SEED:-12345}
+
+# Molecular conditioning toggles (optional).
+USE_MOLECULAR=${USE_MOLECULAR:-0}
+BALANCE_MODE=${BALANCE_MODE:-joint}
 
 module load python3/3.11 2>/dev/null || true
 
@@ -64,8 +72,16 @@ echo "Out root:       $OUT_ROOT"
 echo "N samples:      $N_SAMPLES"
 echo "Num shards:     $NUM_SHARDS"
 echo "Seed:           $SEED"
+echo "USE_MOLECULAR:  $USE_MOLECULAR"
+echo "BALANCE_MODE:   $BALANCE_MODE"
 echo "PBS_JOBFS:      $PBS_JOBFS"
 echo "===================================================================="
+
+# Assemble optional molecular flags.
+MOL_ARGS=()
+if [[ "$USE_MOLECULAR" == "1" ]]; then
+    MOL_ARGS+=(--use_molecular --balance_mode "$BALANCE_MODE")
+fi
 
 python scripts/dataset_release/prepare_manifest.py \
     --datalist "$DATALIST" \
@@ -76,7 +92,8 @@ python scripts/dataset_release/prepare_manifest.py \
     --workers 16 \
     --tmp_dir "$PBS_JOBFS/t2g_manifest_tmp" \
     --out_root "$OUT_ROOT" \
-    --out "$OUT_ROOT/manifest.csv"
+    --out "$OUT_ROOT/manifest.csv" \
+    "${MOL_ARGS[@]}"
 
 echo "manifest written to $OUT_ROOT/manifest.csv"
 ls -lh "$OUT_ROOT/manifest.csv"

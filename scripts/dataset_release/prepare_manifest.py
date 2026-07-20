@@ -56,6 +56,67 @@ from mask_deformer import (         # noqa: E402
     sample_deform_params,
 )
 
+# Optional molecular conditioning (imported lazily inside main() to avoid
+# a hard dependency for the vanilla release pipeline).
+
+
+# ---------------------------------------------------------------------------
+# Molecular class-assignment plans
+# ---------------------------------------------------------------------------
+
+
+def _plan_molecular(
+    n_samples: int,
+    balance_mode: str,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return per-sample (idh_class, mgmt_class) arrays.
+
+    Modes:
+        * ``joint``: cycle deterministically through the four combinations
+          (wt,unm), (wt,met), (mut,unm), (mut,met) then shuffle. Every
+          bin gets exactly ``n_samples // 4`` samples (remainder assigned
+          round-robin).
+        * ``marginal``: sample IDH and MGMT independently 50/50.
+        * ``natural``: sample from a fixed empirical prior roughly matching
+          the training cohort (IDH: 80 wt / 20 mut; MGMT: 30 unm / 70 met).
+        * ``all_unknown``: reserve for negative-control ablations (both
+          fields set to UNKNOWN = 2 for every sample).
+    """
+    from text2glioma.training.molecular_conditioning import (
+        IDH_WILDTYPE, IDH_MUTANT, IDH_UNKNOWN,
+        MGMT_UNMETHYLATED, MGMT_METHYLATED, MGMT_UNKNOWN,
+    )
+
+    if balance_mode == "joint":
+        # 4 cells cycled then shuffled
+        cells = np.tile(
+            [
+                (IDH_WILDTYPE, MGMT_UNMETHYLATED),
+                (IDH_WILDTYPE, MGMT_METHYLATED),
+                (IDH_MUTANT,   MGMT_UNMETHYLATED),
+                (IDH_MUTANT,   MGMT_METHYLATED),
+            ],
+            (n_samples // 4 + 1, 1),
+        )[:n_samples]
+        rng.shuffle(cells)
+        idh_arr  = cells[:, 0].astype(int)
+        mgmt_arr = cells[:, 1].astype(int)
+    elif balance_mode == "marginal":
+        idh_arr  = rng.choice([IDH_WILDTYPE, IDH_MUTANT],       size=n_samples)
+        mgmt_arr = rng.choice([MGMT_UNMETHYLATED, MGMT_METHYLATED], size=n_samples)
+    elif balance_mode == "natural":
+        idh_arr  = rng.choice([IDH_WILDTYPE, IDH_MUTANT],
+                              size=n_samples, p=[0.80, 0.20])
+        mgmt_arr = rng.choice([MGMT_UNMETHYLATED, MGMT_METHYLATED],
+                              size=n_samples, p=[0.30, 0.70])
+    elif balance_mode == "all_unknown":
+        idh_arr  = np.full(n_samples, IDH_UNKNOWN,  dtype=int)
+        mgmt_arr = np.full(n_samples, MGMT_UNKNOWN, dtype=int)
+    else:
+        raise ValueError(f"unknown balance_mode: {balance_mode!r}")
+    return idh_arr, mgmt_arr
+
 
 # ---------------------------------------------------------------------------
 # Worker: derive prompt from a deformed mask via VASARI-auto
@@ -80,6 +141,8 @@ def _run_one(job: dict) -> dict:
     max_retries: int = job.get("max_retries", 5)
     deform_seed_start: int = job["deform_seed"]
     out_root = Path(job["out_root"])
+    idh_class:  int = int(job.get("idh",  -1))   # -1 sentinel = not set
+    mgmt_class: int = int(job.get("mgmt", -1))
 
     sample_dir = out_root / f"shard_{shard:04d}" / sample_id
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +238,8 @@ def _run_one(job: dict) -> dict:
             "deform_attempts": attempt + 1,
             "deform_ratio": float(info.get("ratio", 1.0)),
             "mask_persisted_path": str(final_mask_path),
+            "idh":  idh_class,
+            "mgmt": mgmt_class,
         }
 
     return {"idx": idx, "sample_id": sample_id, "shard": shard,
@@ -221,6 +286,14 @@ def main() -> None:
                          "and the generation driver reads them from there.")
     ap.add_argument("--out", type=Path, required=True,
                     help="Manifest CSV output path.")
+    ap.add_argument("--use_molecular", action="store_true",
+                    help="Assign IDH/MGMT class conditioning per sample. "
+                         "Downstream generation will pass these through the "
+                         "MolecularClassConditioning head. Requires the LDM "
+                         "checkpoint to have a trained molecular_head.")
+    ap.add_argument("--balance_mode", default="joint",
+                    choices=["joint", "marginal", "natural", "all_unknown"],
+                    help="How to distribute molecular classes across the release.")
     args = ap.parse_args()
 
     if args.tmp_dir is not None:
@@ -242,6 +315,19 @@ def main() -> None:
     deform_seeds  = rng.integers(0, 2**31 - 1_000, size=args.n_samples).astype(int)
     ldm_seeds     = rng.integers(0, 2**31 - 1,     size=args.n_samples).astype(int)
 
+    # Molecular class assignment (deterministic from --seed).
+    if args.use_molecular:
+        idh_arr, mgmt_arr = _plan_molecular(args.n_samples, args.balance_mode, rng)
+        from collections import Counter
+        joint = Counter(zip(idh_arr.tolist(), mgmt_arr.tolist()))
+        print(f"molecular:   mode={args.balance_mode}, joint counts:",
+              file=sys.stderr, flush=True)
+        for (i, m), n in sorted(joint.items()):
+            print(f"    (idh={i}, mgmt={m}): {n}", file=sys.stderr, flush=True)
+    else:
+        idh_arr  = np.full(args.n_samples, -1, dtype=int)   # sentinel for "not set"
+        mgmt_arr = np.full(args.n_samples, -1, dtype=int)
+
     jobs: list[dict] = []
     for i in range(args.n_samples):
         mp_idx = int(mask_indices[i])
@@ -254,6 +340,8 @@ def main() -> None:
             "deform_seed": int(deform_seeds[i]),
             "tmp_dir":     str(args.tmp_dir) if args.tmp_dir else None,
             "out_root":    str(args.out_root),
+            "idh":         int(idh_arr[i]),
+            "mgmt":        int(mgmt_arr[i]),
         })
 
     results: list[dict | None] = [None] * args.n_samples
@@ -320,6 +408,8 @@ def main() -> None:
             "deform_ratio":     float(r["deform_ratio"]),
             "ldm_seed":         int(ldm_seeds[r["idx"]]),
             "cfg":              float(args.cfg),
+            "idh":              int(r.get("idh",  -1)),
+            "mgmt":             int(r.get("mgmt", -1)),
         })
 
     df = pd.DataFrame(rows)
@@ -345,6 +435,11 @@ def main() -> None:
           f"(p10={df.deform_ratio.quantile(0.10):.3f}, "
           f"p90={df.deform_ratio.quantile(0.90):.3f})",
           file=sys.stderr, flush=True)
+
+    if args.use_molecular:
+        joint_counts = df.groupby(["idh", "mgmt"]).size().to_dict()
+        print(f"  molecular joint distribution: {joint_counts}",
+              file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

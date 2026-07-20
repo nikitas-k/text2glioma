@@ -46,7 +46,10 @@ MANIFEST=${T2G_SYNTH_MANIFEST:-$OUT_ROOT/manifest.csv}
 STAGE1_CONFIG="$REPO/configs/stage1.yaml"
 STAGE2_CONFIG="$REPO/configs/ldm_radbert.yaml"
 STAGE1_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/autoencoder_stage1/checkpoint.pth"
-STAGE2_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/ldm_stage2/best_model.pth"
+# Stage-2 checkpoint. Defaults to the v1 non-molecular model. Point at
+# ldm_stage2_molecular/best_model.pth for the molecular-conditioned release;
+# the engine auto-detects the sibling best_molecular_head.pth if present.
+STAGE2_CKPT=${T2G_STAGE2_CKPT:-$RUNS_ROOT/stage1_kl1e6_freebits_lc6/ldm_stage2/best_model.pth}
 
 # ---- Environment -----------------------------------------------------
 module load python3/3.9.2
