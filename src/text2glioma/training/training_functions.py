@@ -1221,6 +1221,8 @@ def train_ldm(
     ema_decay: float = 0.9999,
     ema_state_dict: dict = None,
     snr_gamma: float = 5.0,
+    molecular_head: Optional[nn.Module] = None,
+    molecular_head_state_dict: dict = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler=None,
 ) -> float:
@@ -1243,6 +1245,13 @@ def train_ldm(
         ema_model.load_state_dict(ema_state_dict)
         if _is_main:
             print("[rank-0] [INFO] Loaded EMA state from checkpoint.")
+
+    # ── Molecular head state (resume) ────────────────────────────────
+    if molecular_head is not None and molecular_head_state_dict is not None:
+        mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
+        mh_raw.load_state_dict(molecular_head_state_dict)
+        if _is_main:
+            print("[rank-0] [INFO] Loaded molecular head state from checkpoint.")
 
     # ── Pre-compute min-SNR weights (Hang et al., 2023) ────────────
     # SNR(t) = alpha_bar(t) / (1 - alpha_bar(t))
@@ -1321,6 +1330,7 @@ def train_ldm(
             ema_model=ema_model,
             ema_decay=ema_decay,
             min_snr_weights=min_snr_weights,
+            molecular_head=molecular_head,
         )
 
         if (epoch + 1) % val_interval == 0:
@@ -1339,6 +1349,7 @@ def train_ldm(
                 scale_factor=scale_factor,
                 num_mask_classes=num_mask_classes,
                 latent_channels=latent_channels,
+                molecular_head=molecular_head,
             )
 
             if _is_main:
@@ -1353,12 +1364,18 @@ def train_ldm(
                 "optimizer": optimizer.state_dict(),
                 "best_loss": best_loss,
             }
+            if molecular_head is not None:
+                mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
+                checkpoint["molecular_head"] = mh_raw.state_dict()
             torch.save(checkpoint, str(run_dir / "checkpoint.pth"))
 
             if val_loss <= best_loss:
                 best_loss = val_loss
                 torch.save(raw_model.state_dict(), str(run_dir / "best_model.pth"))
                 torch.save(ema_model.state_dict(), str(run_dir / "best_model_ema.pth"))
+                if molecular_head is not None:
+                    mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
+                    torch.save(mh_raw.state_dict(), str(run_dir / "best_molecular_head.pth"))
 
     if _is_main:
         print(f"[rank-0] [INFO] Training finished!")
@@ -1391,6 +1408,7 @@ def train_epoch_ldm(
     ema_model: Any = None,
     ema_decay: float = 0.9999,
     min_snr_weights: torch.Tensor = None,
+    molecular_head: Optional[nn.Module] = None,
     # Deprecated — kept for backwards compatibility with queued jobs.
     scaler=None,
 ) -> None:
@@ -1429,6 +1447,21 @@ def train_epoch_ldm(
 
             # Prepare text conditioning (with independent text dropout)
             cond, uncond = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=dropout_p, device=device)
+
+            # Optional molecular class conditioning.
+            # Concatenate learnable IDH/MGMT pseudo-tokens onto the RadBERT
+            # token sequence. Both cond and uncond are extended so the
+            # downstream joint_dropout mask flips text AND molecular in
+            # sync when it fires. The molecular head applies its own
+            # per-field dropout-to-unknown internally in training mode.
+            if molecular_head is not None:
+                idh  = x["idh"].to(device).long()
+                mgmt = x["mgmt"].to(device).long()
+                mol_tokens = molecular_head(idh, mgmt)                        # (B, 2, D)
+                mol_null   = molecular_head.null_tokens(
+                    images.size(0), device=device, dtype=cond.dtype)          # (B, 2, D)
+                cond   = torch.cat([cond,   mol_tokens.to(cond.dtype)],   dim=1)  # (B, 128+2, D)
+                uncond = torch.cat([uncond, mol_null.to(uncond.dtype)], dim=1)  # (B, 128+2, D)
 
             # Joint uncond dropout: on top of the independent text/mask dropouts,
             # force BOTH branches to their uncond state on a per-sample Bernoulli
@@ -1542,6 +1575,7 @@ def eval_ldm(
     scale_factor: float = 1.0,
     num_mask_classes: int = 4,
     latent_channels: int = 3,
+    molecular_head: Optional[nn.Module] = None,
 ) -> float:
     model.eval()
     total_losses = OrderedDict()
@@ -1578,6 +1612,13 @@ def eval_ldm(
             ).to(device)
 
             cond, _ = prepare_conditioning(tokenizer, text_encoder, reports, images.size(0), dropout_p=0.0, device=device)
+
+            # Optional molecular class conditioning (no dropout at eval).
+            if molecular_head is not None:
+                idh  = x["idh"].to(device).long()
+                mgmt = x["mgmt"].to(device).long()
+                mol_tokens = molecular_head(idh, mgmt)                        # (B, 2, D)
+                cond = torch.cat([cond, mol_tokens.to(cond.dtype)], dim=1)    # (B, 128+2, D)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)

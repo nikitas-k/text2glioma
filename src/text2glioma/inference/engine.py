@@ -240,6 +240,8 @@ class GenerationResult:
     seed: int = 0
     steps: int = 50
     mode: str = "text+mask"
+    idh: Optional[int] = None
+    mgmt: Optional[int] = None
 
     def to_nifti_list(self) -> list[nib.Nifti1Image]:
         arr = self.images[0].detach().cpu().numpy().astype(np.float32)  # (C, D, H, W)
@@ -287,6 +289,7 @@ class Text2GliomaEngine:
         device: str = "auto",
         cache_dir: Optional[str] = None,
         local_text_encoder: bool = True,
+        molecular_head_ckpt: Optional[str] = None,
     ):
         self.device = _resolve_device(device)
         self.stage1_config = stage1_config
@@ -372,6 +375,35 @@ class Text2GliomaEngine:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+        # -- Optional molecular class-conditioning head --
+        # If a sibling ``best_molecular_head.pth`` (or explicit
+        # ``molecular_head_ckpt``) exists, load a
+        # ``MolecularClassConditioning`` module and route two learnable
+        # pseudo-tokens (IDH, MGMT) alongside the RadBERT text embeddings.
+        # Silently absent when the stage-2 model was trained without it.
+        self.molecular_head: Optional[torch.nn.Module] = None
+        mh_ckpt: Optional[Path] = None
+        if molecular_head_ckpt is not None:
+            mh_ckpt = Path(molecular_head_ckpt)
+        else:
+            sibling = Path(stage2_ckpt).parent / "best_molecular_head.pth"
+            if sibling.is_file():
+                mh_ckpt = sibling
+        if mh_ckpt is not None and mh_ckpt.is_file():
+            from text2glioma.training.molecular_conditioning import (
+                MolecularClassConditioning,
+            )
+            hidden_dim = int(getattr(self.text_encoder.config, "hidden_size",
+                                      getattr(self.text_encoder.config, "dim", 768)))
+            self.molecular_head = MolecularClassConditioning(
+                hidden_dim=hidden_dim,
+                dropout_to_unknown_p=0.0,   # inference: no dropout
+            )
+            self.molecular_head.load_state_dict(
+                torch.load(str(mh_ckpt), map_location="cpu"), strict=True,
+            )
+            self.molecular_head = self.molecular_head.to(self.device).eval()
+
     # ------------------------------------------------------------------
 
     @classmethod
@@ -403,6 +435,8 @@ class Text2GliomaEngine:
         seed: int = 42,
         steps: int = 50,
         mode: str = "text+mask",
+        idh: Optional[int] = None,
+        mgmt: Optional[int] = None,
     ) -> GenerationResult:
         """Generate one 4-modality sample.
 
@@ -424,6 +458,15 @@ class Text2GliomaEngine:
             mode: One of ``"text+mask"``, ``"mask-only"``, ``"text-only"``.
                 ``text-only`` is the experimental / unsupported path
                 that reverts to the healthy-brain baseline; see §3.5.
+            idh: Target IDH status for molecular class conditioning.
+                ``0`` = wildtype, ``1`` = mutant, ``2`` = unknown (or
+                pass ``None`` for the UNKNOWN / null direction). Only
+                used when the engine was loaded with a
+                ``molecular_head_ckpt`` (or a sibling
+                ``best_molecular_head.pth``) \u2014 silently ignored
+                otherwise.
+            mgmt: Target MGMT status. ``0`` = unmethylated, ``1`` =
+                methylated, ``2`` = unknown / ``None``.
 
         Returns:
             :class:`GenerationResult` with per-modality volumes in
@@ -465,6 +508,25 @@ class Text2GliomaEngine:
         cond_embeds = _encode_text(self.tokenizer, self.text_encoder, prompt_text, self.device)
         uncond_embeds = _encode_text(self.tokenizer, self.text_encoder, "", self.device)
 
+        # ---- Optional molecular class conditioning ----
+        # If the engine loaded a molecular head, append the two IDH/MGMT
+        # pseudo-tokens to both cond and uncond sequences. The single CFG
+        # scale then guides over the combined (text + molecular) direction.
+        if self.molecular_head is not None:
+            from text2glioma.training.molecular_conditioning import (
+                IDH_UNKNOWN, MGMT_UNKNOWN,
+            )
+            idh_int  = IDH_UNKNOWN  if idh  is None else int(idh)
+            mgmt_int = MGMT_UNKNOWN if mgmt is None else int(mgmt)
+            idh_t  = torch.tensor([idh_int],  dtype=torch.long, device=self.device)
+            mgmt_t = torch.tensor([mgmt_int], dtype=torch.long, device=self.device)
+            mol_tokens = self.molecular_head(idh_t, mgmt_t).to(cond_embeds.dtype)
+            mol_null   = self.molecular_head.null_tokens(
+                batch_size=1, device=self.device, dtype=uncond_embeds.dtype,
+            )
+            cond_embeds   = torch.cat([cond_embeds,   mol_tokens], dim=1)  # (1, 128+2, D)
+            uncond_embeds = torch.cat([uncond_embeds, mol_null],   dim=1)  # (1, 128+2, D)
+
         # ---- Sampling ----
         self.scheduler.set_timesteps(min(steps, self.scheduler.num_train_timesteps))
         torch.manual_seed(int(seed))
@@ -505,4 +567,6 @@ class Text2GliomaEngine:
             seed=int(seed),
             steps=int(steps),
             mode=mode,
+            idh=(int(idh) if idh is not None else None),
+            mgmt=(int(mgmt) if mgmt is not None else None),
         )

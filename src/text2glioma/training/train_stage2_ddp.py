@@ -118,6 +118,21 @@ def parse_args() -> argparse.Namespace:
                     help="Probability of forcing BOTH text and mask to their uncond "
                          "state on the same sample, applied on top of the independent "
                          "dropouts. Directly trains the fully-unconditional CFG branch.")
+    p.add_argument("--use_molecular_conditioning", action="store_true",
+                    help="Enable learnable IDH/MGMT class conditioning "
+                         "(prepends 2 learnable pseudo-tokens to the RadBERT text "
+                         "embedding sequence). Requires the datalist to carry "
+                         "'idh' and 'mgmt' integer fields (0/1/2 for wt/mut/unk "
+                         "and unm/met/unk). See src/text2glioma/training/"
+                         "molecular_conditioning.py.")
+    p.add_argument("--molecular_dropout_p", type=float, default=0.2,
+                    help="Independent per-field dropout-to-unknown probability "
+                         "for the molecular head at training time. Drives the "
+                         "CFG null direction for IDH and MGMT independently.")
+    p.add_argument("--molecular_lr_multiplier", type=float, default=1.0,
+                    help="LR multiplier for the molecular embedding parameters "
+                         "(applied on top of the base LR). Set >1 for faster "
+                         "convergence on the 4.6k new params.")
     p.add_argument("--cache_dir", type=str, default=None,
                     help="Cache directory for HuggingFace models / tokenizers.")
     p.add_argument("--stage2_run_dir", type=str, default=None,
@@ -574,9 +589,43 @@ def main():
         param.requires_grad = False
 
     # ------------------------------------------------------------------
+    # Optional molecular class-conditioning head (IDH + MGMT)
+    # ------------------------------------------------------------------
+    molecular_head = None
+    if args.use_molecular_conditioning:
+        from text2glioma.training.molecular_conditioning import MolecularClassConditioning
+        # Introspect the text-encoder hidden dim so the two branches emit
+        # equal-width vectors and can be concatenated along the sequence axis.
+        hidden_dim = int(getattr(text_encoder.config, "hidden_size",
+                                  getattr(text_encoder.config, "dim", 768)))
+        molecular_head = MolecularClassConditioning(
+            hidden_dim=hidden_dim,
+            dropout_to_unknown_p=float(args.molecular_dropout_p),
+        ).to(device)
+        print0(f"Molecular head enabled: hidden_dim={hidden_dim}, "
+               f"dropout_p={args.molecular_dropout_p}, "
+               f"params={sum(p.numel() for p in molecular_head.parameters())}",
+               rank)
+
+    # ------------------------------------------------------------------
     # Optimiser
     # ------------------------------------------------------------------
-    optimizer = optim.AdamW(ldm.parameters(), lr=config["model"].get("base_lr", 1e-4))
+    base_lr = config["model"].get("base_lr", 1e-4)
+    if molecular_head is not None and args.molecular_lr_multiplier != 1.0:
+        # Separate param group so the fresh molecular embeddings can be
+        # trained at a different LR than the fine-tuning LDM body.
+        optimizer = optim.AdamW([
+            {"params": list(ldm.parameters()),           "lr": base_lr},
+            {"params": list(molecular_head.parameters()), "lr": base_lr * float(args.molecular_lr_multiplier)},
+        ])
+        print0(f"Optimizer: base_lr={base_lr}, molecular_lr={base_lr * args.molecular_lr_multiplier}", rank)
+    elif molecular_head is not None:
+        optimizer = optim.AdamW(
+            list(ldm.parameters()) + list(molecular_head.parameters()),
+            lr=base_lr,
+        )
+    else:
+        optimizer = optim.AdamW(ldm.parameters(), lr=base_lr)
 
     # ------------------------------------------------------------------
     # Latent scale factor
@@ -623,6 +672,7 @@ def main():
     ckpt_path = run_dir / "checkpoint.pth"
 
     ema_state_dict = None
+    molecular_head_state_dict = None
     # ldm may already be DDP-wrapped, in which case its state_dict keys are
     # prefixed with `module.`. Checkpoints saved by this trainer use
     # raw_model.state_dict() (no prefix), so load into the underlying module
@@ -640,6 +690,12 @@ def main():
         ema_state_dict = ckpt.get("ema")
         if ema_state_dict is not None:
             print0("  Loaded EMA state from checkpoint.", rank)
+        molecular_head_state_dict = ckpt.get("molecular_head")
+        if molecular_head is not None and molecular_head_state_dict is not None:
+            print0("  Loaded molecular head state from checkpoint.", rank)
+        elif molecular_head is not None:
+            print0("  [WARN] --use_molecular_conditioning set but checkpoint has no "
+                   "'molecular_head' key; starting from fresh init.", rank)
         print0(f"Resumed at epoch {start_epoch}", rank)
     elif args.warm_start_stage2:
         seed_path = Path(args.warm_start_stage2).expanduser().resolve()
@@ -654,6 +710,9 @@ def main():
         ema_state_dict = seed.get("ema")
         if ema_state_dict is not None:
             print0("  Loaded EMA state from warm-start checkpoint.", rank)
+        # Warm-start checkpoints predate the molecular head; leave it at fresh init.
+        if molecular_head is not None:
+            print0("  Molecular head: fresh init (warm-start seed has none).", rank)
     else:
         print0("Starting fresh training.", rank)
 
@@ -670,6 +729,15 @@ def main():
         if args.mask_dropout_p is not None
         else config.get("mask", {}).get("dropout_p", 0.2)
     )
+
+    # ------------------------------------------------------------------
+    # DDP wrap the molecular head (if enabled and distributed)
+    # ------------------------------------------------------------------
+    if molecular_head is not None and distributed:
+        molecular_head = torch.nn.parallel.DistributedDataParallel(
+            molecular_head, device_ids=[local_rank], output_device=local_rank,
+            find_unused_parameters=False,
+        )
 
     # ------------------------------------------------------------------
     # Train
@@ -700,6 +768,8 @@ def main():
         joint_dropout_p=float(args.joint_dropout_p),
         latent_channels=stage1_latent_ch,
         ema_state_dict=ema_state_dict,
+        molecular_head=molecular_head,
+        molecular_head_state_dict=molecular_head_state_dict,
     )
 
     print0(f"Training finished.  Final val loss: {val_loss:.4f}", rank)
