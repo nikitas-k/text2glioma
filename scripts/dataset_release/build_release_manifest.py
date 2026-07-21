@@ -73,19 +73,54 @@ def main() -> None:
     ap.add_argument("--memorisation_threshold", type=float,
                     default=DEFAULT_MEMORISATION_THRESHOLD)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--workers", type=int, default=32,
+                    help="Threads for parallel metadata.json reads. "
+                         "I/O bound on network filesystems (e.g. Gadi /g/data) "
+                         "so threads work fine and process fork is unnecessary.")
     args = ap.parse_args()
 
     # ---- Collect per-sample metadata ----
+    print(f"scanning {args.synth_root} for metadata.json files ...",
+          file=sys.stderr, flush=True)
+    meta_paths = sorted(args.synth_root.glob("shard_*/sample_*/metadata.json"))
+    print(f"  found {len(meta_paths)} sample directories", file=sys.stderr, flush=True)
+
+    def _read_one(mp: Path) -> tuple[dict | None, Path, str | None]:
+        try:
+            with open(mp) as f:
+                meta = json.load(f)
+            return _flatten_metadata(meta, mp.parent), mp, None
+        except Exception as e:
+            return None, mp, f"{type(e).__name__}: {e}"
+
     rows: list[dict] = []
     n_missing = 0
-    for meta_path in sorted(args.synth_root.glob("shard_*/sample_*/metadata.json")):
-        try:
-            with open(meta_path) as f:
-                meta = json.load(f)
-            rows.append(_flatten_metadata(meta, meta_path.parent))
-        except Exception as e:
-            print(f"[warn] {meta_path}: {e}", file=sys.stderr)
-            n_missing += 1
+    if args.workers <= 1 or len(meta_paths) < 64:
+        # Small collection or user requested serial - avoid thread overhead.
+        for mp in meta_paths:
+            row, _, err = _read_one(mp)
+            if err is not None:
+                print(f"[warn] {mp}: {err}", file=sys.stderr)
+                n_missing += 1
+            else:
+                rows.append(row)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for i, (row, mp, err) in enumerate(pool.map(_read_one, meta_paths, chunksize=64)):
+                if err is not None:
+                    print(f"[warn] {mp}: {err}", file=sys.stderr)
+                    n_missing += 1
+                else:
+                    rows.append(row)
+                if (i + 1) % 1000 == 0:
+                    elapsed = time.time() - t0
+                    rate = (i + 1) / max(elapsed, 1e-6)
+                    print(f"  {i+1}/{len(meta_paths)} ({rate:.0f}/s, "
+                          f"eta {(len(meta_paths) - i - 1) / max(rate, 1e-6):.0f}s)",
+                          file=sys.stderr, flush=True)
 
     df = pd.DataFrame(rows)
     print(f"collected {len(df)} sample metadata rows from {args.synth_root}")
