@@ -92,36 +92,47 @@ def _filter_known(items: list[dict], task: str) -> list[dict]:
     return [it for it in items if int(it.get(key, unk)) != unk]
 
 
+def _normalise_item(item: dict, source: str) -> dict:
+    """Project a heterogeneous datalist / manifest entry to the minimal
+    schema the trainer's collate expects.
+
+    All samples in a batch must share the exact same set of keys or
+    PyTorch's ``default_collate`` raises ``KeyError``. Real items from
+    the datalist carry ``label``, ``subject_id``, ``impression``,
+    ``findings`` etc; synth items carry ``sample_id``. Only the four
+    fields below are actually consumed downstream.
+    """
+    return {
+        "image":  str(item["image"]),
+        "idh":    int(item.get("idh",  IDH_UNKNOWN)),
+        "mgmt":   int(item.get("mgmt", MGMT_UNKNOWN)),
+        "source": source,
+    }
+
+
 def load_real_split(datalist_path: Path, task: str
                     ) -> tuple[list[dict], list[dict]]:
     """Return (train_items, val_items) filtered to the labelled subset."""
     with datalist_path.open() as fh:
         dl = json.load(fh)
-    train = _filter_known(dl.get("training",   []), task)
-    val   = _filter_known(dl.get("validation", []), task)
+    train = [_normalise_item(it, "real") for it in _filter_known(dl.get("training",   []), task)]
+    val   = [_normalise_item(it, "real") for it in _filter_known(dl.get("validation", []), task)]
     return train, val
 
 
 def load_synth_items(synth_manifest: Path, synth_root: Path, task: str,
                      n_synthetic: int) -> list[dict]:
     """Read the release manifest and select the first ``n_synthetic``
-    samples with a KNOWN status for the requested task.
-
-    Each returned entry has the schema expected by the trainer:
-        {"image": <abs path>, "label": <target-int>, "source": "synth"}
-    """
+    samples with a KNOWN status for the requested task."""
     if n_synthetic <= 0:
         return []
 
     import pandas as pd
     df = pd.read_csv(synth_manifest)
 
-    # We need to enrich the release manifest with per-sample IDH/MGMT
-    # labels; those live in metadata.json (release_manifest may not
-    # carry them yet). Read from metadata.json to be safe.
+    # Enrich from metadata.json if the manifest lacks the task column.
     if task not in df.columns:
-        # Fall back: enrich from per-sample metadata.json.
-        def _fetch_label(row):
+        def _fetch_label(row, task=task):
             meta_path = synth_root / row["relpath_image"].replace("image.nii.gz", "metadata.json")
             try:
                 with open(meta_path) as fh:
@@ -131,7 +142,20 @@ def load_synth_items(synth_manifest: Path, synth_root: Path, task: str,
                 return _UNKNOWN_BY_TASK[task]
         df[task] = df.apply(_fetch_label, axis=1)
 
-    # Filter to known-status only.
+    # We also need the OTHER task label so the item schema matches real
+    # samples (which always carry both idh and mgmt).
+    other_task = "mgmt" if task == "idh" else "idh"
+    if other_task not in df.columns:
+        def _fetch_other(row, ot=other_task):
+            meta_path = synth_root / row["relpath_image"].replace("image.nii.gz", "metadata.json")
+            try:
+                with open(meta_path) as fh:
+                    meta = json.load(fh)
+                return int(meta.get(ot, _UNKNOWN_BY_TASK[ot]))
+            except Exception:
+                return _UNKNOWN_BY_TASK[ot]
+        df[other_task] = df.apply(_fetch_other, axis=1)
+
     unk = _UNKNOWN_BY_TASK[task]
     df = df[df[task] != unk].reset_index(drop=True)
     df = df.sort_values("sample_id").reset_index(drop=True)
@@ -140,16 +164,19 @@ def load_synth_items(synth_manifest: Path, synth_root: Path, task: str,
     items: list[dict] = []
     for _, r in take.iterrows():
         image_path = synth_root / r["relpath_image"]
-        items.append({
-            "image":  str(image_path),
-            task:     int(r[task]),
-            "source": "synth",
-            "sample_id": r["sample_id"],
-        })
+        items.append(_normalise_item(
+            {
+                "image": str(image_path),
+                "idh":   int(r["idh"]),
+                "mgmt":  int(r["mgmt"]),
+            },
+            source="synth",
+        ))
     return items
 
 
 def _tag_source(items: list[dict], source: str) -> list[dict]:
+    """Deprecated: kept only for backwards compatibility. Use _normalise_item."""
     return [{**it, "source": source} for it in items]
 
 
@@ -303,8 +330,7 @@ def main() -> None:
 
     # ── Data ──
     real_train, real_val = load_real_split(args.real_datalist, args.task)
-    real_train = _tag_source(real_train, "real")
-    real_val   = _tag_source(real_val,   "real")
+    # (real items are already normalised with source="real" by load_real_split)
     print(f"Real: {len(real_train)} train / {len(real_val)} val (task={args.task})",
           file=sys.stderr, flush=True)
 
