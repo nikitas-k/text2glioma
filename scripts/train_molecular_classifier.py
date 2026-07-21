@@ -300,7 +300,23 @@ def main() -> None:
                     help="Release manifest CSV. Defaults to <synth_root>/manifest_release.csv.")
     ap.add_argument("--n_synthetic", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--n_epochs", type=int, default=200)
+    ap.add_argument("--n_epochs", type=int, default=200,
+                    help="Upper bound on epochs. Effective epoch count is "
+                         "min(n_epochs, ceil(total_grad_updates / batches_per_epoch)).")
+    ap.add_argument("--total_grad_updates", type=int, default=None,
+                    help="Optional hard cap on total optimizer steps across the "
+                         "run. When set, keeps compute budget roughly constant "
+                         "across n_synthetic conditions (larger datasets get "
+                         "proportionally fewer epochs).")
+    ap.add_argument("--patience", type=int, default=None,
+                    help="Early-stop after this many validation cycles with no "
+                         "AUROC improvement. Default: disabled (train to n_epochs).")
+    ap.add_argument("--resume", action="store_true",
+                    help="If out_dir already contains best_model.pth + resume_state.pt, "
+                         "load them and continue training from the recorded epoch.")
+    ap.add_argument("--force", action="store_true",
+                    help="Ignore an existing metrics.json in out_dir and retrain "
+                         "from scratch (or from --resume state if present).")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--val_batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -321,6 +337,25 @@ def main() -> None:
 
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Skip-if-done: if a metrics.json already exists in out_dir and looks
+    # complete, exit early. Prevents redundant compute when the whole grid
+    # is requeued after some jobs already finished. Pass --force to override.
+    done_marker = out_dir / "metrics.json"
+    if done_marker.exists() and not args.force:
+        try:
+            with done_marker.open() as fh:
+                prev = json.load(fh)
+            if prev.get("best_epoch", -1) > 0 and "final_metrics" in prev:
+                print(f"[skip-if-done] {done_marker} already exists with "
+                      f"best_auroc={prev.get('best_auroc'):.4f} at epoch "
+                      f"{prev.get('best_epoch')}. Pass --force to retrain.",
+                      file=sys.stderr)
+                return
+        except Exception as e:
+            print(f"[warn] existing metrics.json unreadable ({e}); retraining.",
+                  file=sys.stderr)
+
     cache_dir = args.cache_dir or (out_dir / "cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -381,11 +416,39 @@ def main() -> None:
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
     )
 
-    # ── Train ──
+    # ── Effective epoch budget ──
+    batches_per_epoch = max(len(train_loader), 1)
+    effective_n_epochs = args.n_epochs
+    if args.total_grad_updates is not None:
+        cap_epochs = max(1, math.ceil(args.total_grad_updates / batches_per_epoch))
+        effective_n_epochs = min(args.n_epochs, cap_epochs)
+        print(f"Total-gradient-updates cap: {args.total_grad_updates} steps -> "
+              f"{cap_epochs} epochs at {batches_per_epoch} batches/epoch "
+              f"(effective n_epochs = {effective_n_epochs})", file=sys.stderr)
+
+    # ── Resume ──
     history: list[dict] = []
     best_auroc = -1.0
     best_epoch = -1
-    for epoch in range(args.n_epochs):
+    start_epoch = 0
+    epochs_without_improvement = 0
+    resume_state_path = out_dir / "resume_state.pt"
+    if args.resume and resume_state_path.exists() and (out_dir / "best_model.pth").exists():
+        rs = torch.load(str(resume_state_path), map_location="cpu")
+        model.load_state_dict(torch.load(str(out_dir / "best_model.pth"),
+                                          map_location="cpu"))
+        model.to(device)
+        optimizer.load_state_dict(rs["optimizer"])
+        start_epoch     = int(rs["next_epoch"])
+        best_auroc      = float(rs["best_auroc"])
+        best_epoch      = int(rs["best_epoch"])
+        history         = list(rs.get("history", []))
+        epochs_without_improvement = int(rs.get("epochs_without_improvement", 0))
+        print(f"Resumed from epoch {start_epoch}, best_auroc={best_auroc:.4f} "
+              f"@ epoch {best_epoch}", file=sys.stderr)
+
+    # ── Train ──
+    for epoch in range(start_epoch, effective_n_epochs):
         model.train()
         running_loss = 0.0
         n_batches = 0
@@ -401,7 +464,7 @@ def main() -> None:
             n_batches += 1
         train_loss = running_loss / max(n_batches, 1)
         writer_train.add_scalar("loss", train_loss, epoch)
-        print(f"[{epoch+1:03d}/{args.n_epochs}] train_loss={train_loss:.4f}",
+        print(f"[{epoch+1:03d}/{effective_n_epochs}] train_loss={train_loss:.4f}",
               file=sys.stderr, flush=True)
 
         # Release cached memory at end of epoch. Prevents accumulation of
@@ -413,7 +476,7 @@ def main() -> None:
         gc.collect()
 
         # ── Val ──
-        do_val = (epoch + 1) % args.val_interval == 0 or (epoch + 1) == args.n_epochs
+        do_val = (epoch + 1) % args.val_interval == 0 or (epoch + 1) == effective_n_epochs
         if do_val:
             metrics = evaluate(model, val_loader, args.task, device)
             metrics["epoch"] = epoch + 1
@@ -429,10 +492,32 @@ def main() -> None:
                   f"balAcc={metrics['balanced_accuracy']:.4f}",
                   file=sys.stderr, flush=True)
 
+            improved = False
             if not math.isnan(metrics["auroc"]) and metrics["auroc"] > best_auroc:
                 best_auroc = metrics["auroc"]
                 best_epoch = epoch + 1
                 torch.save(model.state_dict(), out_dir / "best_model.pth")
+                improved = True
+
+            # Persist resume state (optimizer + counters) at every val cycle.
+            torch.save({
+                "next_epoch": epoch + 1,
+                "best_auroc": best_auroc,
+                "best_epoch": best_epoch,
+                "history":    history,
+                "optimizer":  optimizer.state_dict(),
+                "epochs_without_improvement": epochs_without_improvement,
+            }, out_dir / "resume_state.pt")
+
+            if improved:
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if args.patience is not None and epochs_without_improvement >= args.patience:
+                    print(f"Early stop: {epochs_without_improvement} val cycles "
+                          f"without AUROC improvement (patience={args.patience})",
+                          file=sys.stderr, flush=True)
+                    break
 
     # ── Save results ──
     torch.save(model.state_dict(), out_dir / "final_model.pth")
