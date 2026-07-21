@@ -88,7 +88,7 @@ python -u scripts/train_molecular_classifier.py \
     --n_synthetic    "$N_SYNTH" \
     --seed           "$SEED" \
     --n_epochs       200 \
-    --batch_size     16 \
+    --batch_size     8 \
     --val_batch_size 8 \
     --num_workers    8 \
     --val_interval   5 \
