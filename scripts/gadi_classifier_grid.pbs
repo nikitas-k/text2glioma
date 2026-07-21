@@ -2,7 +2,7 @@
 
 #PBS -l ncpus=12
 #PBS -l ngpus=1
-#PBS -l mem=64GB
+#PBS -l mem=96GB
 #PBS -l jobfs=100GB
 #PBS -q gpuvolta
 #PBS -P vp06

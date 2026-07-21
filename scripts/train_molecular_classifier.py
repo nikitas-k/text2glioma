@@ -50,6 +50,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import sys
@@ -402,6 +403,14 @@ def main() -> None:
         writer_train.add_scalar("loss", train_loss, epoch)
         print(f"[{epoch+1:03d}/{args.n_epochs}] train_loss={train_loss:.4f}",
               file=sys.stderr, flush=True)
+
+        # Release cached memory at end of epoch. Prevents accumulation of
+        # transient tensor allocations from the DataLoader workers +
+        # pinned-memory pool + CUDA caching allocator, which can otherwise
+        # OOM-kill long-running jobs even when steady-state usage is fine.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
         # ── Val ──
         do_val = (epoch + 1) % args.val_interval == 0 or (epoch + 1) == args.n_epochs
