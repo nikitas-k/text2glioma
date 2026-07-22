@@ -86,6 +86,49 @@ _UNKNOWN_BY_TASK = {"idh": IDH_UNKNOWN, "mgmt": MGMT_UNKNOWN}
 
 # ── Data assembly ──────────────────────────────────────────────────────
 
+def _validate_cache_dir(cache_dir: Path, workers: int = 32) -> int:
+    """Delete any cache files that fail to torch.load.
+
+    MONAI's ``PersistentDataset`` writes each transformed sample with a
+    non-atomic ``torch.save``; if the worker is killed mid-write (SIGTERM,
+    walltime cap, etc.) the resulting file is truncated and every future
+    read raises ``EOFError`` inside the DataLoader worker. This preflight
+    scans the cache dir, deletes any file that can't be loaded, and lets
+    the training loop transparently re-cache those samples.
+    """
+    if not cache_dir.exists():
+        return 0
+    files = [f for f in cache_dir.rglob("*") if f.is_file()]
+    if not files:
+        return 0
+
+    def _check(f: Path) -> Path | None:
+        try:
+            torch.load(str(f), weights_only=True, map_location="cpu")
+            return None
+        except Exception:
+            return f
+
+    corrupt: list[Path] = []
+    if workers <= 1 or len(files) < 32:
+        for f in files:
+            if _check(f) is not None:
+                corrupt.append(f)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for bad in pool.map(_check, files):
+                if bad is not None:
+                    corrupt.append(bad)
+
+    for f in corrupt:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return len(corrupt)
+
+
 def _filter_known(items: list[dict], task: str) -> list[dict]:
     """Drop entries whose task-specific status is UNKNOWN."""
     key = task
@@ -317,6 +360,10 @@ def main() -> None:
     ap.add_argument("--force", action="store_true",
                     help="Ignore an existing metrics.json in out_dir and retrain "
                          "from scratch (or from --resume state if present).")
+    ap.add_argument("--fresh_cache", action="store_true",
+                    help="Wipe cache_dir before training. Use if you suspect "
+                         "corruption; otherwise the trainer preflight-validates "
+                         "the cache and deletes only truncated files.")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--val_batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -358,6 +405,19 @@ def main() -> None:
 
     cache_dir = args.cache_dir or (out_dir / "cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Handle possibly-corrupt cache from a previous killed run.
+    if args.fresh_cache and cache_dir.exists():
+        import shutil
+        print(f"[fresh_cache] wiping {cache_dir}", file=sys.stderr, flush=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        n_corrupt = _validate_cache_dir(cache_dir, workers=32)
+        if n_corrupt > 0:
+            print(f"[cache_validate] deleted {n_corrupt} corrupt cache files "
+                  f"in {cache_dir} (will be re-cached on first read)",
+                  file=sys.stderr, flush=True)
 
     log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
