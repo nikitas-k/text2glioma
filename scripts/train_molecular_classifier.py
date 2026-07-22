@@ -141,6 +141,18 @@ def _install_atomic_cache_patch() -> None:
 
 
 _install_atomic_cache_patch()
+
+
+def _worker_init_atomic_cache(_worker_id):
+    """DataLoader worker_init_fn. Ensures the atomic-cache monkey-patch
+    is applied inside each spawned worker process. On systems where
+    DataLoader uses the 'spawn' start method (rather than 'fork'), workers
+    reimport MONAI without inheriting the parent's monkey-patch, so we
+    install it here. Must be module-level for spawn to pickle it.
+    """
+    _install_atomic_cache_patch()
+
+
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -588,13 +600,21 @@ def main() -> None:
               f"(n_real={n_real}, n_synth={n_synth}); expected batch composition "
               f"~50/50", file=sys.stderr)
 
+    # Ensure the atomic-cache monkey-patch applies inside each DataLoader
+    # worker. On Gadi Python 3.9.2 the workers are spawned (not forked),
+    # so they reimport MONAI without inheriting the parent's patch.
+    # _worker_init_atomic_cache is defined at module level so it can be
+    # pickled and sent to spawned workers.
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=train_shuffle, sampler=train_sampler,
                                num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False)
+                               pin_memory=True, drop_last=False,
+                               worker_init_fn=_worker_init_atomic_cache)
     val_loader   = DataLoader(val_ds,   batch_size=args.val_batch_size,
                                shuffle=False, num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False)
+                               pin_memory=True, drop_last=False,
+                               worker_init_fn=_worker_init_atomic_cache)
 
     # ── Model ──
     model = _make_model(device)
