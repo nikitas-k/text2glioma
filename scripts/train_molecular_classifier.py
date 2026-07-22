@@ -65,6 +65,82 @@ from monai.data import PersistentDataset
 from monai import transforms as T
 from monai.networks import nets
 from monai.utils import set_determinism
+
+
+# ── Monkey-patch atomic writes into PersistentDataset ──────────────────
+# MONAI's PersistentDataset._cachecheck writes each transformed sample
+# via ``tempfile.TemporaryDirectory()`` + ``shutil.move``. On Gadi, the
+# TemporaryDirectory defaults to /tmp which sits on a different
+# filesystem than /g/data, so shutil.move falls back to non-atomic
+# copy+delete. A SIGTERM mid-copy leaves a partial file at the target
+# path that every future read fails on with either EOFError or
+# RuntimeError('PytorchStreamReader failed reading zip archive').
+# Fix: (a) write the temp file in the SAME directory as the target
+# (same-filesystem guaranteed) so os.rename is atomic, and (b) broaden
+# the read-side corruption catcher to delete any file that torch.load
+# can't parse and re-transform.
+
+def _install_atomic_cache_patch() -> None:
+    import os
+    from copy import deepcopy
+    import torch as _torch
+    from monai.data import dataset as _monai_ds
+    from monai.utils.type_conversion import convert_to_tensor
+    if getattr(_monai_ds, "_atomic_cache_patched", False):
+        return
+
+    def _atomic_cachecheck(self, item_transformed):  # type: ignore[no-redef]
+        hashfile = None
+        if self.cache_dir is not None:
+            data_item_md5 = self.hash_func(item_transformed).decode("utf-8")
+            data_item_md5 += self.transform_hash
+            hashfile = self.cache_dir / f"{data_item_md5}.pt"
+
+        if hashfile is not None and hashfile.is_file():
+            try:
+                return _torch.load(str(hashfile), weights_only=True)
+            except Exception as e:
+                # Delete corrupt cache file and fall through to re-transform.
+                # Covers EOFError, UnpicklingError, RuntimeError (zip archive
+                # failure, invalid magic number, etc.).
+                try:
+                    hashfile.unlink()
+                except OSError:
+                    pass
+
+        _item_transformed = self._pre_transform(deepcopy(item_transformed))
+        if hashfile is None:
+            return _item_transformed
+
+        # Atomic write via same-directory temp file + os.rename.
+        # Same-filesystem guarantees os.rename is atomic on POSIX; a
+        # crash mid-torch.save leaves only the temp file (not the target)
+        # which can then be cleaned up by preflight validation next run.
+        tmp = hashfile.with_suffix(f".tmp.{os.getpid()}")
+        try:
+            _torch.save(
+                obj=convert_to_tensor(_item_transformed, convert_numeric=False),
+                f=str(tmp),
+                pickle_protocol=self.pickle_protocol,
+            )
+            # If another worker already wrote a good hashfile, we skip;
+            # otherwise rename atomically over the target (idempotent).
+            if not hashfile.is_file():
+                os.rename(str(tmp), str(hashfile))
+            else:
+                try: tmp.unlink()
+                except OSError: pass
+        except Exception:
+            try: tmp.unlink()
+            except OSError: pass
+            raise
+        return _item_transformed
+
+    _monai_ds.PersistentDataset._cachecheck = _atomic_cachecheck
+    _monai_ds._atomic_cache_patched = True
+
+
+_install_atomic_cache_patch()
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -89,18 +165,34 @@ _UNKNOWN_BY_TASK = {"idh": IDH_UNKNOWN, "mgmt": MGMT_UNKNOWN}
 def _validate_cache_dir(cache_dir: Path, workers: int = 32) -> int:
     """Delete any cache files that fail to torch.load.
 
-    MONAI's ``PersistentDataset`` writes each transformed sample with a
-    non-atomic ``torch.save``; if the worker is killed mid-write (SIGTERM,
-    walltime cap, etc.) the resulting file is truncated and every future
-    read raises ``EOFError`` inside the DataLoader worker. This preflight
-    scans the cache dir, deletes any file that can't be loaded, and lets
-    the training loop transparently re-cache those samples.
+    MONAI's ``PersistentDataset`` writes each transformed sample via a
+    tempfile+rename sequence that is only atomic when the tempfile lives
+    on the same filesystem as the target. If a worker is SIGTERM'd
+    mid-write (walltime cap, OOM, etc.) or if MONAI's default temp path
+    ends up on a different filesystem than the cache dir, the resulting
+    file may be truncated / half-written. Every subsequent read then
+    raises ``EOFError`` or ``RuntimeError('PytorchStreamReader ...')``.
+
+    This preflight scans the cache dir, deletes any file that ``torch.load``
+    can't parse, and also cleans up any orphaned ``.tmp.<pid>`` files
+    from a previous crashed run. The training loop then transparently
+    re-caches those samples.
     """
     if not cache_dir.exists():
         return 0
-    files = [f for f in cache_dir.rglob("*") if f.is_file()]
+
+    # Sweep orphaned temp files first — these are always garbage.
+    n_tmp_deleted = 0
+    for f in cache_dir.rglob("*.tmp.*"):
+        try:
+            f.unlink()
+            n_tmp_deleted += 1
+        except OSError:
+            pass
+
+    files = [f for f in cache_dir.rglob("*") if f.is_file() and ".tmp." not in f.name]
     if not files:
-        return 0
+        return n_tmp_deleted
 
     def _check(f: Path) -> Path | None:
         try:
@@ -126,7 +218,7 @@ def _validate_cache_dir(cache_dir: Path, workers: int = 32) -> int:
             f.unlink()
         except OSError:
             pass
-    return len(corrupt)
+    return len(corrupt) + n_tmp_deleted
 
 
 def _filter_known(items: list[dict], task: str) -> list[dict]:
