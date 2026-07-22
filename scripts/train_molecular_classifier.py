@@ -126,6 +126,12 @@ class SafePersistentDataset(PersistentDataset):
             return _item_transformed
 
         # Atomic same-directory temp file + os.rename (POSIX atomic).
+        # Ensure parent dir exists in case the filesystem lost the mkdir
+        # (rare on /g/data but observed with concurrent workers).
+        try:
+            hashfile.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         tmp = hashfile.with_suffix(f".tmp.{os.getpid()}")
         try:
             torch.save(
@@ -569,10 +575,18 @@ def main() -> None:
 
     # ── Transforms + loaders ──
     train_tf, val_tf = _build_transforms()
+    # Explicitly create the per-split subdirectories on /g/data. MONAI's
+    # PersistentDataset constructor DOES call mkdir on cache_dir, but on
+    # a distributed filesystem the mkdir may race with worker writes; making
+    # them here (before dataset construction) closes that race.
+    train_cache = cache_dir / "train"
+    val_cache   = cache_dir / "val"
+    train_cache.mkdir(parents=True, exist_ok=True)
+    val_cache.mkdir(parents=True, exist_ok=True)
     train_ds = SafePersistentDataset(data=train_items, transform=train_tf,
-                                      cache_dir=cache_dir / "train")
+                                      cache_dir=train_cache)
     val_ds   = SafePersistentDataset(data=val_items,   transform=val_tf,
-                                      cache_dir=cache_dir / "val")
+                                      cache_dir=val_cache)
 
     # Optional balanced-batch sampler: draws ~equal numbers of real and
     # synth samples per epoch. Each synth sample gets weight
