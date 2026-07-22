@@ -364,6 +364,17 @@ def main() -> None:
                     help="Wipe cache_dir before training. Use if you suspect "
                          "corruption; otherwise the trainer preflight-validates "
                          "the cache and deletes only truncated files.")
+    ap.add_argument("--class_weight_source", default="all", choices=["all", "real"],
+                    help="Which subset to compute inverse-frequency class "
+                         "weights from. 'all' (default) uses real+synth combined "
+                         "-- risks diluting the real-domain class-imbalance signal "
+                         "when synth is added at balanced 50/50. 'real' uses only "
+                         "real training samples, preserving the real-domain "
+                         "loss geometry regardless of synth volume.")
+    ap.add_argument("--balance_batches", action="store_true",
+                    help="Use WeightedRandomSampler to draw ~equal numbers of "
+                         "real and synth samples per mini-batch. Prevents synth "
+                         "from dominating gradient updates at large n_synthetic.")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--val_batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -460,8 +471,34 @@ def main() -> None:
                                   cache_dir=cache_dir / "train")
     val_ds   = PersistentDataset(data=val_items,   transform=val_tf,
                                   cache_dir=cache_dir / "val")
+
+    # Optional balanced-batch sampler: draws ~equal numbers of real and
+    # synth samples per epoch. Each synth sample gets weight
+    # n_real/n_synth, so their expected count per batch matches the reals.
+    train_sampler = None
+    train_shuffle = True
+    if args.balance_batches and len(synth_items) > 0:
+        from torch.utils.data import WeightedRandomSampler
+        n_real  = len(real_train)
+        n_synth = len(synth_items)
+        # Weight for each sample: 1.0 for real, n_real/n_synth for synth.
+        # Total weight mass is n_real + n_real = 2*n_real; sampler draws
+        # len(train_items) samples per epoch so we still see similar
+        # gradient volume, but source proportion is 50/50 in expectation.
+        w = np.ones(len(train_items), dtype=np.float64)
+        w[n_real:] = float(n_real) / max(n_synth, 1)
+        train_sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(w, dtype=torch.double),
+            num_samples=len(train_items), replacement=True,
+        )
+        train_shuffle = False   # sampler handles selection
+        print(f"[balance_batches] sampler weights: real={1.0}, synth={w[-1]:.4f} "
+              f"(n_real={n_real}, n_synth={n_synth}); expected batch composition "
+              f"~50/50", file=sys.stderr)
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                               shuffle=True, num_workers=args.num_workers,
+                               shuffle=train_shuffle, sampler=train_sampler,
+                               num_workers=args.num_workers,
                                pin_memory=True, drop_last=False)
     val_loader   = DataLoader(val_ds,   batch_size=args.val_batch_size,
                                shuffle=False, num_workers=args.num_workers,
@@ -469,8 +506,15 @@ def main() -> None:
 
     # ── Model ──
     model = _make_model(device)
-    weights = _class_weights(train_items, args.task, device)
-    print(f"Class weights: {weights.tolist()}", file=sys.stderr)
+    # Class weight source: 'all' = real+synth (default, may dilute signal);
+    # 'real' = real-only (preserves real-domain imbalance structure).
+    if args.class_weight_source == "real":
+        weight_items = real_train
+    else:
+        weight_items = train_items
+    weights = _class_weights(weight_items, args.task, device)
+    print(f"Class weights (source={args.class_weight_source}, "
+          f"N={len(weight_items)}): {weights.tolist()}", file=sys.stderr)
     criterion = torch.nn.CrossEntropyLoss(weight=weights)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
@@ -591,6 +635,8 @@ def main() -> None:
         "n_train_synth": len(synth_items),
         "n_val": len(real_val),
         "class_weights": weights.tolist(),
+        "class_weight_source": args.class_weight_source,
+        "balance_batches":     bool(args.balance_batches),
         "best_epoch": best_epoch,
         "best_auroc": best_auroc,
         "final_metrics": final_metrics,

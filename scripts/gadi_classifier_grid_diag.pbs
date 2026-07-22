@@ -1,0 +1,136 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=128GB
+#PBS -l jobfs=100GB
+#PBS -q gpuvolta
+#PBS -P vp06
+#PBS -l walltime=12:00:00
+#PBS -l storage=gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -r y
+#PBS -J 0-11
+#PBS -o /g/data/vp06/nk9793/text2glioma_classify_diag/logs/^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_classify_diag/logs/^array_index^.e
+#PBS -N cls_diag
+
+# ---------------------------------------------------------------------
+# Diagnostic classifier grid to isolate the cause of the observed
+# AUROC degradation with large synthetic augmentation.
+#
+# Original v1 result (from gadi_classifier_grid.pbs):
+#   IDH real+0    AUROC = 0.856  (baseline)
+#   IDH real+1000 AUROC = 0.824  (degraded)
+#   IDH real+10k  AUROC = 0.722  (severely degraded)
+#
+# Two candidate causes:
+#   A. Class weights (computed on real+synth combined) get diluted from
+#      the informative [0.63, 2.38] to ~[1.0, 1.0] when synth is added
+#      at balanced 50/50, removing the minority-class gradient boost.
+#   B. Batches are dominated by synth samples at large N (synth outnumbers
+#      real ~2:1 at N=1000; ~20:1 at N=10000), so gradients primarily
+#      learn synth features.
+#
+# This grid runs IDH at N=1000 (the point where degradation first appears)
+# with all 4 combinations of the two candidate fixes × 3 seeds = 12 runs.
+#
+# Grid decode (array index i):
+#   config ∈ {baseline, weight_real, balance_batches, both}
+#   seed ∈ {0, 1, 2}
+#   i = config_idx * 3 + seed_idx
+#
+# Submit (fits under gpuvolta's ≤15 per-user array limit):
+#   qsub scripts/gadi_classifier_grid_diag.pbs
+# ---------------------------------------------------------------------
+
+set -euo pipefail
+
+CONFIG_NAMES=(baseline weight_real balance_batches both)
+SEEDS=(0 1 2)
+
+I=${PBS_ARRAY_INDEX}
+CFG_IDX=$(( I / 3 ))
+SEED_IDX=$(( I % 3 ))
+
+CFG_NAME=${CONFIG_NAMES[$CFG_IDX]}
+SEED=${SEEDS[$SEED_IDX]}
+
+# Task and n_synth are fixed for the diagnostic.
+TASK=idh
+N_SYNTH=1000
+
+# Assemble the two switch flags based on config name.
+EXTRA_ARGS=()
+case "$CFG_NAME" in
+    baseline)
+        # class_weight_source=all (default), no --balance_batches
+        ;;
+    weight_real)
+        EXTRA_ARGS+=(--class_weight_source real)
+        ;;
+    balance_batches)
+        EXTRA_ARGS+=(--balance_batches)
+        ;;
+    both)
+        EXTRA_ARGS+=(--class_weight_source real --balance_batches)
+        ;;
+esac
+
+# ---- Paths -----------------------------------------------------------
+REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
+DATALIST=${T2G_MOLECULAR_DATALIST:-$REPO/datalist_N494_molecular.json}
+SYNTH_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_v2}
+OUT_ROOT=${T2G_CLS_DIAG_OUT:-/g/data/vp06/$USER/text2glioma_classify_diag}
+
+RUN_DIR=$OUT_ROOT/${TASK}/n_synth_${N_SYNTH}/${CFG_NAME}/seed_${SEED}
+
+# ---- Environment -----------------------------------------------------
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+cd "$REPO"
+export HF_HOME=/g/data/vp06/$USER/text2glioma_train/runs/cache/huggingface
+export TRANSFORMERS_OFFLINE=1
+mkdir -p "$OUT_ROOT/logs" "$RUN_DIR"
+
+# ---- Diagnostics -----------------------------------------------------
+echo "===================================================================="
+echo "Job:      $PBS_JOBID  (array=$PBS_ARRAY_INDEX)"
+echo "Host:     $(hostname)"
+echo "Started:  $(date -Iseconds)"
+echo "Task:     $TASK"
+echo "N synth:  $N_SYNTH"
+echo "Config:   $CFG_NAME"
+echo "Extra:    ${EXTRA_ARGS[*]:-<none>}"
+echo "Seed:     $SEED"
+echo "Datalist: $DATALIST"
+echo "Synth:    $SYNTH_ROOT"
+echo "Out:      $RUN_DIR"
+nvidia-smi || true
+echo "===================================================================="
+
+# ---- Run --------------------------------------------------------------
+python -u scripts/train_molecular_classifier.py \
+    --task               "$TASK" \
+    --real_datalist      "$DATALIST" \
+    --synth_root         "$SYNTH_ROOT" \
+    --n_synthetic        "$N_SYNTH" \
+    --seed               "$SEED" \
+    --n_epochs           200 \
+    --total_grad_updates 12500 \
+    --patience           10 \
+    --batch_size         8 \
+    --val_batch_size     8 \
+    --num_workers        8 \
+    --val_interval       5 \
+    --out_dir            "$RUN_DIR" \
+    --resume \
+    --device             cuda \
+    "${EXTRA_ARGS[@]}"
+
+echo "===================================================================="
+echo "Finished: $(date -Iseconds)"
+echo "===================================================================="
