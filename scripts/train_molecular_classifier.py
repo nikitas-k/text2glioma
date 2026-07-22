@@ -53,6 +53,7 @@ import argparse
 import gc
 import json
 import math
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -72,24 +73,36 @@ from monai.utils import set_determinism
 # via ``tempfile.TemporaryDirectory()`` + ``shutil.move``. On Gadi, the
 # TemporaryDirectory defaults to /tmp which sits on a different
 # filesystem than /g/data, so shutil.move falls back to non-atomic
-# copy+delete. A SIGTERM mid-copy leaves a partial file at the target
-# path that every future read fails on with either EOFError or
+# ── SafePersistentDataset: atomic same-fs cache writes ─────────────────
+# MONAI 1.5.2's PersistentDataset._cachecheck writes each transformed
+# sample via ``tempfile.TemporaryDirectory()`` + ``shutil.move``. On Gadi,
+# TemporaryDirectory defaults to /tmp which sits on a different filesystem
+# from /g/data, so shutil.move falls back to non-atomic copy+delete. A
+# SIGTERM mid-copy leaves a partial file at the target path that every
+# future read fails on with either EOFError or
 # RuntimeError('PytorchStreamReader failed reading zip archive').
-# Fix: (a) write the temp file in the SAME directory as the target
-# (same-filesystem guaranteed) so os.rename is atomic, and (b) broaden
-# the read-side corruption catcher to delete any file that torch.load
-# can't parse and re-transform.
+#
+# The fix is a subclass that (a) writes the temp file in the SAME directory
+# as the target (same filesystem is guaranteed -> os.rename is truly
+# atomic on POSIX), and (b) catches any exception on the read path and
+# treats it as corruption to delete + re-transform.
+#
+# We use a subclass rather than a runtime monkey-patch because the
+# monkey-patch approach doesn't survive DataLoader's spawn+pickle+
+# worker-init sequence reliably: the pickled dataset instance in the
+# worker resolves ``ds._cachecheck`` through the class MRO, and the
+# worker's freshly-imported MONAI class may not yet be patched at
+# fetch time. Subclassing bakes the override into the class hierarchy
+# that pickle preserves.
 
-def _install_atomic_cache_patch() -> None:
-    import os
-    from copy import deepcopy
-    import torch as _torch
-    from monai.data import dataset as _monai_ds
-    from monai.utils.type_conversion import convert_to_tensor
-    if getattr(_monai_ds, "_atomic_cache_patched", False):
-        return
+from copy import deepcopy
+from monai.utils.type_conversion import convert_to_tensor
 
-    def _atomic_cachecheck(self, item_transformed):  # type: ignore[no-redef]
+
+class SafePersistentDataset(PersistentDataset):
+    """PersistentDataset with same-filesystem atomic-write cache."""
+
+    def _cachecheck(self, item_transformed):
         hashfile = None
         if self.cache_dir is not None:
             data_item_md5 = self.hash_func(item_transformed).decode("utf-8")
@@ -98,11 +111,11 @@ def _install_atomic_cache_patch() -> None:
 
         if hashfile is not None and hashfile.is_file():
             try:
-                return _torch.load(str(hashfile), weights_only=True)
-            except Exception as e:
-                # Delete corrupt cache file and fall through to re-transform.
-                # Covers EOFError, UnpicklingError, RuntimeError (zip archive
-                # failure, invalid magic number, etc.).
+                return torch.load(str(hashfile), weights_only=True)
+            except Exception:
+                # Delete any file that can't be parsed (EOFError,
+                # UnpicklingError, RuntimeError from truncated zip archive)
+                # and fall through to re-transform.
                 try:
                     hashfile.unlink()
                 except OSError:
@@ -112,45 +125,30 @@ def _install_atomic_cache_patch() -> None:
         if hashfile is None:
             return _item_transformed
 
-        # Atomic write via same-directory temp file + os.rename.
-        # Same-filesystem guarantees os.rename is atomic on POSIX; a
-        # crash mid-torch.save leaves only the temp file (not the target)
-        # which can then be cleaned up by preflight validation next run.
+        # Atomic same-directory temp file + os.rename (POSIX atomic).
         tmp = hashfile.with_suffix(f".tmp.{os.getpid()}")
         try:
-            _torch.save(
+            torch.save(
                 obj=convert_to_tensor(_item_transformed, convert_numeric=False),
                 f=str(tmp),
                 pickle_protocol=self.pickle_protocol,
             )
-            # If another worker already wrote a good hashfile, we skip;
-            # otherwise rename atomically over the target (idempotent).
+            # If a peer worker already wrote a good hashfile, we skip
+            # (rename would overwrite theirs); otherwise take the slot.
             if not hashfile.is_file():
                 os.rename(str(tmp), str(hashfile))
             else:
-                try: tmp.unlink()
-                except OSError: pass
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
         except Exception:
-            try: tmp.unlink()
-            except OSError: pass
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
             raise
         return _item_transformed
-
-    _monai_ds.PersistentDataset._cachecheck = _atomic_cachecheck
-    _monai_ds._atomic_cache_patched = True
-
-
-_install_atomic_cache_patch()
-
-
-def _worker_init_atomic_cache(_worker_id):
-    """DataLoader worker_init_fn. Ensures the atomic-cache monkey-patch
-    is applied inside each spawned worker process. On systems where
-    DataLoader uses the 'spawn' start method (rather than 'fork'), workers
-    reimport MONAI without inheriting the parent's monkey-patch, so we
-    install it here. Must be module-level for spawn to pickle it.
-    """
-    _install_atomic_cache_patch()
 
 
 from torch.utils.data import DataLoader
@@ -571,10 +569,10 @@ def main() -> None:
 
     # ── Transforms + loaders ──
     train_tf, val_tf = _build_transforms()
-    train_ds = PersistentDataset(data=train_items, transform=train_tf,
-                                  cache_dir=cache_dir / "train")
-    val_ds   = PersistentDataset(data=val_items,   transform=val_tf,
-                                  cache_dir=cache_dir / "val")
+    train_ds = SafePersistentDataset(data=train_items, transform=train_tf,
+                                      cache_dir=cache_dir / "train")
+    val_ds   = SafePersistentDataset(data=val_items,   transform=val_tf,
+                                      cache_dir=cache_dir / "val")
 
     # Optional balanced-batch sampler: draws ~equal numbers of real and
     # synth samples per epoch. Each synth sample gets weight
@@ -600,21 +598,16 @@ def main() -> None:
               f"(n_real={n_real}, n_synth={n_synth}); expected batch composition "
               f"~50/50", file=sys.stderr)
 
-    # Ensure the atomic-cache monkey-patch applies inside each DataLoader
-    # worker. On Gadi Python 3.9.2 the workers are spawned (not forked),
-    # so they reimport MONAI without inheriting the parent's patch.
-    # _worker_init_atomic_cache is defined at module level so it can be
-    # pickled and sent to spawned workers.
-
+    # SafePersistentDataset overrides _cachecheck at the class level, so
+    # spawned workers inherit the atomic-write behaviour via pickle of
+    # the dataset instance -- no worker_init_fn needed.
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=train_shuffle, sampler=train_sampler,
                                num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False,
-                               worker_init_fn=_worker_init_atomic_cache)
+                               pin_memory=True, drop_last=False)
     val_loader   = DataLoader(val_ds,   batch_size=args.val_batch_size,
                                shuffle=False, num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False,
-                               worker_init_fn=_worker_init_atomic_cache)
+                               pin_memory=True, drop_last=False)
 
     # ── Model ──
     model = _make_model(device)
