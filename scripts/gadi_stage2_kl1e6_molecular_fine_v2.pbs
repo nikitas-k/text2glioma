@@ -1,0 +1,83 @@
+#!/bin/bash
+
+#PBS -l ncpus=48
+#PBS -l ngpus=4
+#PBS -l mem=1022GB
+#PBS -l jobfs=250GB
+#PBS -q gpuhopper
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/dk92+scratch/vp06+gdata/vp06+gdata/hl36+scratch/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -N ldm_molfine_v2
+
+# ---------------------------------------------------------------------
+# Stage-2 molecular fine-tune, v2: same recipe as v1 but with 2x epochs
+# (50 vs 25). Tier-1 embedding analysis on the v1 head showed real but
+# modest discriminative geometry (IDH-wt vs IDH-mut cosine -0.28,
+# MGMT-unmet vs -met -0.19). Doubling training exposure should push
+# those magnitudes further and, in turn, improve the molecular signal
+# in the synthesised images.
+#
+# Warm-starts from v1's stage-2 best_model.pth so we retain everything
+# the model already knows about masks + text and only extend the
+# molecular head's training. Writes to a NEW directory so v1 stays
+# intact for A/B comparison.
+# ---------------------------------------------------------------------
+
+module use /g/data/dk92/apps/Modules/modulefiles
+module load NCI-ai-ml/23.05
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+CONFIG=${HOME}/text2glioma/configs/ldm_radbert.yaml
+STAGE1_CONFIG=${HOME}/text2glioma/configs/stage1.yaml
+STAGE1_URI=/g/data/vp06/$USER/text2glioma_train/runs/stage1_kl1e6_freebits_lc6/autoencoder_stage1/checkpoint.pth
+V1_STAGE2_CKPT=/g/data/vp06/$USER/text2glioma_train/runs/stage1_kl1e6_freebits_lc6/ldm_stage2/best_model.pth
+
+RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs
+STAGE2_RUN_DIR=/g/data/vp06/$USER/text2glioma_train/runs/stage1_kl1e6_freebits_lc6/ldm_stage2_molecular_v2
+DATA_DIR=/g/data/vp06/$USER/text2glioma_train/data
+DATALIST=${HOME}/text2glioma/datalist_N494_molecular.json
+
+export TORCH_HOME=${RUN_DIR}/cache
+export HF_HOME=${RUN_DIR}/cache/huggingface
+mkdir -p "$RUN_DIR" "$DATA_DIR" "$STAGE2_RUN_DIR" "${HOME}/job_logs" "$TORCH_HOME" "$HF_HOME"
+
+if [ ! -f "$DATALIST" ]; then
+    echo "ERROR: Datalist not found at ${DATALIST}"
+    exit 1
+fi
+if [ ! -f "${STAGE1_URI}" ]; then
+    echo "ERROR: Stage-1 checkpoint not found at ${STAGE1_URI}"
+    exit 1
+fi
+if [ ! -f "${V1_STAGE2_CKPT}" ]; then
+    echo "ERROR: v1 stage-2 warm-start checkpoint not found at ${V1_STAGE2_CKPT}"
+    exit 1
+fi
+
+torchrun --standalone --nproc_per_node=4 \
+    ${HOME}/text2glioma/scripts/launch_stage2_ddp.py \
+    --config "$CONFIG" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage1_uri "$STAGE1_URI" \
+    --warm_start_stage2 "$V1_STAGE2_CKPT" \
+    --run_dir "$RUN_DIR" \
+    --stage2_run_dir "$STAGE2_RUN_DIR" \
+    --datalist "$DATALIST" \
+    --no_channel_reorder \
+    --train_spec impression \
+    --text_dropout_p 0.35 \
+    --mask_dropout_p 0.30 \
+    --joint_dropout_p 0.10 \
+    --use_molecular_conditioning \
+    --molecular_dropout_p 0.20 \
+    --molecular_lr_multiplier 10.0 \
+    --val_interval 2 \
+    --batch_size 8 \
+    --num_epochs 50 \
+    --pin_memory \
+    2>&1 | tee "${HOME}/job_logs/${PBS_JOBID}_ldm_molfine_v2.log"
