@@ -11,7 +11,7 @@
 #PBS -l wd
 #PBS -j oe
 #PBS -r y
-#PBS -J 0-14
+#PBS -J 0-17
 #PBS -o /g/data/vp06/nk9793/text2glioma_classify_idh_only/logs/^array_index^.o
 #PBS -e /g/data/vp06/nk9793/text2glioma_classify_idh_only/logs/^array_index^.e
 #PBS -N cls_grid_idh
@@ -21,11 +21,15 @@
 # restricted to the IDH task, using the IDH-only synthetic release from
 # ldm_stage2_molecular_idh_only.
 #
-# Grid: 1 task × 5 synthetic sizes × 3 seeds = 15 runs (indices 0..14)
+# Grid: 1 task × 6 synthetic sizes × 3 seeds = 18 runs (indices 0..17)
 #
 #   task ∈ {idh}
-#   n_synthetic ∈ {0, 100, 1000, 5000, 10000}
+#   n_synthetic ∈ {0, 100, 500, 1000, 5000, 10000}
 #   seed ∈ {0, 1, 2}
+#
+# The n=500 point was added after the first submission suggested a
+# sweet spot between 100 (accuracy above baseline) and 1000 (below
+# baseline). Additional grid: 3 runs at n=500 (array indices 6..8).
 #
 # Array index i decomposes as: i = n_idx*3 + seed_idx
 #
@@ -45,15 +49,25 @@ set -euo pipefail
 
 # ---- Grid decode -----------------------------------------------------
 TASKS=(idh)
-N_SYNTH_LIST=(0 100 1000 5000 10000)
+N_SYNTH_LIST=(0 100 500 1000 5000 10000)
 SEEDS=(0 1 2)
 
 I=${PBS_ARRAY_INDEX}
-# 1 task × 5 × 3 = 15 → task_idx always 0
+# 1 task × 6 × 3 = 18 → task_idx always 0
 N_IDX=$(( I / 3 ))
 SEED_IDX=$(( I % 3 ))
 
 TASK=${TASKS[0]}
+# Guard against a stale on-disk copy of this script being submitted with
+# an array index that overflows the current N_SYNTH_LIST length: bail
+# with a clear message instead of the cryptic 'unbound variable' from
+# set -u. This has bitten us once (index 15 on a 5-element list).
+if (( N_IDX >= ${#N_SYNTH_LIST[@]} )); then
+    echo "ERROR: N_IDX=$N_IDX out of range for N_SYNTH_LIST (len=${#N_SYNTH_LIST[@]})."
+    echo "       array size was likely enlarged (qsub -J ...) without syncing"
+    echo "       this script to Gadi. Local copy has N_SYNTH_LIST=(${N_SYNTH_LIST[*]})."
+    exit 1
+fi
 N_SYNTH=${N_SYNTH_LIST[$N_IDX]}
 SEED=${SEEDS[$SEED_IDX]}
 
