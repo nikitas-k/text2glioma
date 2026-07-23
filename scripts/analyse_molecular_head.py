@@ -1,31 +1,44 @@
 """Tier-1 sanity check for the trained MolecularClassConditioning head.
 
-Loads ``best_molecular_head.pth`` and quantifies whether the six embedding
-rows moved meaningfully from their Gaussian initialisation, and whether
-the three states within each field (IDH / MGMT) developed distinct
+Loads ``best_molecular_head.pth`` and quantifies whether the embedding rows
+moved meaningfully from their Gaussian initialisation, and whether the
+three states within each field (IDH / MGMT) developed distinct
 representations. Purely a post-hoc analysis on the saved checkpoint —
 no GPU required, runs in seconds.
+
+Auto-detects which fields the checkpoint contains from its state_dict
+keys, so the same script handles both the v1 IDH+MGMT head (2 fields,
+6 rows total) and the IDH-only head (1 field, 3 rows). Use
+``--fields`` to override the detection (e.g. to analyse just IDH from
+a checkpoint that also contains MGMT).
 
 Emits:
 
     * A JSON summary (``molecular_head_report.json``) with per-row L2
       norms, pairwise cosine-similarity matrices, and Δ-from-init
-      distances.
-    * A 3-panel PNG (``molecular_head_report.png``):
-        (i)   bar chart of per-row L2 norms with init reference,
-        (ii)  IDH 3x3 cosine-similarity heatmap,
-        (iii) MGMT 3x3 cosine-similarity heatmap.
+      distances, keyed by field name.
+    * A PNG (``molecular_head_report.png``) with one norm-bar-chart
+      panel plus one cosine heatmap per analysed field.
 
 Usage
 -----
 ::
 
+    # v1 IDH+MGMT head:
     python scripts/analyse_molecular_head.py \\
         --ckpt   /path/to/best_molecular_head.pth \\
-        --hidden_dim 768 \\
-        --init_seed 42 \\
-        --init_std 0.02 \\
+        --hidden_dim 768 --init_seed 42 --init_std 0.02 \\
         --out_dir results/mol_head_report
+
+    # IDH-only head (auto-detected from checkpoint):
+    python scripts/analyse_molecular_head.py \\
+        --ckpt   /path/to/ldm_stage2_molecular_idh_only/best_molecular_head.pth \\
+        --hidden_dim 768 --out_dir results/mol_head_idh_only
+
+    # Force IDH-only analysis from a v1 checkpoint:
+    python scripts/analyse_molecular_head.py \\
+        --ckpt   /path/to/v1/best_molecular_head.pth \\
+        --fields idh --out_dir results/mol_head_v1_idh_slice
 """
 
 from __future__ import annotations
@@ -51,8 +64,11 @@ from text2glioma.training.molecular_conditioning import (  # noqa: E402
 )
 
 
-_IDH_LABELS  = ["wildtype", "mutant", "unknown"]
-_MGMT_LABELS = ["unmethylated", "methylated", "unknown"]
+_FIELD_LABELS: dict[str, list[str]] = {
+    "idh":  ["wildtype", "mutant", "unknown"],
+    "mgmt": ["unmethylated", "methylated", "unknown"],
+}
+_SUPPORTED_FIELDS: tuple[str, ...] = ("idh", "mgmt")
 
 
 def _pairwise_cosine(w: torch.Tensor) -> np.ndarray:
@@ -68,6 +84,15 @@ def _delta_from_init(trained: torch.Tensor, init: torch.Tensor) -> np.ndarray:
     return (trained - init).norm(dim=1).cpu().numpy()
 
 
+def _detect_fields(state: dict) -> tuple[str, ...]:
+    """Introspect a state_dict for which molecular fields it carries.
+
+    Mirrors the field-detection used in :mod:`text2glioma.inference.engine`.
+    """
+    return tuple(f for f in _SUPPORTED_FIELDS
+                 if f"{f}_embedding.weight" in state)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ckpt", type=Path, required=True,
@@ -81,59 +106,80 @@ def main() -> None:
     ap.add_argument("--init_std", type=float, default=0.02,
                     help="Standard deviation used at init (matches "
                          "MolecularClassConditioning default).")
+    ap.add_argument("--fields", nargs="+", default=None,
+                    choices=list(_SUPPORTED_FIELDS),
+                    help="Restrict analysis to a subset of fields. Default: "
+                         "analyse every field present in the checkpoint "
+                         "(auto-detected from state_dict keys). Use "
+                         "'--fields idh' to slice the IDH branch out of a "
+                         "v1 IDH+MGMT checkpoint.")
     ap.add_argument("--out_dir", type=Path, required=True)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load trained weights ────────────────────────────────────────
+    # ── Load raw state_dict and figure out which fields are in it ──
+    state = torch.load(str(args.ckpt), map_location="cpu")
+    ckpt_fields = _detect_fields(state)
+    if not ckpt_fields:
+        raise ValueError(
+            f"could not detect any known molecular fields in {args.ckpt}; "
+            f"state_dict keys: {list(state.keys())}"
+        )
+    if args.fields is None:
+        analyse_fields: tuple[str, ...] = ckpt_fields
+    else:
+        analyse_fields = tuple(args.fields)
+        missing = [f for f in analyse_fields if f not in ckpt_fields]
+        if missing:
+            raise ValueError(
+                f"--fields requested {missing} but checkpoint only contains "
+                f"{list(ckpt_fields)}"
+            )
+    print(f"Detected fields in checkpoint: {ckpt_fields}")
+    print(f"Analysing fields:              {analyse_fields}")
+
+    # ── Load trained weights (with the detected field layout) ──────
     trained_head = MolecularClassConditioning(
         hidden_dim=args.hidden_dim,
         dropout_to_unknown_p=0.0,
         init_std=args.init_std,
+        fields=ckpt_fields,
     )
-    state = torch.load(str(args.ckpt), map_location="cpu")
     trained_head.load_state_dict(state, strict=True)
     trained_head.eval()
 
-    trained_idh  = trained_head.idh_embedding.weight.detach()
-    trained_mgmt = trained_head.mgmt_embedding.weight.detach()
-
-    # ── Reconstruct init (same seed) ────────────────────────────────
+    # ── Reconstruct init (same seed, same field layout) ────────────
     torch.manual_seed(int(args.init_seed))
     init_head = MolecularClassConditioning(
         hidden_dim=args.hidden_dim,
         dropout_to_unknown_p=0.0,
         init_std=args.init_std,
+        fields=ckpt_fields,
     )
-    init_idh  = init_head.idh_embedding.weight.detach()
-    init_mgmt = init_head.mgmt_embedding.weight.detach()
 
     # ── Metrics ─────────────────────────────────────────────────────
     expected_init_norm = args.init_std * math.sqrt(args.hidden_dim)
 
-    report = {
+    report: dict = {
         "hidden_dim":         args.hidden_dim,
         "init_seed":          args.init_seed,
         "init_std":           args.init_std,
         "expected_init_norm": float(expected_init_norm),
-        "idh": {
-            "labels":         _IDH_LABELS,
-            "trained_norms":  _per_row_norms(trained_idh).tolist(),
-            "init_norms":     _per_row_norms(init_idh).tolist(),
-            "delta_from_init":_delta_from_init(trained_idh, init_idh).tolist(),
-            "trained_cosine": _pairwise_cosine(trained_idh).tolist(),
-            "init_cosine":    _pairwise_cosine(init_idh).tolist(),
-        },
-        "mgmt": {
-            "labels":         _MGMT_LABELS,
-            "trained_norms":  _per_row_norms(trained_mgmt).tolist(),
-            "init_norms":     _per_row_norms(init_mgmt).tolist(),
-            "delta_from_init":_delta_from_init(trained_mgmt, init_mgmt).tolist(),
-            "trained_cosine": _pairwise_cosine(trained_mgmt).tolist(),
-            "init_cosine":    _pairwise_cosine(init_mgmt).tolist(),
-        },
+        "ckpt_fields":        list(ckpt_fields),
+        "analysed_fields":    list(analyse_fields),
     }
+    for f in analyse_fields:
+        trained_w = getattr(trained_head, f"{f}_embedding").weight.detach()
+        init_w    = getattr(init_head,    f"{f}_embedding").weight.detach()
+        report[f] = {
+            "labels":          _FIELD_LABELS[f],
+            "trained_norms":   _per_row_norms(trained_w).tolist(),
+            "init_norms":      _per_row_norms(init_w).tolist(),
+            "delta_from_init": _delta_from_init(trained_w, init_w).tolist(),
+            "trained_cosine":  _pairwise_cosine(trained_w).tolist(),
+            "init_cosine":     _pairwise_cosine(init_w).tolist(),
+        }
 
     out_json = args.out_dir / "molecular_head_report.json"
     with out_json.open("w") as fh:
@@ -152,9 +198,10 @@ def main() -> None:
     print(f"Hidden dim: {args.hidden_dim}")
     print(f"Expected Gaussian-init norm: {expected_init_norm:.4f}  (std={args.init_std}, dim={args.hidden_dim})")
     print()
-    for name, block, labels in [("IDH", report["idh"], _IDH_LABELS),
-                                 ("MGMT", report["mgmt"], _MGMT_LABELS)]:
-        print(f"── {name} embeddings ──")
+    for f in analyse_fields:
+        block = report[f]
+        labels = _FIELD_LABELS[f]
+        print(f"── {f.upper()} embeddings ──")
         for i, l in enumerate(labels):
             tn = block["trained_norms"][i]
             init_n = block["init_norms"][i]
@@ -170,13 +217,24 @@ def main() -> None:
     # ── Figure ──────────────────────────────────────────────────────
     try:
         import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+        n_fields = len(analyse_fields)
+        # Layout: [norm-bar-chart | cosine-heatmap per field]
+        fig, axes = plt.subplots(
+            1, 1 + n_fields,
+            figsize=(5 + 4.5 * n_fields, 4.5),
+            squeeze=False,
+        )
+        axes = axes[0]
 
-        # (i) Norm bar chart
+        # (i) Norm bar chart across all analysed rows
         ax = axes[0]
-        all_labels = [f"IDH-{l}" for l in _IDH_LABELS] + [f"MGMT-{l}" for l in _MGMT_LABELS]
-        trained_norms = report["idh"]["trained_norms"] + report["mgmt"]["trained_norms"]
-        init_norms    = report["idh"]["init_norms"]    + report["mgmt"]["init_norms"]
+        all_labels: list[str] = []
+        trained_norms: list[float] = []
+        init_norms:    list[float] = []
+        for f in analyse_fields:
+            all_labels    += [f"{f.upper()}-{l}" for l in _FIELD_LABELS[f]]
+            trained_norms += report[f]["trained_norms"]
+            init_norms    += report[f]["init_norms"]
         x = np.arange(len(all_labels))
         width = 0.4
         ax.bar(x - width/2, init_norms,    width, label="init",    color="#bbbbbb")
@@ -188,11 +246,10 @@ def main() -> None:
         ax.set_title("Embedding vector norms")
         ax.legend(fontsize=8, loc="upper left")
 
-        # (ii, iii) Cosine heatmaps
-        for ax, block, labels, title in [
-            (axes[1], report["idh"],  _IDH_LABELS,  "IDH pairwise cosine (trained)"),
-            (axes[2], report["mgmt"], _MGMT_LABELS, "MGMT pairwise cosine (trained)"),
-        ]:
+        # (ii..) Cosine heatmap per analysed field
+        for ax, f in zip(axes[1:], analyse_fields):
+            block = report[f]
+            labels = _FIELD_LABELS[f]
             m = np.array(block["trained_cosine"])
             im = ax.imshow(m, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
             ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, rotation=30, ha="right")
@@ -202,7 +259,7 @@ def main() -> None:
                     ax.text(j, i, f"{m[i][j]:.2f}", ha="center", va="center",
                             color="white" if abs(m[i][j]) > 0.5 else "black",
                             fontsize=9)
-            ax.set_title(title)
+            ax.set_title(f"{f.upper()} pairwise cosine (trained)")
             fig.colorbar(im, ax=ax, shrink=0.7)
 
         fig.tight_layout()
