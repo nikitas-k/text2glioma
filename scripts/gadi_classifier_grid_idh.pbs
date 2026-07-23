@@ -1,0 +1,134 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=96GB
+#PBS -l jobfs=100GB
+#PBS -q gpuvolta
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -r y
+#PBS -J 0-14
+#PBS -o /g/data/vp06/nk9793/text2glioma_classify_idh_only/logs/^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_classify_idh_only/logs/^array_index^.e
+#PBS -N cls_grid_idh
+
+# ---------------------------------------------------------------------
+# IDH-only classifier grid: same design as gadi_classifier_grid.pbs but
+# restricted to the IDH task, using the IDH-only synthetic release from
+# ldm_stage2_molecular_idh_only.
+#
+# Grid: 1 task × 5 synthetic sizes × 3 seeds = 15 runs (indices 0..14)
+#
+#   task ∈ {idh}
+#   n_synthetic ∈ {0, 100, 1000, 5000, 10000}
+#   seed ∈ {0, 1, 2}
+#
+# Array index i decomposes as: i = n_idx*3 + seed_idx
+#
+# Baseline reference (from v1 gadi_classifier_grid.pbs):
+#   IDH: 0.856 (n_synth=0) vs 0.722 (n_synth=10k) — v1 augmentation
+#   DEGRADED accuracy. Hypothesis for v2: dropping the correlated MGMT
+#   branch (which had no anatomical MRI correlate) removes the primary
+#   contamination source, so IDH accuracy should at minimum recover to
+#   baseline and ideally improve.
+#
+# Submit:
+#   qsub scripts/gadi_classifier_grid_idh.pbs
+# (Small enough grid to run as a single array submission on gpuvolta.)
+# ---------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---- Grid decode -----------------------------------------------------
+TASKS=(idh)
+N_SYNTH_LIST=(0 100 1000 5000 10000)
+SEEDS=(0 1 2)
+
+I=${PBS_ARRAY_INDEX}
+# 1 task × 5 × 3 = 15 → task_idx always 0
+N_IDX=$(( I / 3 ))
+SEED_IDX=$(( I % 3 ))
+
+TASK=${TASKS[0]}
+N_SYNTH=${N_SYNTH_LIST[$N_IDX]}
+SEED=${SEEDS[$SEED_IDX]}
+
+# ---- Paths ------------------------------------------------------------
+REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
+# Real training + validation data: IDH-known subjects only. Same file
+# used by the LDM fine-tune, so real-side determinism is preserved
+# between generation and classifier evaluation.
+DATALIST=${T2G_IDH_DATALIST:-$REPO/datalist_N494_idh_only.json}
+# Synthetic release from the IDH-only fine-tune.
+SYNTH_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+OUT_ROOT=${T2G_CLS_OUT:-/g/data/vp06/$USER/text2glioma_classify_idh_only}
+
+RUN_DIR=$OUT_ROOT/${TASK}/n_synth_${N_SYNTH}/seed_${SEED}
+
+# ---- Environment (matches Gadi generation launcher) ------------------
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+cd "$REPO"
+export HF_HOME=/g/data/vp06/$USER/text2glioma_train/runs/cache/huggingface
+export TRANSFORMERS_OFFLINE=1
+mkdir -p "$OUT_ROOT/logs" "$RUN_DIR"
+
+# ---- Preflight -------------------------------------------------------
+# n_synth=0 doesn't touch the release, so the manifest is only strictly
+# needed for the other bins. But we still assert it exists so the grid
+# fails fast at index 0 rather than silently drifting from apples-to-
+# apples with the augmented conditions.
+if [[ ! -f "$SYNTH_ROOT/manifest_release.csv" ]]; then
+    echo "ERROR: $SYNTH_ROOT/manifest_release.csv not found."
+    echo "       Run: python scripts/dataset_release/build_release_manifest.py \\"
+    echo "                --synth_root $SYNTH_ROOT \\"
+    echo "                --out        $SYNTH_ROOT/manifest_release.csv"
+    exit 1
+fi
+if [[ ! -f "$DATALIST" ]]; then
+    echo "ERROR: real datalist not found at $DATALIST"
+    exit 1
+fi
+
+# ---- Diagnostics -----------------------------------------------------
+echo "===================================================================="
+echo "Job:      $PBS_JOBID  (array=$PBS_ARRAY_INDEX)"
+echo "Host:     $(hostname)"
+echo "Started:  $(date -Iseconds)"
+echo "Task:     $TASK    n_synth: $N_SYNTH    seed: $SEED"
+echo "Datalist: $DATALIST"
+echo "Synth:    $SYNTH_ROOT"
+echo "Out:      $RUN_DIR"
+nvidia-smi || true
+echo "===================================================================="
+
+# ---- Run --------------------------------------------------------------
+# Same compute-budget cap (--total_grad_updates 12500) as the v1 grid so
+# per-run walltime is roughly constant across synthetic sizes and the
+# apples-to-apples comparison against v1's IDH bin holds.
+python -u scripts/train_molecular_classifier.py \
+    --task               "$TASK" \
+    --real_datalist      "$DATALIST" \
+    --synth_root         "$SYNTH_ROOT" \
+    --n_synthetic        "$N_SYNTH" \
+    --seed               "$SEED" \
+    --n_epochs           200 \
+    --total_grad_updates 12500 \
+    --patience           10 \
+    --batch_size         8 \
+    --val_batch_size     8 \
+    --num_workers        8 \
+    --val_interval       5 \
+    --out_dir            "$RUN_DIR" \
+    --resume \
+    --device             cuda
+
+echo "===================================================================="
+echo "Finished: $(date -Iseconds)"
+echo "===================================================================="
