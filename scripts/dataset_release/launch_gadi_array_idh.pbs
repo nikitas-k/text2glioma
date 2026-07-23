@@ -1,0 +1,93 @@
+#!/bin/bash
+#PBS -N t2g_synth_gen_idh
+#PBS -P vp06
+#PBS -q gpuvolta
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=64GB
+#PBS -l walltime=08:00:00
+#PBS -l storage=gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -r y
+#PBS -J 0-19
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/synth_gen_^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/synth_gen_^array_index^.e
+#PBS -j n
+
+# ----------------------------------------------------------------------
+# Text2Glioma synthetic release: per-shard generation for the IDH-ONLY
+# release (v2). Uses the ldm_stage2_molecular_idh_only checkpoint
+# (2,304-param IDH-only head, no MGMT).
+#
+# The engine auto-detects the head's `fields=('idh',)` from the sibling
+# best_molecular_head.pth state_dict keys. Manifest rows carry mgmt=-1
+# (sentinel written by prepare_manifest.py --balance_mode=idh_only);
+# generate_dataset.py maps -1 -> None and the IDH-only head silently
+# ignores the mgmt kwarg.
+#
+# 20 shards x ~500 samples each = 10k total. Runs in parallel subject to
+# queue capacity. Each shard is independently resumable — re-running the
+# array job skips already-completed samples.
+#
+# Submit with:
+#   qsub scripts/dataset_release/launch_gadi_array_idh.pbs
+#
+# Prereqs:
+#   * launch_manifest_prep_idh.pbs has finished and produced
+#     $OUT_ROOT/manifest.csv
+#   * ldm_stage2_molecular_idh_only/best_model.pth is present
+#     (with sibling best_molecular_head.pth)
+# ----------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---- Paths (edit as needed) ------------------------------------------
+REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
+RUNS_ROOT=${TEXT2GLIOMA_RUNS:-/g/data/vp06/$USER/text2glioma_train/runs}
+OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+MANIFEST=${T2G_SYNTH_MANIFEST:-$OUT_ROOT/manifest.csv}
+
+STAGE1_CONFIG="$REPO/configs/stage1.yaml"
+STAGE2_CONFIG="$REPO/configs/ldm_radbert.yaml"
+STAGE1_CKPT="$RUNS_ROOT/stage1_kl1e6_freebits_lc6/autoencoder_stage1/checkpoint.pth"
+# IDH-only Stage-2 checkpoint. Engine auto-loads the sibling
+# best_molecular_head.pth and detects fields=('idh',) from its keys.
+STAGE2_CKPT=${T2G_STAGE2_CKPT:-$RUNS_ROOT/stage1_kl1e6_freebits_lc6/ldm_stage2_molecular_idh_only/best_model.pth}
+
+# ---- Environment -----------------------------------------------------
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+cd "$REPO"
+export HF_HOME=/g/data/vp06/nk9793/text2glioma_train/runs/cache/huggingface
+export TRANSFORMERS_OFFLINE=1     # RadBERT already cached; keep runs offline
+mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs"
+
+# ---- Diagnostics -----------------------------------------------------
+echo "===================================================================="
+echo "Job:            $PBS_JOBID  (array=$PBS_ARRAY_INDEX)"
+echo "Host:           $(hostname)"
+echo "Started:        $(date -Iseconds)"
+echo "Manifest:       $MANIFEST"
+echo "Out root:       $OUT_ROOT"
+echo "Shard:          $PBS_ARRAY_INDEX"
+echo "Stage-2 ckpt:   $STAGE2_CKPT"
+nvidia-smi || true
+echo "===================================================================="
+
+# ---- Run --------------------------------------------------------------
+python -u scripts/dataset_release/generate_dataset.py \
+    --manifest      "$MANIFEST" \
+    --shard         "$PBS_ARRAY_INDEX" \
+    --out_root      "$OUT_ROOT" \
+    --stage1_config "$STAGE1_CONFIG" \
+    --stage2_config "$STAGE2_CONFIG" \
+    --stage1_ckpt   "$STAGE1_CKPT" \
+    --stage2_ckpt   "$STAGE2_CKPT" \
+    --device        cuda \
+    --steps         50
+
+echo "===================================================================="
+echo "Finished:       $(date -Iseconds)"
+echo "===================================================================="
