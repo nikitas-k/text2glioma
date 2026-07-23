@@ -52,18 +52,10 @@ NUM_SHARDS=${T2G_NUM_SHARDS:-20}
 SEED=${T2G_MANIFEST_SEED:-12345}
 BALANCE_MODE=${BALANCE_MODE:-idh_only}
 
-module load python3/3.11 2>/dev/null || true
-
-if [[ -f "$REPO/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO/.venv/bin/activate"
-elif [[ -f "$HOME/venv/monai/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$HOME/venv/monai/bin/activate"
-fi
+module load python3/3.9.2
+source /g/data/vp06/nk9793_hl36/venv/monai/bin/activate
 
 cd "$REPO"
-export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
 mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs"
 
 echo "===================================================================="
