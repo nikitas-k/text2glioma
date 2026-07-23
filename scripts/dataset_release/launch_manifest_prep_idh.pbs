@@ -1,0 +1,98 @@
+#!/bin/bash
+#PBS -N t2g_manifest_prep_idh
+#PBS -P vp06
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=gdata/vp06+gdata/hl36
+#PBS -l jobfs=100GB
+#PBS -l wd
+#PBS -r y
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/manifest_prep.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/manifest_prep.e
+#PBS -j n
+
+# ----------------------------------------------------------------------
+# Build the mask-first pre-generation manifest for the IDH-ONLY release.
+#
+# Same VASARI-auto → prompt pipeline as the vanilla launcher, but with
+# --balance_mode=idh_only:
+#   * IDH drawn 50/50 (WT / MUT) — matches the effective IDH marginal of
+#     the v1 'joint' mode, so classifier-grid comparisons stay apples-to-
+#     apples.
+#   * MGMT column filled with the -1 sentinel; generate_dataset.py will
+#     pass mgmt=None to the engine, and the IDH-only head will silently
+#     ignore it (its fields=('idh',) doesn't allocate an MGMT branch).
+#
+# Output goes to a dedicated release root (default:
+# /g/data/vp06/$USER/text2glioma_synth_idh_only) so the v1 release at
+# /g/data/vp06/$USER/text2glioma_synth stays untouched for reference.
+#
+# Submit:
+#   qsub scripts/dataset_release/launch_manifest_prep_idh.pbs
+#
+# Override defaults (e.g. use the natural 80/20 prior instead of 50/50):
+#   qsub -v BALANCE_MODE=idh_only_natural \
+#        scripts/dataset_release/launch_manifest_prep_idh.pbs
+# ----------------------------------------------------------------------
+
+set -euo pipefail
+
+REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
+OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+# Use the same N=1510 datalist as v1 for the mask pool — the mask
+# geometry is orthogonal to molecular status, so we do NOT want to
+# restrict the pool to the 494 IDH-known subjects (that would shrink
+# anatomical diversity for no gain).
+DATALIST=${T2G_DATALIST:-$REPO/datalist_N1510.json}
+
+N_SAMPLES=${T2G_N_SAMPLES:-10000}
+NUM_SHARDS=${T2G_NUM_SHARDS:-20}
+SEED=${T2G_MANIFEST_SEED:-12345}
+BALANCE_MODE=${BALANCE_MODE:-idh_only}
+
+module load python3/3.11 2>/dev/null || true
+
+if [[ -f "$REPO/.venv/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$REPO/.venv/bin/activate"
+elif [[ -f "$HOME/venv/monai/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$HOME/venv/monai/bin/activate"
+fi
+
+cd "$REPO"
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
+mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs"
+
+echo "===================================================================="
+echo "Job:            $PBS_JOBID"
+echo "Host:           $(hostname)"
+echo "Started:        $(date -Iseconds)"
+echo "Datalist:       $DATALIST"
+echo "Out root:       $OUT_ROOT"
+echo "N samples:      $N_SAMPLES"
+echo "Num shards:     $NUM_SHARDS"
+echo "Seed:           $SEED"
+echo "BALANCE_MODE:   $BALANCE_MODE"
+echo "PBS_JOBFS:      $PBS_JOBFS"
+echo "===================================================================="
+
+python scripts/dataset_release/prepare_manifest.py \
+    --datalist "$DATALIST" \
+    --split training \
+    --n_samples "$N_SAMPLES" \
+    --num_shards "$NUM_SHARDS" \
+    --seed "$SEED" \
+    --workers 16 \
+    --tmp_dir "$PBS_JOBFS/t2g_manifest_tmp" \
+    --out_root "$OUT_ROOT" \
+    --out "$OUT_ROOT/manifest.csv" \
+    --use_molecular \
+    --balance_mode "$BALANCE_MODE"
+
+echo "manifest written to $OUT_ROOT/manifest.csv"
+ls -lh "$OUT_ROOT/manifest.csv"
+head -1 "$OUT_ROOT/manifest.csv"
+wc -l "$OUT_ROOT/manifest.csv"
