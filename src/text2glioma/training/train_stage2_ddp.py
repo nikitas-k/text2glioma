@@ -133,6 +133,14 @@ def parse_args() -> argparse.Namespace:
                     help="LR multiplier for the molecular embedding parameters "
                          "(applied on top of the base LR). Set >1 for faster "
                          "convergence on the 4.6k new params.")
+    p.add_argument("--molecular_fields", nargs="+", default=["idh", "mgmt"],
+                    choices=["idh", "mgmt"],
+                    help="Which molecular fields the class-conditioning head "
+                         "should encode. Default ('idh mgmt') matches v1. Pass "
+                         "'idh' alone to build an IDH-only head (halves the "
+                         "parameter count, prevents MGMT-cohort contamination "
+                         "of the CFG null direction). Requires the datalist to "
+                         "carry integer values for the listed fields.")
     p.add_argument("--cache_dir", type=str, default=None,
                     help="Cache directory for HuggingFace models / tokenizers.")
     p.add_argument("--stage2_run_dir", type=str, default=None,
@@ -598,11 +606,14 @@ def main():
         # equal-width vectors and can be concatenated along the sequence axis.
         hidden_dim = int(getattr(text_encoder.config, "hidden_size",
                                   getattr(text_encoder.config, "dim", 768)))
+        mol_fields = tuple(args.molecular_fields)
         molecular_head = MolecularClassConditioning(
             hidden_dim=hidden_dim,
             dropout_to_unknown_p=float(args.molecular_dropout_p),
+            fields=mol_fields,
         ).to(device)
         print0(f"Molecular head enabled: hidden_dim={hidden_dim}, "
+               f"fields={mol_fields}, "
                f"dropout_p={args.molecular_dropout_p}, "
                f"params={sum(p.numel() for p in molecular_head.parameters())}",
                rank)

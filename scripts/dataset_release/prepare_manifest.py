@@ -82,6 +82,12 @@ def _plan_molecular(
           the training cohort (IDH: 80 wt / 20 mut; MGMT: 30 unm / 70 met).
         * ``all_unknown``: reserve for negative-control ablations (both
           fields set to UNKNOWN = 2 for every sample).
+        * ``idh_only``: sample IDH balanced 50/50 and mark MGMT as the
+          -1 sentinel (= "field not set"). Use with an IDH-only head:
+          generate_dataset.py will pass ``mgmt=None`` and the head's
+          ``fields=("idh",)`` will simply not condition on MGMT.
+        * ``idh_only_natural``: as ``idh_only`` but IDH drawn from the
+          80 wt / 20 mut prior instead of balanced 50/50.
     """
     from text2glioma.training.molecular_conditioning import (
         IDH_WILDTYPE, IDH_MUTANT, IDH_UNKNOWN,
@@ -113,6 +119,15 @@ def _plan_molecular(
     elif balance_mode == "all_unknown":
         idh_arr  = np.full(n_samples, IDH_UNKNOWN,  dtype=int)
         mgmt_arr = np.full(n_samples, MGMT_UNKNOWN, dtype=int)
+    elif balance_mode == "idh_only":
+        # Balanced 50/50 IDH; MGMT unset (-1 sentinel → engine.generate
+        # will receive mgmt=None, and an IDH-only head ignores it).
+        idh_arr  = rng.choice([IDH_WILDTYPE, IDH_MUTANT], size=n_samples)
+        mgmt_arr = np.full(n_samples, -1, dtype=int)
+    elif balance_mode == "idh_only_natural":
+        idh_arr  = rng.choice([IDH_WILDTYPE, IDH_MUTANT],
+                              size=n_samples, p=[0.80, 0.20])
+        mgmt_arr = np.full(n_samples, -1, dtype=int)
     else:
         raise ValueError(f"unknown balance_mode: {balance_mode!r}")
     return idh_arr, mgmt_arr
@@ -292,7 +307,8 @@ def main() -> None:
                          "MolecularClassConditioning head. Requires the LDM "
                          "checkpoint to have a trained molecular_head.")
     ap.add_argument("--balance_mode", default="joint",
-                    choices=["joint", "marginal", "natural", "all_unknown"],
+                    choices=["joint", "marginal", "natural", "all_unknown",
+                             "idh_only", "idh_only_natural"],
                     help="How to distribute molecular classes across the release.")
     args = ap.parse_args()
 

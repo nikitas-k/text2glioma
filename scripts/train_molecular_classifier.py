@@ -237,11 +237,24 @@ def _validate_cache_dir(cache_dir: Path, workers: int = 32) -> int:
     return len(corrupt) + n_tmp_deleted
 
 
-def _filter_known(items: list[dict], task: str) -> list[dict]:
-    """Drop entries whose task-specific status is UNKNOWN."""
-    key = task
+def _assert_all_known(items: list[dict], task: str, source: str) -> None:
+    """Raise if any item has UNKNOWN status for the given task.
+
+    v1 (N=494) allowed UNKNOWN samples through and silently filtered them.
+    From v3 onwards we build the datalist with `--require_idh --require_mgmt`
+    so no real UNKNOWNs exist, and synthetic samples are generated with
+    balanced conditioning to concrete classes. Any UNKNOWN encountered
+    here indicates a corrupted datalist or a generation-pipeline bug -
+    fail loudly rather than silently dropping data.
+    """
     unk = _UNKNOWN_BY_TASK[task]
-    return [it for it in items if int(it.get(key, unk)) != unk]
+    bad = [it for it in items if int(it.get(task, unk)) == unk]
+    if bad:
+        raise ValueError(
+            f"{len(bad)}/{len(items)} {source} items have UNKNOWN {task.upper()} status. "
+            f"Build the datalist with --require_{task} and generate synth with "
+            f"--use_molecular / --balance_mode joint to eliminate UNKNOWNs."
+        )
 
 
 def _normalise_item(item: dict, source: str) -> dict:
@@ -264,18 +277,24 @@ def _normalise_item(item: dict, source: str) -> dict:
 
 def load_real_split(datalist_path: Path, task: str
                     ) -> tuple[list[dict], list[dict]]:
-    """Return (train_items, val_items) filtered to the labelled subset."""
+    """Return (train_items, val_items). Raises if any sample has UNKNOWN
+    status for the current task."""
     with datalist_path.open() as fh:
         dl = json.load(fh)
-    train = [_normalise_item(it, "real") for it in _filter_known(dl.get("training",   []), task)]
-    val   = [_normalise_item(it, "real") for it in _filter_known(dl.get("validation", []), task)]
+    train_raw = dl.get("training",   [])
+    val_raw   = dl.get("validation", [])
+    _assert_all_known(train_raw, task, source="training-real")
+    _assert_all_known(val_raw,   task, source="validation-real")
+    train = [_normalise_item(it, "real") for it in train_raw]
+    val   = [_normalise_item(it, "real") for it in val_raw]
     return train, val
 
 
 def load_synth_items(synth_manifest: Path, synth_root: Path, task: str,
                      n_synthetic: int) -> list[dict]:
     """Read the release manifest and select the first ``n_synthetic``
-    samples with a KNOWN status for the requested task."""
+    samples. Raises if any selected sample has UNKNOWN status for the
+    current task."""
     if n_synthetic <= 0:
         return []
 
@@ -308,11 +327,22 @@ def load_synth_items(synth_manifest: Path, synth_root: Path, task: str,
                 return _UNKNOWN_BY_TASK[ot]
         df[other_task] = df.apply(_fetch_other, axis=1)
 
-    unk = _UNKNOWN_BY_TASK[task]
-    df = df[df[task] != unk].reset_index(drop=True)
     df = df.sort_values("sample_id").reset_index(drop=True)
-
     take = df.head(n_synthetic)
+
+    # Fail loudly if any selected synth sample carries an UNKNOWN status
+    # for the current task. Synth samples should always have concrete
+    # (WT/MUT or unmet/met) conditioning from balanced generation.
+    unk = _UNKNOWN_BY_TASK[task]
+    n_unk = int((take[task] == unk).sum())
+    if n_unk > 0:
+        raise ValueError(
+            f"{n_unk}/{len(take)} synth samples in the first {n_synthetic} rows "
+            f"have UNKNOWN {task.upper()} status. Regenerate the release with "
+            f"--use_molecular --balance_mode joint so all samples carry concrete "
+            f"molecular conditioning."
+        )
+
     items: list[dict] = []
     for _, r in take.iterrows():
         image_path = synth_root / r["relpath_image"]

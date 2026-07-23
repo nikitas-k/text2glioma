@@ -395,13 +395,25 @@ class Text2GliomaEngine:
             )
             hidden_dim = int(getattr(self.text_encoder.config, "hidden_size",
                                       getattr(self.text_encoder.config, "dim", 768)))
+            # Infer which fields the checkpoint contains from its state_dict
+            # keys. Supports both v1 (idh + mgmt) and IDH-only heads without
+            # requiring a separate flag.
+            state = torch.load(str(mh_ckpt), map_location="cpu")
+            detected_fields = tuple(
+                f for f in ("idh", "mgmt")
+                if f"{f}_embedding.weight" in state
+            )
+            if not detected_fields:
+                raise ValueError(
+                    f"could not detect any known molecular fields in {mh_ckpt}; "
+                    f"state_dict keys: {list(state.keys())}"
+                )
             self.molecular_head = MolecularClassConditioning(
                 hidden_dim=hidden_dim,
                 dropout_to_unknown_p=0.0,   # inference: no dropout
+                fields=detected_fields,
             )
-            self.molecular_head.load_state_dict(
-                torch.load(str(mh_ckpt), map_location="cpu"), strict=True,
-            )
+            self.molecular_head.load_state_dict(state, strict=True)
             self.molecular_head = self.molecular_head.to(self.device).eval()
 
     # ------------------------------------------------------------------
@@ -509,23 +521,30 @@ class Text2GliomaEngine:
         uncond_embeds = _encode_text(self.tokenizer, self.text_encoder, "", self.device)
 
         # ---- Optional molecular class conditioning ----
-        # If the engine loaded a molecular head, append the two IDH/MGMT
-        # pseudo-tokens to both cond and uncond sequences. The single CFG
-        # scale then guides over the combined (text + molecular) direction.
+        # If the engine loaded a molecular head, append the field pseudo-tokens
+        # to both cond and uncond sequences. The single CFG scale then guides
+        # over the combined (text + molecular) direction. Fields the head
+        # doesn't have (e.g. mgmt when running an IDH-only head) are silently
+        # ignored regardless of what the user passed.
         if self.molecular_head is not None:
             from text2glioma.training.molecular_conditioning import (
                 IDH_UNKNOWN, MGMT_UNKNOWN,
             )
-            idh_int  = IDH_UNKNOWN  if idh  is None else int(idh)
-            mgmt_int = MGMT_UNKNOWN if mgmt is None else int(mgmt)
-            idh_t  = torch.tensor([idh_int],  dtype=torch.long, device=self.device)
-            mgmt_t = torch.tensor([mgmt_int], dtype=torch.long, device=self.device)
-            mol_tokens = self.molecular_head(idh_t, mgmt_t).to(cond_embeds.dtype)
+            mol_defaults = {"idh": IDH_UNKNOWN, "mgmt": MGMT_UNKNOWN}
+            mol_inputs = {"idh": idh, "mgmt": mgmt}
+            mol_kwargs = {}
+            for f in self.molecular_head.fields:
+                val = mol_inputs.get(f)
+                if val is None:
+                    val = mol_defaults[f]
+                mol_kwargs[f] = torch.tensor([int(val)], dtype=torch.long,
+                                              device=self.device)
+            mol_tokens = self.molecular_head(**mol_kwargs).to(cond_embeds.dtype)
             mol_null   = self.molecular_head.null_tokens(
                 batch_size=1, device=self.device, dtype=uncond_embeds.dtype,
             )
-            cond_embeds   = torch.cat([cond_embeds,   mol_tokens], dim=1)  # (1, 128+2, D)
-            uncond_embeds = torch.cat([uncond_embeds, mol_null],   dim=1)  # (1, 128+2, D)
+            cond_embeds   = torch.cat([cond_embeds,   mol_tokens], dim=1)
+            uncond_embeds = torch.cat([uncond_embeds, mol_null],   dim=1)
 
         # ---- Sampling ----
         self.scheduler.set_timesteps(min(steps, self.scheduler.num_train_timesteps))

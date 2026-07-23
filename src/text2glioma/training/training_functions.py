@@ -1457,17 +1457,16 @@ def train_epoch_ldm(
             # sync when it fires. The molecular head applies its own
             # per-field dropout-to-unknown internally in training mode.
             if molecular_head is not None:
-                # Unwrap DDP for non-forward attribute access (null_tokens).
+                # Unwrap DDP for non-forward attribute access (null_tokens, fields).
                 # The forward call still goes through the DDP wrapper so
                 # gradients get synchronised across ranks.
                 mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
-                idh  = x["idh"].to(device).long()
-                mgmt = x["mgmt"].to(device).long()
-                mol_tokens = molecular_head(idh, mgmt)                        # (B, 2, D)
+                mol_kwargs = {f: x[f].to(device).long() for f in mh_raw.fields}
+                mol_tokens = molecular_head(**mol_kwargs)                        # (B, |fields|, D)
                 mol_null   = mh_raw.null_tokens(
-                    images.size(0), device=device, dtype=cond.dtype)          # (B, 2, D)
-                cond   = torch.cat([cond,   mol_tokens.to(cond.dtype)],   dim=1)  # (B, 128+2, D)
-                uncond = torch.cat([uncond, mol_null.to(uncond.dtype)], dim=1)  # (B, 128+2, D)
+                    images.size(0), device=device, dtype=cond.dtype)             # (B, |fields|, D)
+                cond   = torch.cat([cond,   mol_tokens.to(cond.dtype)],   dim=1) # (B, 128+|fields|, D)
+                uncond = torch.cat([uncond, mol_null.to(uncond.dtype)], dim=1)   # (B, 128+|fields|, D)
 
             # Joint uncond dropout: on top of the independent text/mask dropouts,
             # force BOTH branches to their uncond state on a per-sample Bernoulli
@@ -1623,10 +1622,10 @@ def eval_ldm(
 
             # Optional molecular class conditioning (no dropout at eval).
             if molecular_head is not None:
-                idh  = x["idh"].to(device).long()
-                mgmt = x["mgmt"].to(device).long()
-                mol_tokens = molecular_head(idh, mgmt)                        # (B, 2, D)
-                cond = torch.cat([cond, mol_tokens.to(cond.dtype)], dim=1)    # (B, 128+2, D)
+                mh_raw = molecular_head.module if hasattr(molecular_head, "module") else molecular_head
+                mol_kwargs = {f: x[f].to(device).long() for f in mh_raw.fields}
+                mol_tokens = molecular_head(**mol_kwargs)                     # (B, |fields|, D)
+                cond = torch.cat([cond, mol_tokens.to(cond.dtype)], dim=1)    # (B, 128+|fields|, D)
 
             noise = torch.randn_like(e).to(device)
             noisy_e = scheduler.add_noise(original_samples=e, noise=noise, timesteps=timesteps)

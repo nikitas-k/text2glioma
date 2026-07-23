@@ -93,7 +93,15 @@ class MolecularStatus:
 
 
 class MolecularClassConditioning(nn.Module):
-    """Two-slot learnable class conditioner for IDH + MGMT status.
+    """Learnable class-conditioning head for one or more molecular fields.
+
+    Emits ``(B, len(fields), hidden_dim)`` pseudo-tokens that get appended
+    to the frozen RadBERT text embedding sequence and fed into the LDM's
+    cross-attention. Each field (``"idh"``, ``"mgmt"``) has its own
+    randomly-initialised ``nn.Embedding(3, hidden_dim)`` table so the
+    three states (wildtype/mutant/unknown or unmethylated/methylated/
+    unknown) start with pairwise-orthogonal representations and can
+    learn discriminative geometry from scratch during fine-tuning.
 
     Parameters
     ----------
@@ -102,15 +110,20 @@ class MolecularClassConditioning(nn.Module):
         text-encoder output width (768 for RadBERT-base).
     dropout_to_unknown_p
         Probability, at training time, of replacing an example's
-        molecular class with ``UNKNOWN``. This drives classifier-free
-        guidance: the "null" conditioning direction the sampler pushes
-        away from at inference is the same distribution the model sees
-        for unknown-status subjects.
+        molecular class with ``UNKNOWN``. Doubles as the CFG null
+        direction — the sampler pushes away from the unconditional
+        pass built from all-UNKNOWN tokens.
     init_std
-        Standard deviation for the Gaussian initialiser applied to both
-        embedding tables. 0.02 matches transformer conventions and
-        keeps the pseudo-tokens on a scale comparable to RadBERT
-        outputs.
+        Standard deviation for the Gaussian initialiser applied to
+        every embedding table. 0.02 matches transformer conventions.
+    fields
+        Which molecular fields to include as separate learnable
+        pseudo-tokens. Defaults to ``("idh", "mgmt")`` for backward
+        compatibility with v1 checkpoints; pass ``("idh",)`` to build
+        an IDH-only head with half the parameters.
+    n_idh_classes, n_mgmt_classes
+        Number of classes per field. Always 3 (WT/MUT/UNK,
+        unm/met/UNK) in this codebase but exposed for future extension.
     """
 
     def __init__(
@@ -120,6 +133,7 @@ class MolecularClassConditioning(nn.Module):
         init_std: float = 0.02,
         n_idh_classes: int = 3,
         n_mgmt_classes: int = 3,
+        fields: tuple[str, ...] = ("idh", "mgmt"),
     ) -> None:
         super().__init__()
         if not (0.0 <= dropout_to_unknown_p <= 1.0):
@@ -129,16 +143,46 @@ class MolecularClassConditioning(nn.Module):
         if n_idh_classes < 1 or n_mgmt_classes < 1:
             raise ValueError("need at least one class per molecular field")
 
+        # Normalise + validate fields.
+        fields = tuple(fields)
+        if len(fields) == 0:
+            raise ValueError("fields must be non-empty; got ()")
+        allowed = {"idh", "mgmt"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"unknown fields {bad!r}; allowed: {allowed}")
+
         self.hidden_dim = hidden_dim
         self.n_idh_classes = n_idh_classes
         self.n_mgmt_classes = n_mgmt_classes
         self.dropout_to_unknown_p = float(dropout_to_unknown_p)
+        self.fields: tuple[str, ...] = fields
 
-        self.idh_embedding  = nn.Embedding(n_idh_classes,  hidden_dim)
-        self.mgmt_embedding = nn.Embedding(n_mgmt_classes, hidden_dim)
+        # Create ONLY the requested fields as flat attributes so state_dict
+        # keys stay stable: v1 (IDH+MGMT) checkpoints load into
+        # ``MolecularClassConditioning(fields=("idh","mgmt"))`` and IDH-only
+        # checkpoints into ``fields=("idh",)`` with no key remapping.
+        if "idh" in fields:
+            self.idh_embedding = nn.Embedding(n_idh_classes, hidden_dim)
+            nn.init.normal_(self.idh_embedding.weight, mean=0.0, std=init_std)
+        if "mgmt" in fields:
+            self.mgmt_embedding = nn.Embedding(n_mgmt_classes, hidden_dim)
+            nn.init.normal_(self.mgmt_embedding.weight, mean=0.0, std=init_std)
 
-        nn.init.normal_(self.idh_embedding.weight,  mean=0.0, std=init_std)
-        nn.init.normal_(self.mgmt_embedding.weight, mean=0.0, std=init_std)
+    # ------------------------------------------------------------------
+    # Internals for field access
+    # ------------------------------------------------------------------
+
+    def _embedding_for(self, field: str) -> nn.Embedding:
+        return getattr(self, f"{field}_embedding")
+
+    def _unknown_index_for(self, field: str) -> int:
+        # Unknown class is always the last index by convention.
+        n = self.n_idh_classes if field == "idh" else self.n_mgmt_classes
+        return n - 1
+
+    def _n_classes_for(self, field: str) -> int:
+        return self.n_idh_classes if field == "idh" else self.n_mgmt_classes
 
     # ------------------------------------------------------------------
     # Forward
@@ -146,38 +190,76 @@ class MolecularClassConditioning(nn.Module):
 
     def forward(
         self,
-        idh_class:  torch.Tensor,
-        mgmt_class: torch.Tensor,
+        idh_class: Optional[torch.Tensor] = None,
+        mgmt_class: Optional[torch.Tensor] = None,
         force_unknown: bool = False,
+        **extra_kwargs,
     ) -> torch.Tensor:
-        """Emit the (B, 2, hidden_dim) conditioning token sequence.
+        """Emit the ``(B, len(self.fields), hidden_dim)`` token sequence.
 
-        Parameters
-        ----------
-        idh_class, mgmt_class
-            Long tensors of shape ``(B,)`` with class indices in
-            ``[0, n_classes)``. Any values outside range trigger a
-            ``ValueError`` — validate upstream.
-        force_unknown
-            If ``True``, override both class inputs with the UNKNOWN
-            index. Used at inference to build the CFG null branch;
-            never set at training time (rely on
-            ``dropout_to_unknown_p`` instead).
+        Accepts both positional ``mol_head(idh, mgmt)`` (v1 API) and
+        keyword-based ``mol_head(idh=idh, mgmt=mgmt)`` calls. Fields
+        listed in ``self.fields`` are required; any additional kwargs
+        are silently ignored so existing training loops that pass both
+        IDH and MGMT keep working when a head has only IDH configured.
         """
-        idh, mgmt = self._validate_and_align(idh_class, mgmt_class)
+        # Assemble kwargs from both positional and named args.
+        kwargs: dict[str, torch.Tensor] = {}
+        if idh_class is not None:
+            kwargs["idh"] = idh_class
+        if mgmt_class is not None:
+            kwargs["mgmt"] = mgmt_class
+        for k, v in extra_kwargs.items():
+            if k in ("idh", "mgmt"):
+                kwargs[k] = v
 
-        if force_unknown:
-            idh  = torch.full_like(idh,  IDH_UNKNOWN)
-            mgmt = torch.full_like(mgmt, MGMT_UNKNOWN)
-        elif self.training and self.dropout_to_unknown_p > 0.0:
-            idh, mgmt = self._apply_dropout(idh, mgmt)
+        # Validate all required fields are present.
+        for f in self.fields:
+            if f not in kwargs:
+                raise ValueError(
+                    f"required field {f!r} missing from forward(); "
+                    f"got kwargs {list(kwargs.keys())}, fields {self.fields}"
+                )
 
-        idh_emb  = self.idh_embedding(idh)    # (B, D)
-        mgmt_emb = self.mgmt_embedding(mgmt)  # (B, D)
-        # Stack along a NEW sequence axis so the two pseudo-tokens sit
-        # in a well-defined order (IDH first, MGMT second).
-        tokens = torch.stack([idh_emb, mgmt_emb], dim=1)  # (B, 2, D)
-        return tokens
+        # Cast + shape-check each field independently.
+        cleaned: dict[str, torch.Tensor] = {}
+        ref_shape: Optional[torch.Size] = None
+        for f in self.fields:
+            t = kwargs[f]
+            if t.dtype != torch.long:
+                t = t.long()
+            if t.ndim != 1:
+                raise ValueError(f"expected 1D {f}_class, got shape {tuple(t.shape)}")
+            if ref_shape is None:
+                ref_shape = t.shape
+            elif t.shape != ref_shape:
+                raise ValueError(
+                    f"class tensors must all have the same shape; "
+                    f"got {ref_shape} then {tuple(t.shape)} for {f}"
+                )
+            n_cls = self._n_classes_for(f)
+            if int(t.max()) >= n_cls or int(t.min()) < 0:
+                raise ValueError(
+                    f"{f}_class out of range [0, {n_cls}); "
+                    f"got min={int(t.min())} max={int(t.max())}"
+                )
+            cleaned[f] = t
+
+        # Apply overrides (force_unknown) or dropout to each field.
+        for f in self.fields:
+            unk_idx = self._unknown_index_for(f)
+            if force_unknown:
+                cleaned[f] = torch.full_like(cleaned[f], unk_idx)
+            elif self.training and self.dropout_to_unknown_p > 0.0:
+                drop = torch.rand_like(cleaned[f], dtype=torch.float32) \
+                       < self.dropout_to_unknown_p
+                cleaned[f] = torch.where(
+                    drop, torch.full_like(cleaned[f], unk_idx), cleaned[f]
+                )
+
+        # Look up each field's embedding and stack along a NEW sequence axis.
+        tokens = [self._embedding_for(f)(cleaned[f]) for f in self.fields]
+        return torch.stack(tokens, dim=1)  # (B, len(fields), D)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -185,69 +267,22 @@ class MolecularClassConditioning(nn.Module):
 
     def null_tokens(self, batch_size: int, device: torch.device,
                     dtype: torch.dtype = torch.float32) -> torch.Tensor:
-        """Return the (B, 2, hidden_dim) unconditional-CFG null tokens.
+        """Return the CFG-null token sequence ``(B, len(self.fields), D)``.
 
-        Equivalent to calling ``forward(...)`` with all-UNKNOWN classes
-        but avoids constructing intermediate tensors. Use this to build
-        the unconditional-branch context at inference.
+        Every field is set to its UNKNOWN class index. Equivalent to
+        ``forward(force_unknown=True, ...)`` but avoids constructing the
+        input tensors.
         """
-        idh  = torch.full((batch_size,), IDH_UNKNOWN,  dtype=torch.long, device=device)
-        mgmt = torch.full((batch_size,), MGMT_UNKNOWN, dtype=torch.long, device=device)
-        idh_emb  = self.idh_embedding(idh).to(dtype=dtype)
-        mgmt_emb = self.mgmt_embedding(mgmt).to(dtype=dtype)
-        return torch.stack([idh_emb, mgmt_emb], dim=1)
+        tokens: list[torch.Tensor] = []
+        for f in self.fields:
+            unk_idx = self._unknown_index_for(f)
+            cls = torch.full((batch_size,), unk_idx, dtype=torch.long, device=device)
+            tokens.append(self._embedding_for(f)(cls).to(dtype=dtype))
+        return torch.stack(tokens, dim=1)
 
     def num_tokens(self) -> int:
         """Number of pseudo-tokens contributed to the cross-attn sequence."""
-        return NUM_MOLECULAR_TOKENS
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _validate_and_align(
-        self, idh: torch.Tensor, mgmt: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if idh.dtype != torch.long:
-            idh = idh.long()
-        if mgmt.dtype != torch.long:
-            mgmt = mgmt.long()
-        if idh.shape != mgmt.shape:
-            raise ValueError(
-                f"idh and mgmt must have the same shape; got "
-                f"idh={tuple(idh.shape)}, mgmt={tuple(mgmt.shape)}"
-            )
-        if idh.ndim != 1:
-            raise ValueError(f"expected 1D class tensor, got shape {tuple(idh.shape)}")
-        if int(idh.max()) >= self.n_idh_classes or int(idh.min()) < 0:
-            raise ValueError(
-                f"idh_class out of range [0, {self.n_idh_classes}); "
-                f"got min={int(idh.min())} max={int(idh.max())}"
-            )
-        if int(mgmt.max()) >= self.n_mgmt_classes or int(mgmt.min()) < 0:
-            raise ValueError(
-                f"mgmt_class out of range [0, {self.n_mgmt_classes}); "
-                f"got min={int(mgmt.min())} max={int(mgmt.max())}"
-            )
-        return idh, mgmt
-
-    def _apply_dropout(
-        self, idh: torch.Tensor, mgmt: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Independently replace each field with UNKNOWN with prob p.
-
-        Independent per-field dropout (rather than joint) means the
-        model sees samples where only one of IDH/MGMT is null. This
-        supports CFG on either axis independently at inference — you
-        can guide on IDH while leaving MGMT at its true class, for
-        example.
-        """
-        p = self.dropout_to_unknown_p
-        drop_idh  = torch.rand_like(idh,  dtype=torch.float32) < p
-        drop_mgmt = torch.rand_like(mgmt, dtype=torch.float32) < p
-        idh  = torch.where(drop_idh,  torch.full_like(idh,  IDH_UNKNOWN),  idh)
-        mgmt = torch.where(drop_mgmt, torch.full_like(mgmt, MGMT_UNKNOWN), mgmt)
-        return idh, mgmt
+        return len(self.fields)
 
 
 # ── Datalist ingestion helper ─────────────────────────────────────────
