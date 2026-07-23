@@ -77,7 +77,14 @@ source /g/data/hl36/nk9793/venv/monai/bin/activate
 cd "$REPO"
 export HF_HOME=/g/data/vp06/$USER/text2glioma_train/runs/cache/huggingface
 export TRANSFORMERS_OFFLINE=1
-mkdir -p "$OUT_ROOT/logs" "$RUN_DIR"
+# Redirect PyTorch's file-system shared-tensor storage off the tiny
+# /dev/shm and /tmp on gpuvolta nodes onto $PBS_JOBFS (250 GB local
+# SSD). Combined with torch.multiprocessing.set_sharing_strategy(
+# "file_system") in train_molecular_classifier.py, this prevents the
+# 'Unexpected bus error encountered in worker' shm-exhaustion crash
+# that killed epoch 5 of the first submission.
+export TMPDIR=${PBS_JOBFS:-/tmp}
+mkdir -p "$OUT_ROOT/logs" "$RUN_DIR" "$TMPDIR"
 
 # ---- Preflight -------------------------------------------------------
 # n_synth=0 doesn't touch the release, so the manifest is only strictly
@@ -123,7 +130,7 @@ python -u scripts/train_molecular_classifier.py \
     --patience           10 \
     --batch_size         8 \
     --val_batch_size     8 \
-    --num_workers        8 \
+    --num_workers        4 \
     --val_interval       5 \
     --out_dir            "$RUN_DIR" \
     --resume \

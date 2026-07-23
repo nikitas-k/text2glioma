@@ -68,6 +68,22 @@ from monai.networks import nets
 from monai.utils import set_determinism
 
 
+# ── PyTorch shared-tensor strategy: use file-system, not /dev/shm ─────
+# Gadi's gpuvolta nodes ship with an 8-GB /dev/shm that is easily
+# exhausted once num_workers > 4 and MONAI batches (4-channel float32
+# volumes at 160x224x160 ≈ 90 MB per sample) start flowing through the
+# DataLoader's shared memory. The default sharing strategy 'file_descriptor'
+# maps every shared tensor into /dev/shm, so filling shm produces the
+# `bus error` / `Unexpected bus error encountered in worker` traceback we
+# hit at epoch 5 of the first classifier grid job.
+#
+# 'file_system' instead stores shared memory as ordinary files under
+# tempfile.gettempdir(). The launcher exports TMPDIR=$PBS_JOBFS (250 GB
+# local SSD per job) so these files land on scratch instead of /tmp
+# (Gadi /tmp is also small and node-shared).
+torch.multiprocessing.set_sharing_strategy("file_system")
+
+
 # ── Monkey-patch atomic writes into PersistentDataset ──────────────────
 # MONAI's PersistentDataset._cachecheck writes each transformed sample
 # via ``tempfile.TemporaryDirectory()`` + ``shutil.move``. On Gadi, the
@@ -645,13 +661,21 @@ def main() -> None:
     # SafePersistentDataset overrides _cachecheck at the class level, so
     # spawned workers inherit the atomic-write behaviour via pickle of
     # the dataset instance -- no worker_init_fn needed.
+    #
+    # persistent_workers=True keeps the worker pool alive across epochs
+    # (defaults to False, which respawns workers every epoch and briefly
+    # doubles the shm/file-handle footprint). Only meaningful when
+    # num_workers > 0.
+    _persistent = args.num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                shuffle=train_shuffle, sampler=train_sampler,
                                num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False)
+                               pin_memory=True, drop_last=False,
+                               persistent_workers=_persistent)
     val_loader   = DataLoader(val_ds,   batch_size=args.val_batch_size,
                                shuffle=False, num_workers=args.num_workers,
-                               pin_memory=True, drop_last=False)
+                               pin_memory=True, drop_last=False,
+                               persistent_workers=_persistent)
 
     # ── Model ──
     model = _make_model(device)
