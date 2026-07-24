@@ -127,14 +127,40 @@ def _make_capturing_attention(expected_ctx_len: int):
 
 def _install_hooks(unet: torch.nn.Module, expected_ctx_len: int) -> list:
     """Walk the U-Net, override ``_attention`` on every ``CrossAttention``,
-    and return the list of (name, module) tuples in traversal order."""
+    register a forward pre-hook on ``to_v`` to also capture its input
+    (the per-layer projected context, whose channel dim may differ from
+    the raw 768-D embedding), and return the list of (name, module)
+    tuples in traversal order."""
     from generative.networks.nets.diffusion_model_unet import CrossAttention
     replacement = _make_capturing_attention(expected_ctx_len)
     hooked: list[tuple[str, CrossAttention]] = []
+
+    def _make_v_input_hook(mod: CrossAttention):
+        def _hook(_module, args, _kwargs=None):
+            # to_v is nn.Linear(cross_attention_dim, inner_dim). Its input
+            # is (B, N_key, cross_attention_dim). We stash the tensor so
+            # the V-projection probe can compare WT vs MUT at the actual
+            # per-layer projected representation instead of the raw
+            # 768-D molecular-head embeddings (which fail with a shape
+            # mismatch on layers that project context first).
+            if args and args[0].shape[1] == expected_ctx_len:
+                mod._last_to_v_input = args[0].detach().cpu()
+        return _hook
+
     for name, m in unet.named_modules():
         if isinstance(m, CrossAttention):
             m._attention = types.MethodType(replacement, m)
             m._last_cross_attn_probs = None
+            m._last_to_v_input = None
+            # Forward pre-hook on the Linear to_v. Modern torch versions
+            # accept the with_kwargs kwarg; older ones don't, so fall
+            # back to args-only.
+            try:
+                m.to_v.register_forward_pre_hook(
+                    _make_v_input_hook(m), with_kwargs=True,
+                )
+            except TypeError:
+                m.to_v.register_forward_pre_hook(_make_v_input_hook(m))
             hooked.append((name, m))
     return hooked
 
@@ -212,18 +238,33 @@ def _build_batch(engine: Text2GliomaEngine, batch_size: int,
 # ---------------------------------------------------------------------
 
 def _v_projection_probe(engine: Text2GliomaEngine,
-                         hooked: list) -> dict:
-    """Per-layer cosine similarity between ``to_v(WT_emb)`` and
-    ``to_v(MUT_emb)``.
+                         hooked: list,
+                         idh_token_pos: int,
+                         batch_half: int) -> dict:
+    """Per-layer cosine similarity between ``to_v(WT_ctx)`` and
+    ``to_v(MUT_ctx)`` at the IDH token position, using the *actual
+    projected* context each layer received during the forward pass.
 
     Rationale: cross-attention output is ``softmax(QK^T) @ V``. Even when
     the softmax weights on the IDH position differ across WT / MUT batches
     (as confirmed by the attention-mass diagnostic above), if the ``to_v``
     projection collapses the two class embeddings onto near-identical
     vectors then the attention-weighted sum is nearly identical and the
-    class distinction never reaches the pixel decoder. This probe is a
-    static one-shot: no forward pass, just push the two 768-D embeddings
-    through each layer's linear ``to_v`` and compare.
+    class distinction never reaches the pixel decoder.
+
+    Why we use the captured pre-projected context instead of the raw 768-D
+    embeddings:
+      * Some U-Net layers have their own upstream projection (e.g. from
+        768 down to 512) applied before cross-attention. Pushing the raw
+        head embedding through ``to_v`` fails with a shape mismatch on
+        those layers.
+      * The captured tensor is exactly what fed into ``to_v`` in that
+        specific layer during the forward pass, so the probe measures the
+        real behaviour at the exact channel dim used by that block.
+
+    Assumes the forward-pass batch was structured as [WT half | MUT half]
+    by ``_build_batch`` (default). Skips any layer whose ``to_v`` pre-hook
+    didn't fire (e.g. layers unreachable in this forward pass).
 
     Read the ``value_cos`` column:
       * < 0.5  : V pathway differentiates WT and MUT strongly. If the
@@ -234,32 +275,40 @@ def _v_projection_probe(engine: Text2GliomaEngine,
                  Even perfect attention allocation cannot rescue this;
                  needs an auxiliary contrastive loss on ``to_v`` outputs
                  or a FiLM-style bypass.
-
-    Returns dict keyed by layer name with the per-layer probe stats.
     """
     if engine.molecular_head is None or "idh" not in engine.molecular_head.fields:
         return {}
-    device = engine.device
-    emb = engine.molecular_head.idh_embedding.weight.detach()  # (3, D)
-    e_wt  = emb[IDH_WILDTYPE:IDH_WILDTYPE + 1].to(device)      # (1, D)
-    e_mut = emb[IDH_MUTANT:IDH_MUTANT + 1].to(device)          # (1, D)
     from torch.nn.functional import cosine_similarity
 
     probe: dict = {}
     for name, mod in hooked:
+        ctx_in = getattr(mod, "_last_to_v_input", None)
+        if ctx_in is None:
+            continue
+        # ctx_in: (B, ctx_len, per_layer_dim). Slice the IDH token
+        # position and average within each class half so we get one
+        # vector per class regardless of batch size.
+        if ctx_in.shape[1] <= idh_token_pos:
+            continue
+        idh_ctx = ctx_in[:, idh_token_pos, :]           # (B, dim)
+        wt_ctx  = idh_ctx[:batch_half].mean(dim=0, keepdim=True)   # (1, dim)
+        mut_ctx = idh_ctx[batch_half:].mean(dim=0, keepdim=True)   # (1, dim)
+
+        # Push through the same to_v that ran during the forward pass.
+        # to_v is on-device; move inputs to match.
+        target_device = next(mod.to_v.parameters()).device
         with torch.no_grad():
-            v_wt  = mod.to_v(e_wt)                              # (1, inner)
-            v_mut = mod.to_v(e_mut)                             # (1, inner)
+            v_wt  = mod.to_v(wt_ctx.to(target_device))
+            v_mut = mod.to_v(mut_ctx.to(target_device))
         cos = float(cosine_similarity(v_wt, v_mut, dim=-1).item())
         # Norms are informative too: a near-zero-norm V collapses to the
         # attention baseline regardless of embedding identity.
-        n_wt  = float(v_wt.norm().item())
-        n_mut = float(v_mut.norm().item())
         probe[name] = {
             "value_cos":       cos,
-            "value_norm_wt":   n_wt,
-            "value_norm_mut":  n_mut,
+            "value_norm_wt":   float(v_wt.norm().item()),
+            "value_norm_mut":  float(v_mut.norm().item()),
             "value_delta_l2":  float((v_wt - v_mut).norm().item()),
+            "ctx_dim":         int(ctx_in.shape[-1]),
         }
     return probe
 
@@ -427,7 +476,9 @@ def main() -> None:
         }
 
     # ---------- V-projection probe (IDH only) --------------------
-    v_probe = _v_projection_probe(engine, hooked)
+    v_probe = _v_projection_probe(engine, hooked,
+                                   idh_token_pos=idh_token_pos,
+                                   batch_half=half)
     # Fold into per-layer records so both signals live side-by-side
     # in the JSON.
     for name, stats in v_probe.items():
