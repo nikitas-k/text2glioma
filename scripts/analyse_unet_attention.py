@@ -208,6 +208,63 @@ def _build_batch(engine: Text2GliomaEngine, batch_size: int,
 
 
 # ---------------------------------------------------------------------
+# V-projection probe (static, no forward pass)
+# ---------------------------------------------------------------------
+
+def _v_projection_probe(engine: Text2GliomaEngine,
+                         hooked: list) -> dict:
+    """Per-layer cosine similarity between ``to_v(WT_emb)`` and
+    ``to_v(MUT_emb)``.
+
+    Rationale: cross-attention output is ``softmax(QK^T) @ V``. Even when
+    the softmax weights on the IDH position differ across WT / MUT batches
+    (as confirmed by the attention-mass diagnostic above), if the ``to_v``
+    projection collapses the two class embeddings onto near-identical
+    vectors then the attention-weighted sum is nearly identical and the
+    class distinction never reaches the pixel decoder. This probe is a
+    static one-shot: no forward pass, just push the two 768-D embeddings
+    through each layer's linear ``to_v`` and compare.
+
+    Read the ``value_cos`` column:
+      * < 0.5  : V pathway differentiates WT and MUT strongly. If the
+                 downstream classifier still fails, the fault is later
+                 (post-attention MLP, or CFG=1 masking the small delta).
+      * 0.5-0.9: mild collapse; class info is preserved but subtle.
+      * > 0.9  : V pathway has effectively collapsed the two classes.
+                 Even perfect attention allocation cannot rescue this;
+                 needs an auxiliary contrastive loss on ``to_v`` outputs
+                 or a FiLM-style bypass.
+
+    Returns dict keyed by layer name with the per-layer probe stats.
+    """
+    if engine.molecular_head is None or "idh" not in engine.molecular_head.fields:
+        return {}
+    device = engine.device
+    emb = engine.molecular_head.idh_embedding.weight.detach()  # (3, D)
+    e_wt  = emb[IDH_WILDTYPE:IDH_WILDTYPE + 1].to(device)      # (1, D)
+    e_mut = emb[IDH_MUTANT:IDH_MUTANT + 1].to(device)          # (1, D)
+    from torch.nn.functional import cosine_similarity
+
+    probe: dict = {}
+    for name, mod in hooked:
+        with torch.no_grad():
+            v_wt  = mod.to_v(e_wt)                              # (1, inner)
+            v_mut = mod.to_v(e_mut)                             # (1, inner)
+        cos = float(cosine_similarity(v_wt, v_mut, dim=-1).item())
+        # Norms are informative too: a near-zero-norm V collapses to the
+        # attention baseline regardless of embedding identity.
+        n_wt  = float(v_wt.norm().item())
+        n_mut = float(v_mut.norm().item())
+        probe[name] = {
+            "value_cos":       cos,
+            "value_norm_wt":   n_wt,
+            "value_norm_mut":  n_mut,
+            "value_delta_l2":  float((v_wt - v_mut).norm().item()),
+        }
+    return probe
+
+
+# ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
@@ -369,6 +426,21 @@ def main() -> None:
             "wt_mut_delta_abs":_stat(per_layer_wt_mut_delta[f]),
         }
 
+    # ---------- V-projection probe (IDH only) --------------------
+    v_probe = _v_projection_probe(engine, hooked)
+    # Fold into per-layer records so both signals live side-by-side
+    # in the JSON.
+    for name, stats in v_probe.items():
+        if name in report["layers"]:
+            report["layers"][name]["v_probe"] = stats
+
+    if v_probe:
+        v_cos_all = np.asarray(
+            [v_probe[n]["value_cos"] for n in layer_names if n in v_probe],
+            dtype=np.float64,
+        )
+        report["summary"]["value_cos_idh_wt_vs_mut"] = _stat(v_cos_all.tolist())
+
     # Uniform-attention reference: 1 / ctx_len per token.
     report["uniform_reference_mass_per_token"] = 1.0 / ctx_len
 
@@ -416,12 +488,72 @@ def main() -> None:
             print(f"    |WT-MUT| > 0: attention pattern shifts with IDH class "
                   f"-> at least some signal is propagating through K/Q.")
 
+    # ---------- Top-K layer table --------------------------------
+    # Rank layers by the primary field's ratio_vs_text so the operator can
+    # eyeball which specific cross-attn blocks are attending most to the
+    # molecular token. Late (higher-index) hot layers are more likely to
+    # influence the final pixel output than early ones.
+    if fields:
+        primary = fields[0]
+        rows = [(name, report["layers"][name][primary]["ratio_vs_text"],
+                 report["layers"][name][primary]["wt_mut_delta_abs"],
+                 (report["layers"][name].get("v_probe") or {}).get("value_cos"))
+                for name in layer_names]
+        rows.sort(key=lambda r: r[1], reverse=True)
+        print(f"\nTop-K layers by {primary.upper()} attention ratio:")
+        print(f"  {'idx':>3}  {'layer':<70}  {'ratio':>7}  "
+              f"{'|WT-MUT|':>10}  {'V_cos(WT,MUT)':>13}")
+        for i, (name, r, d, vc) in enumerate(rows[:min(10, len(rows))]):
+            vc_str = f"{vc:>13.4f}" if vc is not None else "           n/a"
+            traversal_idx = layer_names.index(name)
+            print(f"  {traversal_idx:>3}  {name:<70}  {r:>7.3f}  "
+                  f"{d:>10.5f}  {vc_str}")
+
+    # ---------- V-projection probe summary -----------------------
+    if v_probe:
+        v_cos_vals = np.asarray(
+            [v_probe[n]["value_cos"] for n in layer_names if n in v_probe],
+            dtype=np.float64,
+        )
+        print(f"\n[V-projection probe (IDH: WT vs MUT after to_v)]")
+        print(f"  cos(V(WT), V(MUT)) per layer: "
+              f"mean={v_cos_vals.mean():.4f}  median={np.median(v_cos_vals):.4f}  "
+              f"min={v_cos_vals.min():.4f}  max={v_cos_vals.max():.4f}")
+        print(f"  Interpretation:")
+        v_mean = v_cos_vals.mean()
+        if v_mean > 0.9:
+            print(f"    cos > 0.9: V pathway has COLLAPSED WT/MUT into the "
+                  f"same vector. Even perfect attention allocation cannot "
+                  f"rescue this — needs auxiliary contrastive loss on to_v "
+                  f"outputs or a FiLM-style bypass.")
+        elif v_mean > 0.5:
+            print(f"    0.5 < cos < 0.9: mild V-collapse. Class info is "
+                  f"preserved but subtle. CFG amplification (higher CFG) "
+                  f"may still be enough to make it visible in pixels.")
+        else:
+            print(f"    cos < 0.5: V pathway CLEARLY differentiates WT and "
+                  f"MUT. If the downstream classifier still fails, the fault "
+                  f"is later (post-attention MLP filtering, or CFG=1 masking "
+                  f"the delta at sampling time).")
+        # Highlight worst offenders
+        rows = [(name, v_probe[name]["value_cos"]) for name in layer_names
+                if name in v_probe]
+        rows.sort(key=lambda r: r[1], reverse=True)
+        print(f"  Top-5 most-collapsed layers (highest V-cos):")
+        for name, vc in rows[:5]:
+            traversal_idx = layer_names.index(name)
+            print(f"    idx={traversal_idx:>3}  cos={vc:>7.4f}  {name}")
+
     # ---------- Figure -------------------------------------------
     try:
         import matplotlib.pyplot as plt
 
         n_layers = len(layer_names)
-        fig, axes = plt.subplots(1, 2, figsize=(14, 4.8))
+        # 3 panels if V-probe data available, else 2.
+        n_panels = 3 if v_probe else 2
+        fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4.8),
+                                  squeeze=False)
+        axes = axes[0]
         x = np.arange(n_layers)
 
         # Panel 1: per-layer mass on IDH vs text-per-token, log-y
@@ -450,6 +582,35 @@ def main() -> None:
         ax.set_title("Class-flip sensitivity on molecular token")
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
+
+        # Panel 3: V-projection cosine similarity (if available).
+        if v_probe:
+            ax = axes[2]
+            v_cos_series = [v_probe[n]["value_cos"]
+                            if n in v_probe else np.nan
+                            for n in layer_names]
+            v_delta_l2 = [v_probe[n]["value_delta_l2"]
+                          if n in v_probe else np.nan
+                          for n in layer_names]
+            ax.axhline(1.0, color="red",  linestyle="--", linewidth=0.8,
+                        label="V-collapse (cos=1)")
+            ax.axhline(0.9, color="orange", linestyle=":", linewidth=0.8,
+                        label="strong collapse threshold")
+            ax.plot(x, v_cos_series, "o-", color="#2ca02c", markersize=5,
+                     label="cos(V(WT), V(MUT))")
+            ax.set_xlabel("cross-attention layer (traversal order)")
+            ax.set_ylabel("cosine similarity")
+            ax.set_ylim(-0.05, 1.10)
+            ax.set_title("V-projection collapse probe (IDH: WT vs MUT)")
+            ax.legend(fontsize=8, loc="lower right")
+            ax.grid(True, alpha=0.3)
+            # Twin y-axis for delta L2 norm — gives absolute scale
+            # alongside the cosine.
+            ax2 = ax.twinx()
+            ax2.plot(x, v_delta_l2, "s--", color="#7f7f7f", markersize=3,
+                      alpha=0.6, label="||V(WT) - V(MUT)||_2")
+            ax2.set_ylabel("||V(WT) - V(MUT)||_2", color="#7f7f7f")
+            ax2.tick_params(axis="y", labelcolor="#7f7f7f")
 
         fig.tight_layout()
         out_png = args.out_dir / "unet_attention_report.png"
