@@ -9,38 +9,36 @@
 #PBS -l jobfs=100GB
 #PBS -l wd
 #PBS -r y
-#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/manifest_prep.o
-#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/manifest_prep.e
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/manifest_prep.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/manifest_prep.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
 # Build the mask-first pre-generation manifest for the IDH-ONLY release.
 #
 # Same VASARI-auto → prompt pipeline as the vanilla launcher, but with
-# --balance_mode=idh_only:
-#   * IDH drawn 50/50 (WT / MUT) — matches the effective IDH marginal of
-#     the v1 'joint' mode, so classifier-grid comparisons stay apples-to-
-#     apples.
-#   * MGMT column filled with the -1 sentinel; generate_dataset.py will
-#     pass mgmt=None to the engine, and the IDH-only head will silently
-#     ignore it (its fields=('idh',) doesn't allocate an MGMT branch).
+# --balance_mode=idh_only and CFG=4.5 (matches the manuscript deployment
+# default; the earlier cfg=1.0 release produced synth-only classifier
+# AUROC ≈ 0.5 because CFG=1 disables guidance and the single IDH token
+# in a 128+1-token sequence has no path to influence pixel content).
 #
-# Output goes to a dedicated release root (default:
-# /g/data/vp06/$USER/text2glioma_synth_idh_only) so the v1 release at
-# /g/data/vp06/$USER/text2glioma_synth stays untouched for reference.
+# Output goes to a version-tagged release root
+# (/g/data/vp06/$USER/text2glioma_synth_idh_only_cfg45) so the earlier
+# cfg=1.0 release at .../text2glioma_synth_idh_only stays intact for
+# apples-to-apples comparison.
 #
 # Submit:
 #   qsub scripts/dataset_release/launch_manifest_prep_idh.pbs
 #
-# Override defaults (e.g. use the natural 80/20 prior instead of 50/50):
-#   qsub -v BALANCE_MODE=idh_only_natural \
-#        scripts/dataset_release/launch_manifest_prep_idh.pbs
+# Override defaults (env-vars):
+#   qsub -v CFG=7.0                  ...   # push guidance harder
+#   qsub -v BALANCE_MODE=idh_only_natural ...
 # ----------------------------------------------------------------------
 
 set -euo pipefail
 
 REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
-OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only_cfg45}
 # Use the same N=1510 datalist as v1 for the mask pool — the mask
 # geometry is orthogonal to molecular status, so we do NOT want to
 # restrict the pool to the 494 IDH-known subjects (that would shrink
@@ -51,6 +49,7 @@ N_SAMPLES=${T2G_N_SAMPLES:-10000}
 NUM_SHARDS=${T2G_NUM_SHARDS:-20}
 SEED=${T2G_MANIFEST_SEED:-12345}
 BALANCE_MODE=${BALANCE_MODE:-idh_only}
+CFG=${CFG:-4.5}
 
 module load python3/3.9.2
 source /g/data/vp06/nk9793_hl36/venv/monai/bin/activate
@@ -68,6 +67,7 @@ echo "N samples:      $N_SAMPLES"
 echo "Num shards:     $NUM_SHARDS"
 echo "Seed:           $SEED"
 echo "BALANCE_MODE:   $BALANCE_MODE"
+echo "CFG:            $CFG"
 echo "PBS_JOBFS:      $PBS_JOBFS"
 echo "===================================================================="
 
@@ -82,7 +82,8 @@ python scripts/dataset_release/prepare_manifest.py \
     --out_root "$OUT_ROOT" \
     --out "$OUT_ROOT/manifest.csv" \
     --use_molecular \
-    --balance_mode "$BALANCE_MODE"
+    --balance_mode "$BALANCE_MODE" \
+    --cfg "$CFG"
 
 echo "manifest written to $OUT_ROOT/manifest.csv"
 ls -lh "$OUT_ROOT/manifest.csv"

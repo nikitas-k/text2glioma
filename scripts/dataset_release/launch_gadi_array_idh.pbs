@@ -10,14 +10,23 @@
 #PBS -l wd
 #PBS -r y
 #PBS -J 0-19
-#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/synth_gen_^array_index^.o
-#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only/logs/synth_gen_^array_index^.e
+#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/synth_gen_^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/synth_gen_^array_index^.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
 # Text2Glioma synthetic release: per-shard generation for the IDH-ONLY
-# release (v2). Uses the ldm_stage2_molecular_idh_only checkpoint
-# (2,304-param IDH-only head, no MGMT).
+# release (v2, CFG=4.5). Uses the ldm_stage2_molecular_idh_only
+# checkpoint (2,304-param IDH-only head, no MGMT). Per-sample CFG scale
+# comes from the manifest's `cfg` column (set at manifest-prep time
+# via CFG=4.5 in launch_manifest_prep_idh.pbs).
+#
+# The earlier cfg=1.0 release at .../text2glioma_synth_idh_only produced
+# synth-only-classifier val AUROC ≈ 0.5 (chance) on real val — CFG=1
+# disables guidance and the single IDH conditioning token is drowned
+# out by the 128 RadBERT text tokens. Regenerating at CFG=4.5 matches
+# the manuscript deployment default and gives the U-Net a stronger
+# reason to attend to the molecular token.
 #
 # The engine auto-detects the head's `fields=('idh',)` from the sibling
 # best_molecular_head.pth state_dict keys. Manifest rows carry mgmt=-1
@@ -34,7 +43,7 @@
 #
 # Prereqs:
 #   * launch_manifest_prep_idh.pbs has finished and produced
-#     $OUT_ROOT/manifest.csv
+#     $OUT_ROOT/manifest.csv (with cfg=4.5 baked into each row)
 #   * ldm_stage2_molecular_idh_only/best_model.pth is present
 #     (with sibling best_molecular_head.pth)
 # ----------------------------------------------------------------------
@@ -44,7 +53,7 @@ set -euo pipefail
 # ---- Paths (edit as needed) ------------------------------------------
 REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
 RUNS_ROOT=${TEXT2GLIOMA_RUNS:-/g/data/vp06/$USER/text2glioma_train/runs}
-OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+OUT_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only_cfg45}
 MANIFEST=${T2G_SYNTH_MANIFEST:-$OUT_ROOT/manifest.csv}
 
 STAGE1_CONFIG="$REPO/configs/stage1.yaml"

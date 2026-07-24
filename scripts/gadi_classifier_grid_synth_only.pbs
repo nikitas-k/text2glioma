@@ -11,7 +11,7 @@
 #PBS -l wd
 #PBS -j oe
 #PBS -r y
-#PBS -J 0-2
+#PBS -J 0-5
 #PBS -o /g/data/vp06/nk9793/text2glioma_classify_synth_only/logs/^array_index^.o
 #PBS -e /g/data/vp06/nk9793/text2glioma_classify_synth_only/logs/^array_index^.e
 #PBS -N cls_synth_only
@@ -34,17 +34,23 @@
 #                        the collapse at high n in the mixed grid is a
 #                        real+synth interaction, not a signal problem.
 #
-# Grid: 1 synthetic size × 3 seeds = 3 runs (indices 0..2)
+# Grid: 2 synthetic sizes × 3 seeds = 6 runs (indices 0..5)
 #
-#   n_synthetic ∈ {500}
+#   n_synthetic ∈ {500, 1000}
 #   seed ∈ {0, 1, 2}
 #
-# n=500 is used because it is the smallest bin that still supports a
-# meaningfully-sized 3D DenseNet train set (larger bins showed a
-# progressive decline in the mixed grid, so any signal is expected to
-# be strongest here). The other bins (1k / 5k / 10k) can be added
-# later by expanding N_SYNTH_LIST and the -J range if this run
-# produces a signal worth extrapolating.
+# n=500 (indices 0..2): first synth-only diagnostic pass. Live TB
+# reading at step 39 seed 0 showed val_auroc ≈ 0.635 on real val —
+# the LDM has encoded an image-space correlate of IDH.
+# n=1000 (indices 3..5): follow-up to check whether the synth-only
+# real-val AUROC improves with more synth or is saturated at ~0.63.
+#   * Rising -> we're bottlenecked on synth quantity (generate more).
+#   * Flat  -> we're at the LDM's signal ceiling (need better LDM or
+#              domain-adaptation in the mixed grid).
+#
+# --resume in train_molecular_classifier.py short-circuits any run
+# whose metrics.json already exists, so resubmitting -J 0-5 is safe
+# and idempotent even if seed 0's n=500 has already finished.
 #
 # Array index i decomposes as: i = n_idx*3 + seed_idx
 #
@@ -55,7 +61,7 @@
 set -euo pipefail
 
 # ---- Grid decode -----------------------------------------------------
-N_SYNTH_LIST=(500)
+N_SYNTH_LIST=(500 1000)
 SEEDS=(0 1 2)
 
 I=${PBS_ARRAY_INDEX}
