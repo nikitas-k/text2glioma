@@ -496,6 +496,14 @@ def main() -> None:
     ap.add_argument("--synth_manifest", type=Path, default=None,
                     help="Release manifest CSV. Defaults to <synth_root>/manifest_release.csv.")
     ap.add_argument("--n_synthetic", type=int, default=0)
+    ap.add_argument("--n_real_train", type=int, default=-1,
+                    help="Cap on real training items. -1 (default) uses "
+                         "every training subject from --real_datalist. 0 "
+                         "gives a synth-only regime (train purely on the "
+                         "release, evaluate on real val) — the diagnostic "
+                         "that isolates whether the LDM has actually "
+                         "encoded IDH into the images. Real validation is "
+                         "never capped.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n_epochs", type=int, default=200,
                     help="Upper bound on epochs. Effective epoch count is "
@@ -592,6 +600,20 @@ def main() -> None:
     # ── Data ──
     real_train, real_val = load_real_split(args.real_datalist, args.task)
     # (real items are already normalised with source="real" by load_real_split)
+
+    # Optional cap on the real training set. Setting --n_real_train 0 gives
+    # a synth-only training regime — the diagnostic that isolates whether
+    # the LDM has learned an anatomical correlate of IDH (if val AUROC on
+    # real still lifts above 0.5, the label signal is in the pixels).
+    # Deterministic selection: seeded shuffle then head(). Val is untouched.
+    if args.n_real_train >= 0 and args.n_real_train < len(real_train):
+        rng = np.random.default_rng(int(args.seed))
+        idx = rng.permutation(len(real_train))[: args.n_real_train]
+        real_train = [real_train[i] for i in idx.tolist()]
+        print(f"[--n_real_train] capped real training set to "
+              f"{len(real_train)} items (seed={args.seed})",
+              file=sys.stderr, flush=True)
+
     print(f"Real: {len(real_train)} train / {len(real_val)} val (task={args.task})",
           file=sys.stderr, flush=True)
 
@@ -637,9 +659,10 @@ def main() -> None:
     # Optional balanced-batch sampler: draws ~equal numbers of real and
     # synth samples per epoch. Each synth sample gets weight
     # n_real/n_synth, so their expected count per batch matches the reals.
+    # Skipped when either source is empty (synth-only or real-only regimes).
     train_sampler = None
     train_shuffle = True
-    if args.balance_batches and len(synth_items) > 0:
+    if args.balance_batches and len(synth_items) > 0 and len(real_train) > 0:
         from torch.utils.data import WeightedRandomSampler
         n_real  = len(real_train)
         n_synth = len(synth_items)
@@ -681,9 +704,15 @@ def main() -> None:
     model = _make_model(device)
     # Class weight source: 'all' = real+synth (default, may dilute signal);
     # 'real' = real-only (preserves real-domain imbalance structure).
-    if args.class_weight_source == "real":
+    # When real_train is empty (synth-only diagnostic) 'real' is degenerate
+    # and silently falls back to 'all' so the run still proceeds.
+    if args.class_weight_source == "real" and len(real_train) > 0:
         weight_items = real_train
     else:
+        if args.class_weight_source == "real":
+            print("[warn] class_weight_source=real requested but real_train "
+                  "is empty (n_real_train=0?); falling back to 'all'.",
+                  file=sys.stderr)
         weight_items = train_items
     weights = _class_weights(weight_items, args.task, device)
     print(f"Class weights (source={args.class_weight_source}, "

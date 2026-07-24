@@ -1,0 +1,137 @@
+#!/bin/bash
+
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=96GB
+#PBS -l jobfs=100GB
+#PBS -q gpuvolta
+#PBS -P vp06
+#PBS -l walltime=24:00:00
+#PBS -l storage=gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -r y
+#PBS -J 0-11
+#PBS -o /g/data/vp06/nk9793/text2glioma_classify_synth_only/logs/^array_index^.o
+#PBS -e /g/data/vp06/nk9793/text2glioma_classify_synth_only/logs/^array_index^.e
+#PBS -N cls_synth_only
+
+# ---------------------------------------------------------------------
+# Synth-only IDH classifier diagnostic.
+#
+# Trains a 3D DenseNet on ONLY synthetic samples (labelled by their
+# conditioning target from metadata.json / manifest_release.csv) and
+# evaluates on the real IDH-known validation split. This directly tests
+# whether the LDM has encoded IDH class into the generated image content:
+#
+#   val AUROC ≈ 0.5   -> LDM ignores IDH conditioning; peak-and-collapse
+#                        in the real+synth grid is purely a distribution-
+#                        mismatch artefact (nothing to gain from more n).
+#   val AUROC > 0.7   -> LDM has learned some IDH-related image signal;
+#                        the collapse is more likely a domain-gap /
+#                        prompt-diversity problem than a label-noise one.
+#   val AUROC ≈ 0.85  -> LDM is a competitive standalone IDH classifier;
+#                        the collapse at high n in the mixed grid is a
+#                        real+synth interaction, not a signal problem.
+#
+# Grid: 4 synthetic sizes × 3 seeds = 12 runs (indices 0..11)
+#
+#   n_synthetic ∈ {500, 1000, 5000, 10000}
+#   seed ∈ {0, 1, 2}
+#
+# Array index i decomposes as: i = n_idx*3 + seed_idx
+#
+# n=100 is omitted because 100 synth samples alone cannot support a
+# 3D DenseNet-121 without collapsing to majority-class prediction on val.
+#
+# Submit:
+#   qsub scripts/gadi_classifier_grid_synth_only.pbs
+# ---------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---- Grid decode -----------------------------------------------------
+N_SYNTH_LIST=(500 1000 5000 10000)
+SEEDS=(0 1 2)
+
+I=${PBS_ARRAY_INDEX}
+N_IDX=$(( I / 3 ))
+SEED_IDX=$(( I % 3 ))
+
+if (( N_IDX >= ${#N_SYNTH_LIST[@]} )); then
+    echo "ERROR: N_IDX=$N_IDX out of range for N_SYNTH_LIST (len=${#N_SYNTH_LIST[@]})."
+    exit 1
+fi
+N_SYNTH=${N_SYNTH_LIST[$N_IDX]}
+SEED=${SEEDS[$SEED_IDX]}
+TASK=idh
+
+# ---- Paths ------------------------------------------------------------
+REPO=${TEXT2GLIOMA_REPO:-$HOME/text2glioma}
+DATALIST=${T2G_IDH_DATALIST:-$REPO/datalist_N494_idh_only.json}
+SYNTH_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
+OUT_ROOT=${T2G_CLS_SYNTH_ONLY_OUT:-/g/data/vp06/$USER/text2glioma_classify_synth_only}
+
+RUN_DIR=$OUT_ROOT/${TASK}/n_synth_${N_SYNTH}/seed_${SEED}
+
+# ---- Environment -----------------------------------------------------
+module load python3/3.9.2
+
+source /g/data/hl36/nk9793/venv/monai/bin/activate
+
+cd "$REPO"
+export HF_HOME=/g/data/vp06/$USER/text2glioma_train/runs/cache/huggingface
+export TRANSFORMERS_OFFLINE=1
+# Move PyTorch's file-system shared-tensor storage to $PBS_JOBFS (see
+# gadi_classifier_grid_idh.pbs for the /dev/shm-exhaustion rationale).
+export TMPDIR=${PBS_JOBFS:-/tmp}
+mkdir -p "$OUT_ROOT/logs" "$RUN_DIR" "$TMPDIR"
+
+# ---- Preflight -------------------------------------------------------
+if [[ ! -f "$SYNTH_ROOT/manifest_release.csv" ]]; then
+    echo "ERROR: $SYNTH_ROOT/manifest_release.csv not found."
+    exit 1
+fi
+if [[ ! -f "$DATALIST" ]]; then
+    echo "ERROR: real datalist not found at $DATALIST"
+    exit 1
+fi
+
+# ---- Diagnostics -----------------------------------------------------
+echo "===================================================================="
+echo "Job:      $PBS_JOBID  (array=$PBS_ARRAY_INDEX)"
+echo "Host:     $(hostname)"
+echo "Started:  $(date -Iseconds)"
+echo "Task:     $TASK    n_synth: $N_SYNTH    seed: $SEED    n_real_train: 0"
+echo "Datalist: $DATALIST      (val split only)"
+echo "Synth:    $SYNTH_ROOT"
+echo "Out:      $RUN_DIR"
+nvidia-smi || true
+echo "===================================================================="
+
+# ---- Run --------------------------------------------------------------
+# n_real_train=0: synth-only training. Real val split is untouched.
+# class_weight_source=all: with no real items, this automatically uses
+# the synth balance (which is 50/50 by construction).
+python -u scripts/train_molecular_classifier.py \
+    --task                 "$TASK" \
+    --real_datalist        "$DATALIST" \
+    --synth_root           "$SYNTH_ROOT" \
+    --n_synthetic          "$N_SYNTH" \
+    --n_real_train         0 \
+    --seed                 "$SEED" \
+    --n_epochs             200 \
+    --total_grad_updates   12500 \
+    --patience             10 \
+    --batch_size           8 \
+    --val_batch_size       8 \
+    --num_workers          4 \
+    --val_interval         5 \
+    --class_weight_source  all \
+    --out_dir              "$RUN_DIR" \
+    --resume \
+    --device               cuda
+
+echo "===================================================================="
+echo "Finished: $(date -Iseconds)"
+echo "===================================================================="
