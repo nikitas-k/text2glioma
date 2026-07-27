@@ -50,6 +50,14 @@ import pandas as pd
 
 # Repo-relative imports
 sys.path.insert(0, str(Path(__file__).parent))
+# Also ensure the in-tree text2glioma package is importable — needed by
+# _plan_molecular() which pulls molecular class-index constants. Without
+# this, the launcher must set PYTHONPATH externally; with it, running
+# via a naked `python scripts/dataset_release/prepare_manifest.py ...`
+# works out of the box.
+_REPO_SRC = Path(__file__).resolve().parents[2] / "src"
+if _REPO_SRC.is_dir() and str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
 from mask_deformer import (         # noqa: E402
     apply_deformation,
     deformation_is_valid,

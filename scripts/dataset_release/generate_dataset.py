@@ -57,6 +57,14 @@ import pandas as pd
 
 # Repo-relative imports
 sys.path.insert(0, str(Path(__file__).parent))
+# Also ensure the in-tree text2glioma package is importable — needed by
+# `from text2glioma.inference.engine import ...` below. Without this,
+# the launcher must set PYTHONPATH externally; with it, running via a
+# naked `python scripts/dataset_release/generate_dataset.py ...` works
+# out of the box.
+_REPO_SRC = Path(__file__).resolve().parents[2] / "src"
+if _REPO_SRC.is_dir() and str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
 # NOTE: deformation is done once at manifest-prep time and persisted to
 # <out_root>/shard_XXXX/sample_YYYYYYY/_mask_raw.nii.gz. We do not re-apply
 # any deform here to eliminate the possibility of computational drift
