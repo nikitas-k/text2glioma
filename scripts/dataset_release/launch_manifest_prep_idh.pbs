@@ -9,8 +9,8 @@
 #PBS -l jobfs=100GB
 #PBS -l wd
 #PBS -r y
-#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/manifest_prep.o
-#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/manifest_prep.e
+#PBS -o /home/575/nk9793/job_logs/manifest_prep_idh.o
+#PBS -e /home/575/nk9793/job_logs/manifest_prep_idh.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
@@ -33,6 +33,15 @@
 # Override defaults (env-vars):
 #   qsub -v CFG=7.0                  ...   # push guidance harder
 #   qsub -v BALANCE_MODE=idh_only_natural ...
+#
+# CFG=7.0 pilot workflow (500 samples, single shard) — used to probe the
+# CFG-vs-classifier-utility response curve without spending a full 10k
+# generation budget:
+#   qsub -v CFG=7.0,\
+# T2G_N_SAMPLES=500,\
+# T2G_NUM_SHARDS=1,\
+# T2G_SYNTH_OUT=/g/data/vp06/$USER/text2glioma_synth_idh_only_cfg70_pilot \
+#        scripts/dataset_release/launch_manifest_prep_idh.pbs
 # ----------------------------------------------------------------------
 
 set -euo pipefail

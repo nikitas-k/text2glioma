@@ -10,8 +10,8 @@
 #PBS -l wd
 #PBS -r y
 #PBS -J 0-19
-#PBS -o /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/synth_gen_^array_index^.o
-#PBS -e /g/data/vp06/nk9793/text2glioma_synth_idh_only_cfg45/logs/synth_gen_^array_index^.e
+#PBS -o /home/575/nk9793/job_logs/synth_gen_idh_^array_index^.o
+#PBS -e /home/575/nk9793/job_logs/synth_gen_idh_^array_index^.e
 #PBS -j n
 
 # ----------------------------------------------------------------------
