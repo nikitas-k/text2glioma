@@ -69,6 +69,9 @@ module load python3/3.9.2
 source /g/data/hl36/nk9793/venv/monai/bin/activate
 
 cd "$REPO"
+# Ensure the in-tree text2glioma package is importable — required by
+# generate_dataset.py -> Text2GliomaEngine (which lives under src/).
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
 export HF_HOME=/g/data/vp06/nk9793/text2glioma_train/runs/cache/huggingface
 export TRANSFORMERS_OFFLINE=1     # RadBERT already cached; keep runs offline
 mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs"

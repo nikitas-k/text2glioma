@@ -64,6 +64,10 @@ module load python3/3.9.2
 source /g/data/vp06/nk9793_hl36/venv/monai/bin/activate
 
 cd "$REPO"
+# Ensure the in-tree text2glioma package is importable — required by
+# prepare_manifest.py -> _plan_molecular() -> molecular_conditioning
+# (for the class-index constants).
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
 mkdir -p "$OUT_ROOT" "$OUT_ROOT/logs"
 
 echo "===================================================================="
