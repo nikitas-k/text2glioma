@@ -80,6 +80,12 @@ DATALIST=${T2G_IDH_DATALIST:-$REPO/datalist_N494_idh_only.json}
 # Synthetic release from the IDH-only fine-tune.
 SYNTH_ROOT=${T2G_SYNTH_OUT:-/g/data/vp06/$USER/text2glioma_synth_idh_only}
 OUT_ROOT=${T2G_CLS_OUT:-/g/data/vp06/$USER/text2glioma_classify_idh_only}
+# Early-stopping patience (val cycles without AUROC-or-val-loss gain).
+# Was 10 in the original CFG=1 grid where val AUROC descended slowly and
+# monotonically. At CFG=7 val AUROC oscillates ~0.15-0.25 per epoch, so
+# 10 val cycles = ~50 epochs is often cut off before the model completes
+# its late-stage refinement. Default bumped to 20; env-overridable.
+PATIENCE=${PATIENCE:-20}
 
 RUN_DIR=$OUT_ROOT/${TASK}/n_synth_${N_SYNTH}/seed_${SEED}
 
@@ -141,7 +147,7 @@ python -u scripts/train_molecular_classifier.py \
     --seed               "$SEED" \
     --n_epochs           200 \
     --total_grad_updates 12500 \
-    --patience           10 \
+    --patience           "$PATIENCE" \
     --batch_size         8 \
     --val_batch_size     8 \
     --num_workers        4 \

@@ -514,8 +514,12 @@ def main() -> None:
                          "across n_synthetic conditions (larger datasets get "
                          "proportionally fewer epochs).")
     ap.add_argument("--patience", type=int, default=None,
-                    help="Early-stop after this many validation cycles with no "
-                         "AUROC improvement. Default: disabled (train to n_epochs).")
+                    help="Early-stop after this many validation cycles with "
+                         "neither val AUROC nor val loss improving. Using "
+                         "'either metric' as the improvement gate is more "
+                         "robust to volatile val AUROC (seen with high-CFG "
+                         "synth: val AUROC swings ~0.2 per epoch while val "
+                         "loss descends steadily). Default: disabled.")
     ap.add_argument("--resume", action="store_true",
                     help="If out_dir already contains best_model.pth + resume_state.pt, "
                          "load them and continue training from the recorded epoch.")
@@ -735,6 +739,7 @@ def main() -> None:
     # ── Resume ──
     history: list[dict] = []
     best_auroc = -1.0
+    best_val_loss = float("inf")   # tracked for the "either metric" early-stop gate
     best_epoch = -1
     start_epoch = 0
     epochs_without_improvement = 0
@@ -747,11 +752,13 @@ def main() -> None:
         optimizer.load_state_dict(rs["optimizer"])
         start_epoch     = int(rs["next_epoch"])
         best_auroc      = float(rs["best_auroc"])
+        best_val_loss   = float(rs.get("best_val_loss", float("inf")))
         best_epoch      = int(rs["best_epoch"])
         history         = list(rs.get("history", []))
         epochs_without_improvement = int(rs.get("epochs_without_improvement", 0))
         print(f"Resumed from epoch {start_epoch}, best_auroc={best_auroc:.4f} "
-              f"@ epoch {best_epoch}", file=sys.stderr)
+              f"@ epoch {best_epoch}, best_val_loss={best_val_loss:.4f}",
+              file=sys.stderr)
 
     # ── Train ──
     for epoch in range(start_epoch, effective_n_epochs):
@@ -799,29 +806,39 @@ def main() -> None:
                   file=sys.stderr, flush=True)
 
             improved = False
+            # Best-model checkpointing still tracks AUROC (that's the paper
+            # primary metric). The early-stop gate uses AUROC OR val_loss
+            # improvement — either counts as "still learning".
             if not math.isnan(metrics["auroc"]) and metrics["auroc"] > best_auroc:
                 best_auroc = metrics["auroc"]
                 best_epoch = epoch + 1
                 torch.save(model.state_dict(), out_dir / "best_model.pth")
                 improved = True
+            val_loss_improved = (
+                not math.isnan(metrics["loss"]) and metrics["loss"] < best_val_loss
+            )
+            if val_loss_improved:
+                best_val_loss = metrics["loss"]
 
             # Persist resume state (optimizer + counters) at every val cycle.
             torch.save({
-                "next_epoch": epoch + 1,
-                "best_auroc": best_auroc,
-                "best_epoch": best_epoch,
-                "history":    history,
-                "optimizer":  optimizer.state_dict(),
+                "next_epoch":    epoch + 1,
+                "best_auroc":    best_auroc,
+                "best_val_loss": best_val_loss,
+                "best_epoch":    best_epoch,
+                "history":       history,
+                "optimizer":     optimizer.state_dict(),
                 "epochs_without_improvement": epochs_without_improvement,
             }, out_dir / "resume_state.pt")
 
-            if improved:
+            if improved or val_loss_improved:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
                 if args.patience is not None and epochs_without_improvement >= args.patience:
                     print(f"Early stop: {epochs_without_improvement} val cycles "
-                          f"without AUROC improvement (patience={args.patience})",
+                          f"without AUROC or val-loss improvement "
+                          f"(patience={args.patience})",
                           file=sys.stderr, flush=True)
                     break
 
