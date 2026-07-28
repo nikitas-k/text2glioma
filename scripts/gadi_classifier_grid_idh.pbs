@@ -86,6 +86,21 @@ OUT_ROOT=${T2G_CLS_OUT:-/g/data/vp06/$USER/text2glioma_classify_idh_only}
 # 10 val cycles = ~50 epochs is often cut off before the model completes
 # its late-stage refinement. Default bumped to 20; env-overridable.
 PATIENCE=${PATIENCE:-20}
+# Loss-weighting + sampling knobs. Both default to the vanilla CFG=1 grid
+# behaviour (`all` weights, no balanced sampler) so re-runs of the paper's
+# main grid are unchanged. The synth-vs-real ablation flips them to
+# `real` weights + balanced-batch sampler — targets the "synth pulls the
+# classifier away from real" hypothesis by pinning loss geometry to the
+# real class distribution and preventing synth from numerically
+# dominating gradient updates at large n_synthetic.
+CLASS_WEIGHT_SOURCE=${CLASS_WEIGHT_SOURCE:-all}
+BALANCE_BATCHES=${BALANCE_BATCHES:-0}   # 0 disables, 1 enables
+
+# Assemble optional flags.
+CLS_EXTRA_ARGS=()
+if [[ "$BALANCE_BATCHES" == "1" ]]; then
+    CLS_EXTRA_ARGS+=(--balance_batches)
+fi
 
 RUN_DIR=$OUT_ROOT/${TASK}/n_synth_${N_SYNTH}/seed_${SEED}
 
@@ -132,6 +147,7 @@ echo "Task:     $TASK    n_synth: $N_SYNTH    seed: $SEED"
 echo "Datalist: $DATALIST"
 echo "Synth:    $SYNTH_ROOT"
 echo "Out:      $RUN_DIR"
+echo "Patience: $PATIENCE   class_weights: $CLASS_WEIGHT_SOURCE   balance_batches: $BALANCE_BATCHES"
 nvidia-smi || true
 echo "===================================================================="
 
@@ -140,21 +156,23 @@ echo "===================================================================="
 # per-run walltime is roughly constant across synthetic sizes and the
 # apples-to-apples comparison against v1's IDH bin holds.
 python -u scripts/train_molecular_classifier.py \
-    --task               "$TASK" \
-    --real_datalist      "$DATALIST" \
-    --synth_root         "$SYNTH_ROOT" \
-    --n_synthetic        "$N_SYNTH" \
-    --seed               "$SEED" \
-    --n_epochs           200 \
-    --total_grad_updates 12500 \
-    --patience           "$PATIENCE" \
-    --batch_size         8 \
-    --val_batch_size     8 \
-    --num_workers        4 \
-    --val_interval       5 \
-    --out_dir            "$RUN_DIR" \
+    --task                "$TASK" \
+    --real_datalist       "$DATALIST" \
+    --synth_root          "$SYNTH_ROOT" \
+    --n_synthetic         "$N_SYNTH" \
+    --seed                "$SEED" \
+    --n_epochs            200 \
+    --total_grad_updates  12500 \
+    --patience            "$PATIENCE" \
+    --class_weight_source "$CLASS_WEIGHT_SOURCE" \
+    --batch_size          8 \
+    --val_batch_size      8 \
+    --num_workers         4 \
+    --val_interval        5 \
+    --out_dir             "$RUN_DIR" \
     --resume \
-    --device             cuda
+    --device              cuda \
+    "${CLS_EXTRA_ARGS[@]}"
 
 echo "===================================================================="
 echo "Finished: $(date -Iseconds)"
