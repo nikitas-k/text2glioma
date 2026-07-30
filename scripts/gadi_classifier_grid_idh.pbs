@@ -49,7 +49,15 @@ set -euo pipefail
 
 # ---- Grid decode -----------------------------------------------------
 TASKS=(idh)
-N_SYNTH_LIST=(0 100 500 1000 5000 10000)
+# N_SYNTH_LIST is env-overridable via the space-separated string
+# N_SYNTH_LIST_STR (e.g. `qsub -v N_SYNTH_LIST_STR="10 25 50" -J 0-8 ...`
+# runs a small-n augmentation sweep). Default is the paper's main grid.
+if [[ -n "${N_SYNTH_LIST_STR:-}" ]]; then
+    # shellcheck disable=SC2206
+    N_SYNTH_LIST=( ${N_SYNTH_LIST_STR} )
+else
+    N_SYNTH_LIST=(0 100 500 1000 5000 10000)
+fi
 SEEDS=(0 1 2)
 
 I=${PBS_ARRAY_INDEX}
@@ -148,6 +156,7 @@ echo "Datalist: $DATALIST"
 echo "Synth:    $SYNTH_ROOT"
 echo "Out:      $RUN_DIR"
 echo "Patience: $PATIENCE   class_weights: $CLASS_WEIGHT_SOURCE   balance_batches: $BALANCE_BATCHES"
+echo "N_SYNTH_LIST: ${N_SYNTH_LIST[*]}"
 nvidia-smi || true
 echo "===================================================================="
 
