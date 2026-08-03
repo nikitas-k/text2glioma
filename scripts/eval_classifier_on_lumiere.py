@@ -161,15 +161,16 @@ def _load_lumiere_items(datalist_path: Path,
 
 def _build_transforms() -> T.Compose:
     """Match the training-time transforms used by
-    ``train_molecular_classifier.py`` (skips CropForeground; that
-    matters when synth samples were preprocessed to (160, 224, 160)
-    but here we're on raw LUMIERE geometry that has already been
-    registered to SRI24 upstream — same 160x224x160 target)."""
+    ``train_molecular_classifier.py``. Includes ``CropForegroundd``
+    (matches the LDM pipeline) — mandatory for real-vs-synth space
+    consistency; see the docstring of
+    ``train_molecular_classifier._build_transforms`` for the rationale."""
     return T.Compose([
         T.LoadImaged(keys=["image"]),
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
         T.Orientationd(keys=["image"], axcodes="LPS"),
+        T.CropForegroundd(keys=["image"], source_key="image"),
         T.SpatialPadd(keys=["image"], spatial_size=_TARGET_SPATIAL, mode="constant"),
         T.CenterSpatialCropd(keys=["image"], roi_size=_TARGET_SPATIAL),
         T.ScaleIntensityRangePercentilesd(

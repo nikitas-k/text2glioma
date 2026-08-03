@@ -383,12 +383,27 @@ def _tag_source(items: list[dict], source: str) -> list[dict]:
 def _build_transforms() -> tuple[T.Compose, T.Compose]:
     """MONAI transforms shared between real and synthetic samples.
 
-    Deliberately *skips* ``CropForegroundd`` — the synthetic samples are
-    already in the canonical (160, 224, 160) preprocessed space, and
-    running CropForeground on them would crop to the tumour ROI. The
-    ``SpatialPadd`` + ``CenterSpatialCropd`` combination is idempotent
-    on already-preprocessed volumes and safely brings the raw real
-    volumes to the same shape.
+    Includes ``CropForegroundd`` — this matches the Stage-1 VAE and
+    Stage-2 LDM training pipelines
+    (``src/text2glioma/training/train_stage{1,2}_ddp.py``), which crop
+    to the image foreground bounding box before pad+center-crop. Skipping
+    it here (as an earlier revision did, on the theory that synth
+    (160, 224, 160) samples were already brain-centered) produced a
+    subtle real-vs-synth space mismatch: real SRI24 volumes at
+    (240, 240, 155) were volume-centered by the classifier, whereas
+    synth volumes were brain-centered by the LDM's crop pipeline. The
+    two anatomical fields of view therefore differed by roughly the
+    offset between brain center and volume center (~5-15 mm/axis), which
+    the classifier learned to accommodate at the cost of internal
+    calibration and — as revealed by the LUMIERE external eval — a
+    marked drop in cross-cohort specificity.
+
+    ``CropForegroundd(source_key="image")`` on a brain-centered
+    (160, 224, 160) synth volume with a small background border crops
+    off only that border; the subsequent ``SpatialPad + CenterCrop`` back
+    to (160, 224, 160) recovers the original shape. Net effect on synth
+    is near-identity. Net effect on real is the same brain-center crop
+    the LDM was trained under.
 
     Real training NIfTIs are stored as 4-channel float with the channel
     axis as the last dim; ``EnsureChannelFirstd(channel_dim=3)`` moves
@@ -400,6 +415,7 @@ def _build_transforms() -> tuple[T.Compose, T.Compose]:
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
         T.Orientationd(keys=["image"], axcodes="LPS"),
+        T.CropForegroundd(keys=["image"], source_key="image"),
         T.SpatialPadd(keys=["image"], spatial_size=_TARGET_SPATIAL, mode="constant"),
         T.CenterSpatialCropd(keys=["image"], roi_size=_TARGET_SPATIAL),
         T.ScaleIntensityRangePercentilesd(
