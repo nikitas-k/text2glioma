@@ -320,6 +320,18 @@ def main() -> None:
                     "idh":     it["idh"],
                     "p_mut":   float(p),
                 })
+            # Per-run inline summary so long grids show progress instead
+            # of a single dump at the end. AUROC may be nan if the cohort
+            # has only one class of labels (LUMIERE has n=1 MUT under
+            # strict labelling, which technically still yields an AUROC
+            # but with no meaningful confidence interval).
+            auroc_str = (f"{summary['auroc']:.3f}"
+                          if not np.isnan(summary['auroc']) else "  n/a")
+            print(f"       -> spec@0.5={summary['specificity_at_0.5']:.3f}  "
+                  f"E[P(mut)|WT]={summary['mean_p_mut_on_wt']:.3f}  "
+                  f"E[P(mut)|MUT]={summary['mean_p_mut_on_mut']:.3f}  "
+                  f"AUROC={auroc_str}",
+                  file=sys.stderr, flush=True)
 
     _run_group(list(args.model_ckpts), args.label)
     if args.baseline_ckpts:
