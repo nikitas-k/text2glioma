@@ -91,6 +91,8 @@ def _build_transforms() -> T.Compose:
         T.EnsureChannelFirstd(keys=["image"], channel_dim=3),
         T.EnsureTyped(keys=["image"], dtype=torch.float32),
         T.Orientationd(keys=["image"], axcodes="LPS"),
+        T.CropForegroundd(keys=["image"], source_key="image",
+                            start_coord_key=None, end_coord_key=None),
         T.SpatialPadd(keys=["image"], spatial_size=_TARGET_SPATIAL, mode="constant"),
         T.CenterSpatialCropd(keys=["image"], roi_size=_TARGET_SPATIAL),
         T.ScaleIntensityRangePercentilesd(
