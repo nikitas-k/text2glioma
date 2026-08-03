@@ -1,0 +1,92 @@
+Patient,Survival time (weeks),Sex,Age at surgery (years),IDH (WT: wild type),IDH method,MGMT qualitative,MGMT quantitative
+Patient-001,89,female,57,WT,BES,methylated,na
+Patient-002,48,female,71,na,na,not methylated,0.00%
+Patient-003,40,male,39,WT,Immuno,not methylated,0.00%
+Patient-004,110,male,69,WT,Sanger Sequencing,not methylated,0.00%
+Patient-005,53,male,66,WT,Immuno,not methylated,0.00%
+Patient-006,144,male,56,na,na,methylated,na
+Patient-007,108,male,47,"IDH1 neg, Sequencing required",Immuno,na,na
+Patient-008,93,female,53,WT,BES,methylated,na
+Patient-009,84,male,69,na,na,not methylated,0.00%
+Patient-010,31,male,78,WT,Immuno,methylated,30.00%
+Patient-011,35,female,47,"IDH1 neg, Sequencing required",Immuno,not methylated,0.00%
+Patient-012,93,male,68,WT,Immuno,na,na
+Patient-013,32,male,47,"IDH1 neg, Sequencing required",Immuno,not methylated,0.00%
+Patient-014,17,female,79,WT,Sanger Sequencing,methylated,100.00%
+Patient-015,na,male,44,WT,Sanger Sequencing,methylated,100.00%
+Patient-016,54,female,77,na,na,na,na
+Patient-017,81,female,72,WT,Immuno,na,na
+Patient-018,167,male,71,WT,Immuno,methylated,80.00%
+Patient-019,186,male,53,"IDH1 neg, Sequencing required",Immuno,methylated,na
+Patient-020,117,male,64,WT,Immuno,na,na
+Patient-021,54,female,76,na,na,not methylated,0.00%
+Patient-022,60,female,59,WT,Immuno,not methylated,0.00%
+Patient-023,140,male,49,"IDH1 neg, Sequencing required",Immuno,not methylated,0.00%
+Patient-024,70,male,50,na,na,methylated,na
+Patient-025,85,male,68,WT,Sanger Sequencing,not methylated,0.00%
+Patient-026,na,male,45,"IDH1 neg, Sequencing required",Immuno,na,na
+Patient-027,51,female,54,na,na,not methylated,0.00%
+Patient-028,50,male,61,WT,Immuno,methylated,4.00%
+Patient-029,na,female,68,R132H mut,Immuno,methylated,87.00%
+Patient-030,101,female,70,WT,Immuno,not methylated,0.00%
+Patient-031,195,male,47,"IDH1 neg, Sequencing required",Immuno,methylated,72.00%
+Patient-032,139,female,59,WT,Immuno,methylated,79.00%
+Patient-033,120,male,61,WT,Sanger Sequencing,methylated,78.00%
+Patient-034,74,male,67,WT,Immuno,not methylated,0.00%
+Patient-035,54,male,49,WT,BES,methylated,na
+Patient-036,na,female,72,WT,Immuno,na,na
+Patient-037,50,male,49,WT,Sanger Sequencing,na,na
+Patient-038,53,female,71,WT,Immuno,not methylated,0.00%
+Patient-039,50,male,71,WT,BES,na,na
+Patient-040,62,male,57,WT,Immuno,not methylated,0.00%
+Patient-041,49,male,73,WT,BES,not methylated,0.00%
+Patient-042,86,male,65,WT,Sanger Sequencing,methylated,90.00%
+Patient-043,121,male,45,na,na,not methylated,0.00%
+Patient-044,10,male,72,WT,Immuno,not methylated,0.00%
+Patient-045,37,male,80,na,na,not methylated,0.00%
+Patient-046,72,male,65,na,na,not methylated,0.00%
+Patient-047,na,female,61,WT,Immuno,methylated,na
+Patient-048,58,female,52,"IDH1 neg, Sequencing required",Immuno,not methylated,0.00%
+Patient-049,48,female,68,WT,Immuno,not methylated,0.00%
+Patient-050,62,male,57,WT,Immuno,not methylated,0.00%
+Patient-051,116,female,60,WT,Immuno,methylated,85.00%
+Patient-052,201,female,55,WT,Immuno,methylated,92.00%
+Patient-053,154,female,61,na,na,methylated,na
+Patient-054,80,female,54,"IDH1 neg, Sequencing required",Immuno,not methylated,0.00%
+Patient-055,125,male,62,na,na,not methylated,0.00%
+Patient-056,3,male,75,WT,Sanger Sequencing,not methylated,0.00%
+Patient-057,16,female,76,na,na,methylated,na
+Patient-058,65,female,66,WT,Immuno,methylated,83.00%
+Patient-059,154,female,61,WT,Immuno,methylated,92.00%
+Patient-060,132,female,57,WT,Immuno,methylated,5.00%
+Patient-061,104,female,61,WT,Sanger Sequencing,methylated,95.00%
+Patient-062,96,female,70,WT,BES,methylated,70.00%
+Patient-063,187,female,55,wt,Immuno,methylated,80.00%
+Patient-064,62,male,70,WT,BES,methylated,na
+Patient-065,122,female,62,na,na,not methylated,na
+Patient-066,141,female,73,WT,Immuno,not methylated,0.00%
+Patient-067,172,female,43,na,na,methylated,na
+Patient-068,51,female,69,WT,Immuno,not methylated,0.00%
+Patient-069,50,female,67,WT,Immuno,methylated,93.00%
+Patient-070,73,male,49,na,na,not methylated,0.00%
+Patient-071,69,male,66,WT,Immuno,methylated,45.00%
+Patient-072,125,female,59,WT,Immuno,methylated,100.00%
+Patient-073,165,female,50,WT,BES,methylated,na
+Patient-074,47,male,78,na,na,methylated,na
+Patient-075,73,male,65,na,na,not methylated,0.00%
+Patient-076,25,male,75,na,na,not methylated,0.00%
+Patient-077,89,female,57,WT,Immuno,not methylated,0.00%
+Patient-078,135,female,48,"IDH1 neg, Sequencing required",Immuno,na,na
+Patient-079,65,female,46,na,na,not methylated,0.00%
+Patient-080,86,female,76,na,na,not methylated,0.00%
+Patient-081,9,male,44,WT,BES,not methylated,0.00%
+Patient-082,48,female,70,WT,Sanger Sequencing,not methylated,0.00%
+Patient-083,19,male,77,WT,Immuno,not methylated,0.00%
+Patient-084,22,male,74,na,na,methylated,na
+Patient-085,58,male,67,WT,Immuno,not methylated,0.00%
+Patient-086,171,female,63,WT,Sanger Sequencing,methylated,78.00%
+Patient-087,77,male,64,na,na,not methylated,0.00%
+Patient-088,58,male,73,WT,Immuno,not methylated,0.00%
+Patient-089,82,female,57,WT,BES,methylated,na
+Patient-090,50,female,74,WT,Immuno,not methylated,0.00%
+Patient-091,62,male,63,WT,Immuno,na,na
