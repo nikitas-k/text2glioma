@@ -211,8 +211,9 @@ def _predict(model_ckpt: Path, items: list[dict], device: torch.device,
 # Aggregation + reporting
 # ---------------------------------------------------------------------
 
-def _summarise(preds: np.ndarray, labels: np.ndarray) -> dict:
-    """Return a dict of scalar metrics."""
+def _summarise(preds: np.ndarray, labels: np.ndarray,
+                 thresholds: list[float]) -> dict:
+    """Continuous stats + per-threshold specificity/sensitivity/bal_acc."""
     wt_mask  = labels == 0
     mut_mask = labels == 1
     n_wt  = int(wt_mask.sum())
@@ -220,9 +221,22 @@ def _summarise(preds: np.ndarray, labels: np.ndarray) -> dict:
 
     p_mut_on_wt  = float(preds[wt_mask].mean())  if n_wt  else float("nan")
     p_mut_on_mut = float(preds[mut_mask].mean()) if n_mut else float("nan")
-    specificity  = float((preds[wt_mask] < 0.5).mean()) if n_wt else float("nan")
 
-    # AUROC only if both classes present.
+    out: dict = {
+        "n_wt":              n_wt,
+        "n_mut":             n_mut,
+        "mean_p_mut_on_wt":  p_mut_on_wt,
+        "mean_p_mut_on_mut": p_mut_on_mut,
+    }
+    for t in thresholds:
+        spec = float((preds[wt_mask]  < t).mean()) if n_wt  else float("nan")
+        sens = float((preds[mut_mask] >= t).mean()) if n_mut else float("nan")
+        bal_acc = (spec + sens) / 2 if (n_wt and n_mut) else float("nan")
+        key = f"{t:.2f}".rstrip("0").rstrip(".")
+        out[f"specificity@{key}"]  = spec
+        out[f"sensitivity@{key}"]  = sens
+        out[f"bal_acc@{key}"]      = bal_acc
+
     auroc = float("nan")
     if n_wt >= 1 and n_mut >= 1:
         try:
@@ -230,15 +244,8 @@ def _summarise(preds: np.ndarray, labels: np.ndarray) -> dict:
             auroc = float(roc_auc_score(labels, preds))
         except Exception:
             pass
-
-    return {
-        "n_wt":         n_wt,
-        "n_mut":        n_mut,
-        "mean_p_mut_on_wt":  p_mut_on_wt,
-        "mean_p_mut_on_mut": p_mut_on_mut,
-        "specificity_at_0.5": specificity,
-        "auroc":        auroc,
-    }
+    out["auroc"] = auroc
+    return out
 
 
 def _parse_ckpt_id(path: Path) -> dict:
@@ -268,9 +275,20 @@ def main() -> None:
     ap.add_argument("--include_presumed_wt", action="store_true",
                     help="Include 10 IHC-negative-but-not-sequenced cases as "
                          "WT. Default: strict, exclude them.")
-    ap.add_argument("--dropout_prob", type=float, default=0.3)
+    ap.add_argument("--dropout_prob", type=float, default=0.0,
+                    help="Passed to nets.DenseNet121. At inference the model "
+                         "runs in eval() mode which turns dropout into "
+                         "identity, so this only matters as an architectural "
+                         "constructor value; the default 0.0 makes it explicit "
+                         "that predictions are deterministic.")
     ap.add_argument("--batch_size",   type=int, default=4)
     ap.add_argument("--device",       type=str, default="cuda")
+    ap.add_argument("--decision_thresholds", type=float, nargs="+",
+                    default=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+                    help="Thresholds on P(MUT) at which to report "
+                         "specificity, sensitivity, and balanced accuracy. "
+                         "Threshold 0.5 is the argmax operating point; other "
+                         "values probe the WT-vs-MUT decision boundary.")
     ap.add_argument("--out_dir",      type=Path, required=True)
     ap.add_argument("--label",        type=str, default="principled",
                     help="Display label for the main --model_ckpts group.")
@@ -304,7 +322,7 @@ def main() -> None:
             print(f"[run] {group}  n_synth={tags['n_synth']}  seed={tags['seed']}  "
                   f"ckpt={ckpt}", file=sys.stderr, flush=True)
             preds = _predict(ckpt, items, device, args.dropout_prob, args.batch_size)
-            summary = _summarise(preds, y)
+            summary = _summarise(preds, y, args.decision_thresholds)
             per_run_rows.append({
                 "group":   group,
                 "n_synth": tags["n_synth"],
@@ -322,14 +340,13 @@ def main() -> None:
                     "idh":     it["idh"],
                     "p_mut":   float(p),
                 })
-            # Per-run inline summary so long grids show progress instead
-            # of a single dump at the end. AUROC may be nan if the cohort
-            # has only one class of labels (LUMIERE has n=1 MUT under
-            # strict labelling, which technically still yields an AUROC
-            # but with no meaningful confidence interval).
             auroc_str = (f"{summary['auroc']:.3f}"
                           if not np.isnan(summary['auroc']) else "  n/a")
-            print(f"       -> spec@0.5={summary['specificity_at_0.5']:.3f}  "
+            def _fmt_key(t: float) -> str:
+                return f"{t:.2f}".rstrip("0").rstrip(".")
+            spec_05_key = f"specificity@{_fmt_key(0.5)}"
+            spec_05_val = summary.get(spec_05_key, float("nan"))
+            print(f"       -> spec@0.5={spec_05_val:.3f}  "
                   f"E[P(mut)|WT]={summary['mean_p_mut_on_wt']:.3f}  "
                   f"E[P(mut)|MUT]={summary['mean_p_mut_on_mut']:.3f}  "
                   f"AUROC={auroc_str}",
@@ -342,19 +359,27 @@ def main() -> None:
     per_subject_df = pd.DataFrame(per_subject_rows)
     per_run_df     = pd.DataFrame(per_run_rows)
 
-    # Aggregate per (group, n_synth): mean over seeds of the per-run summaries.
+    def _fmt_key(t: float) -> str:
+        return f"{t:.2f}".rstrip("0").rstrip(".")
+    thresh_cols_spec    = [f"specificity@{_fmt_key(t)}"  for t in args.decision_thresholds]
+    thresh_cols_sens    = [f"sensitivity@{_fmt_key(t)}"  for t in args.decision_thresholds]
+    thresh_cols_balacc  = [f"bal_acc@{_fmt_key(t)}"      for t in args.decision_thresholds]
+    thresh_cols_all     = thresh_cols_spec + thresh_cols_sens + thresh_cols_balacc
+
+    agg_metrics = {c: (c, "mean") for c in thresh_cols_all}
+    agg_metrics.update({
+        "n_seeds":            ("seed",              "nunique"),
+        "mean_p_mut_on_wt":   ("mean_p_mut_on_wt",  "mean"),
+        "mean_p_mut_on_wt_sd":("mean_p_mut_on_wt",  "std"),
+        "mean_p_mut_on_mut":  ("mean_p_mut_on_mut", "mean"),
+        "auroc_mean":         ("auroc",             "mean"),
+        "auroc_sd":           ("auroc",             "std"),
+        "n_wt":               ("n_wt",              "first"),
+        "n_mut":              ("n_mut",             "first"),
+    })
     agg = (per_run_df
            .groupby(["group", "n_synth"], as_index=False)
-           .agg(n_seeds            =("seed", "nunique"),
-                mean_p_mut_on_wt   =("mean_p_mut_on_wt",   "mean"),
-                mean_p_mut_on_wt_sd=("mean_p_mut_on_wt",   "std"),
-                specificity_mean   =("specificity_at_0.5", "mean"),
-                specificity_sd     =("specificity_at_0.5", "std"),
-                auroc_mean         =("auroc",              "mean"),
-                auroc_sd           =("auroc",              "std"),
-                n_wt               =("n_wt",               "first"),
-                n_mut              =("n_mut",              "first"),
-                mean_p_mut_on_mut  =("mean_p_mut_on_mut",  "mean"))
+           .agg(**agg_metrics)
            .sort_values(["group", "n_synth"]))
 
     # ---- Save + report ------------------------------------------
@@ -363,10 +388,16 @@ def main() -> None:
     agg.to_csv           (args.out_dir / "summary_by_condition.csv",    index=False)
 
     print()
-    with pd.option_context("display.max_columns", None, "display.width", 200):
-        print(agg[["group", "n_synth", "n_seeds",
-                    "mean_p_mut_on_wt", "specificity_mean", "auroc_mean"]]
-              .to_string(index=False))
+    with pd.option_context("display.max_columns", None, "display.width", 220):
+        headline = agg[["group", "n_synth", "n_seeds",
+                          "mean_p_mut_on_wt", "mean_p_mut_on_mut", "auroc_mean"]]
+        print(headline.to_string(index=False))
+        print()
+        print("Specificity (WT correctly classified) by threshold:")
+        print(agg[["group", "n_synth"] + thresh_cols_spec].to_string(index=False))
+        print()
+        print("Balanced accuracy by threshold:")
+        print(agg[["group", "n_synth"] + thresh_cols_balacc].to_string(index=False))
     print()
     print(f"wrote {args.out_dir}/predictions_per_subject.csv")
     print(f"wrote {args.out_dir}/predictions_per_run.csv")
@@ -378,19 +409,19 @@ def main() -> None:
     except ImportError:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.6))
 
-    # Panel 1: specificity vs n_synth per group
+    spec_at_05 = f"specificity@{_fmt_key(0.5)}"
+
+    # Panel 1: specificity@0.5 vs n_synth per group.
     ax = axes[0]
     for group, sub in agg.groupby("group"):
-        # Drop the "unknown-tag" -1 rows.
         sub = sub[sub.n_synth >= 0].sort_values("n_synth")
         if sub.empty:
             continue
         ax.errorbar(
-            sub.n_synth.replace(0, 0.5),   # log-friendly baseline placement
-            sub.specificity_mean,
-            yerr=sub.specificity_sd,
+            sub.n_synth.replace(0, 0.5),
+            sub[spec_at_05],
             marker="o", markersize=6, linewidth=1.6, capsize=3,
             label=group,
         )
@@ -399,21 +430,42 @@ def main() -> None:
     ax.set_ylim(-0.02, 1.02)
     ax.set_xlabel(r"$n_{\rm synth}$ (0 shown at 0.5 for log axis)")
     ax.set_ylabel("Specificity (P(MUT) < 0.5 on WT)")
-    ax.set_title("LUMIERE WT specificity")
+    ax.set_title("LUMIERE WT specificity (threshold 0.5)")
     ax.axhline(1.0, color="grey", linestyle=":", linewidth=0.8)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: P(MUT) distribution per subject, one strip per (group, n_synth)
+    # Panel 2: threshold sweep — specificity as a function of threshold,
+    # one line per (group, n_synth). Reveals whether augmented models can
+    # match baseline WT specificity at a shifted operating point.
     ax = axes[1]
     conds = agg[["group", "n_synth"]].drop_duplicates()
     conds = conds[conds.n_synth >= 0].sort_values(["group", "n_synth"])
+    cmap = plt.get_cmap("viridis")
+    for i, (_, r) in enumerate(conds.iterrows()):
+        row = agg[(agg.group == r.group) & (agg.n_synth == r.n_synth)].iloc[0]
+        y_spec = [row[f"specificity@{_fmt_key(t)}"] for t in args.decision_thresholds]
+        colour = cmap(i / max(len(conds) - 1, 1))
+        ls = "-" if r.group == args.label else "--"
+        ax.plot(args.decision_thresholds, y_spec,
+                 marker="o", markersize=4, linewidth=1.4, linestyle=ls,
+                 color=colour,
+                 label=f"{r.group} n={int(r.n_synth)}")
+    ax.set_xlabel("Decision threshold on P(MUT)")
+    ax.set_ylabel("Specificity on WT")
+    ax.set_title("Threshold sweep — specificity")
+    ax.set_ylim(-0.02, 1.02)
+    ax.axvline(0.5, color="grey", linestyle=":", linewidth=0.8)
+    ax.legend(fontsize=6, loc="lower right", ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # Panel 3: P(MUT) distribution per subject, one strip per (group, n_synth).
+    ax = axes[2]
     labels_axis: list[str] = []
     for i, (_, r) in enumerate(conds.iterrows()):
         sub = per_subject_df[(per_subject_df.group == r.group)
                              & (per_subject_df.n_synth == r.n_synth)]
-        # WT strip
-        wt_p = sub.loc[sub.idh == 0, "p_mut"].to_numpy()
+        wt_p  = sub.loc[sub.idh == 0, "p_mut"].to_numpy()
         mut_p = sub.loc[sub.idh == 1, "p_mut"].to_numpy()
         x = np.full_like(wt_p, i, dtype=float) + np.random.default_rng(0).uniform(
             -0.15, 0.15, size=len(wt_p),
@@ -431,8 +483,8 @@ def main() -> None:
     ax.set_xticklabels(labels_axis, rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("P(MUT)")
     ax.set_ylim(-0.02, 1.02)
-    ax.axhline(0.5, color="grey", linestyle=":", linewidth=0.8, label="threshold")
-    ax.set_title(f"LUMIERE per-subject predictions (n_seeds averaged over seeds)")
+    ax.axhline(0.5, color="grey", linestyle=":", linewidth=0.8, label="threshold 0.5")
+    ax.set_title("LUMIERE per-subject P(MUT)")
     ax.legend(fontsize=8, loc="upper left")
     ax.grid(True, axis="y", alpha=0.3)
 
