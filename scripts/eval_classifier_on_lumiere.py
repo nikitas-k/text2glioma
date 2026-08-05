@@ -346,7 +346,11 @@ def main() -> None:
                 return f"{t:.2f}".rstrip("0").rstrip(".")
             spec_05_key = f"specificity@{_fmt_key(0.5)}"
             spec_05_val = summary.get(spec_05_key, float("nan"))
+            e_pwt_on_wt  = 1.0 - summary['mean_p_mut_on_wt']
+            e_pwt_on_mut = 1.0 - summary['mean_p_mut_on_mut']
             print(f"       -> spec@0.5={spec_05_val:.3f}  "
+                  f"E[P(WT)|WT]={e_pwt_on_wt:.3f}  "
+                  f"E[P(WT)|MUT]={e_pwt_on_mut:.3f}  "
                   f"E[P(mut)|WT]={summary['mean_p_mut_on_wt']:.3f}  "
                   f"E[P(mut)|MUT]={summary['mean_p_mut_on_mut']:.3f}  "
                   f"AUROC={auroc_str}",
