@@ -1,0 +1,69 @@
+#!/bin/bash
+# Predict + evaluate the five trained nnU-Net models on the internal validation
+# split and the LUMIERE external cohort, then compute lesion-wise Dice + HD95.
+#
+#     qsub scripts/segmentation/gadi_nnunet_predict_eval.pbs
+#
+#PBS -q gpuhopper
+#PBS -N t2g_nnunet_evaluation
+#PBS -P vp06
+#PBS -J 0-4
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=128GB
+#PBS -l walltime=06:00:00
+#PBS -l storage=scratch/vp06+gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+
+set -euo pipefail
+
+PROJ="vp06"
+USER_DIR="$HOME/mhf/projects/text2glioma"
+NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
+INTERNAL_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/images"
+INTERNAL_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/labels"
+LUMIERE_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/images"
+LUMIERE_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/labels"
+OUT_DIR="${USER_DIR}/paper/tables/nnunet_eval"
+
+export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"
+export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
+export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
+
+module load python3/3.11.7
+module load cuda/12.4.1
+source ~/venvs/nnunet/bin/activate
+
+DATASET_IDS=(510 511 512 513 514)
+N_SYNTH=(0 500 1000 5000 10000)
+DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
+NS="${N_SYNTH[$PBS_ARRAY_INDEX]}"
+
+mkdir -p "${OUT_DIR}"
+
+for split in internal lumiere; do
+    if [ "$split" = "internal" ]; then
+        IMG="${INTERNAL_IMGS}"; LBL="${INTERNAL_LBLS}"
+    else
+        IMG="${LUMIERE_IMGS}"; LBL="${LUMIERE_LBLS}"
+    fi
+
+    PRED_DIR="${nnUNet_results}/Dataset${DID}_T2G*/nnUNetTrainer__nnUNetPlans__3d_fullres/predict_${split}"
+    mkdir -p "${PRED_DIR}"
+
+    # nnU-Net expects channel-split inputs. Reuse builder helper for consistency.
+    STAGED="${nnUNet_results}/staging_${split}_${DID}"
+    python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
+        --in-dir "${IMG}" --out-dir "${STAGED}"
+
+    nnUNetv2_predict \
+        -d "$DID" -c 3d_fullres -f 0 \
+        -i "${STAGED}" -o "${PRED_DIR}" \
+        --save_probabilities
+
+    python3 "${USER_DIR}/scripts/segmentation/eval_lesion_wise.py" \
+        --pred-dir "${PRED_DIR}" \
+        --gt-dir "${LBL}" \
+        --out-csv "${OUT_DIR}/${split}_synth${NS}.csv"
+done
