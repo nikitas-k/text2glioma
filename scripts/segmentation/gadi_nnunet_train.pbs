@@ -10,7 +10,7 @@
 #PBS -P vp06
 #PBS -r y
 #PBS -J 0-4
-#PBS -l ncpus=24
+#PBS -l ncpus=12
 #PBS -l ngpus=1
 #PBS -l mem=256GB
 #PBS -l walltime=48:00:00
