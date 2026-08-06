@@ -66,8 +66,8 @@ def _load_synth_manifest(manifest_csv: Path) -> list[Case]:
             # manifest.csv is expected to have columns pointing at
             # shard_XXXX/sample_YYYYYYY/{image,mask}.nii.gz relative to root.
             sid = row.get("sample_id") or row.get("case_id") or row["image"]
-            img = root / row["image"] if "image" in row else Path(row["image_path"])
-            lbl = root / row["mask"]  if "mask"  in row else Path(row["mask_path"])
+            img = root / row["image"] if "image" in row else Path(row["relpath_image"])
+            lbl = root / row["mask"]  if "mask"  in row else Path(row["relpath_mask"])
             out.append(Case(case_id=sid, image_path=img, label_path=lbl))
     return out
 
