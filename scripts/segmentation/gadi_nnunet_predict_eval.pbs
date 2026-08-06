@@ -7,6 +7,7 @@
 #PBS -q gpuhopper
 #PBS -N t2g_nnunet_evaluation
 #PBS -P vp06
+#PBS -r y
 #PBS -J 0-4
 #PBS -l ncpus=12
 #PBS -l ngpus=1
