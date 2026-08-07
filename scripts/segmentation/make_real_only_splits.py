@@ -50,7 +50,11 @@ def _case_ids(dataset_dir: Path) -> list[str]:
             stem = f.name
             for suf in (".b2nd", ".npz", ".npy", ".pkl"):
                 if stem.endswith(suf):
-                    candidates.add(stem[: -len(suf)])
+                    case = stem[: -len(suf)]
+                    # Skip sibling segmentation files (e.g. CASE_seg.b2nd) that share the case stem.
+                    if case.endswith("_seg"):
+                        break
+                    candidates.add(case)
                     break
     if candidates:
         return sorted(candidates)
