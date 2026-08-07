@@ -55,5 +55,8 @@ DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
 #     sleep 30
 # done
 
-nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres -pl nnUNetPlannerResEncL
+if [ ! -f "${nnUNet_preprocessed}/Dataset${DID}_T2G*/splits_final.json" ]; then
+    nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres -pl nnUNetPlannerResEncL
+fi
+#nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres -pl nnUNetPlannerResEncL
 nnUNetv2_train "$DID" 3d_fullres 0 --npz -p nnUNetResEncUNetLPlans
