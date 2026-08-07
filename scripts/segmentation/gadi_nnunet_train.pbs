@@ -40,20 +40,20 @@ DATASET_IDS=(510 511 512 513 514)
 DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
 
 # Rank 0 builds all datasets once (idempotent -- skips if already populated).
-if [ "$PBS_ARRAY_INDEX" -eq 0 ] && [ ! -f "${nnUNet_raw}/Dataset510_T2GRealOnly/dataset.json" ]; then
-    python3 "${USER_DIR}/scripts/segmentation/build_nnunet_datasets.py" \
-        --nnUNet-raw "$nnUNet_raw" \
-        --datalist "${USER_DIR}/datalist_N1510.json" \
-        --synth-manifest "$SYNTH_MANIFEST" \
-        --real-root "$REAL_ROOT" \
-        --n-synth 0 500 1000 5000 10000 \
-        --seed 42
-fi
+# if [ "$PBS_ARRAY_INDEX" -eq 0 ] && [ ! -f "${nnUNet_raw}/Dataset510_T2GRealOnly/dataset.json" ]; then
+#     python3 "${USER_DIR}/scripts/segmentation/build_nnunet_datasets.py" \
+#         --nnUNet-raw "$nnUNet_raw" \
+#         --datalist "${USER_DIR}/datalist_N1510.json" \
+#         --synth-manifest "$SYNTH_MANIFEST" \
+#         --real-root "$REAL_ROOT" \
+#         --n-synth 0 500 1000 5000 10000 \
+#         --seed 42
+# fi
 
-# Wait for rank 0 if this is a later shard.
-while [ ! -f "${nnUNet_raw}/Dataset${DID}_T2G*/dataset.json" ] 2>/dev/null; do
-    sleep 30
-done
+# # Wait for rank 0 if this is a later shard.
+# while [ ! -f "${nnUNet_raw}/Dataset${DID}_T2G*/dataset.json" ] 2>/dev/null; do
+#     sleep 30
+# done
 
 nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity
 nnUNetv2_train "$DID" 3d_fullres 0 --npz
