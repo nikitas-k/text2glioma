@@ -55,5 +55,5 @@ DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
 #     sleep 30
 # done
 
-nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity
+nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres
 nnUNetv2_train "$DID" 3d_fullres 0 --npz
