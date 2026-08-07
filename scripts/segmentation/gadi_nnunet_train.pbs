@@ -5,7 +5,7 @@
 # Edit PROJ, USER, and NNUNET_ROOT to your Gadi paths before submitting:
 #     qsub scripts/segmentation/gadi_nnunet_train.pbs
 #
-#PBS -q gpuhopper
+#PBS -q gpuvolta
 #PBS -N t2g_nnunet_train
 #PBS -P vp06
 #PBS -r y
@@ -34,13 +34,7 @@ export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
 mkdir -p "$nnUNet_raw" "$nnUNet_preprocessed" "$nnUNet_results"
 
 module load python3/3.11.7
-module load cuda/12.4.1
-source ~/venvs/nnunet/bin/activate 2>/dev/null || {
-    python3 -m venv ~/venvs/nnunet
-    source ~/venvs/nnunet/bin/activate
-    pip install -q --upgrade pip
-    pip install -q nnunetv2 nibabel scipy
-}
+source /g/data/${PROJ}/${USER}/venv/nnunet/bin/activate
 
 DATASET_IDS=(510 511 512 513 514)
 DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
@@ -61,5 +55,5 @@ while [ ! -f "${nnUNet_raw}/Dataset${DID}_T2G*/dataset.json" ] 2>/dev/null; do
     sleep 30
 done
 
-nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity
+#nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity
 nnUNetv2_train "$DID" 3d_fullres 0 --npz
