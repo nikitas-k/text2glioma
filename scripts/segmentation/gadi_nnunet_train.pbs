@@ -23,7 +23,7 @@ set -euo pipefail
 # --- Gadi paths (edit) -----------------------------------------------------
 PROJ="vp06"
 USER_DIR="$HOME/mhf/projects/text2glioma"
-NNUNET_ROOT="/scratch/${PROJ}/${USER}/nnUNet"
+NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
 REAL_ROOT="/g/data/hl36/mhf/monai/Task03_BrainTumourDx/imagesTr"
 SYNTH_MANIFEST="/g/data/${PROJ}/${USER}/text2glioma_synth/manifest_release.csv"
 # ---------------------------------------------------------------------------
