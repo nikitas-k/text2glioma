@@ -20,8 +20,8 @@
 set -euo pipefail
 
 PROJ="vp06"
-USER_DIR="$HOME/mhf/projects/text2glioma"
-NNUNET_ROOT="/scratch/${PROJ}/${USER}/nnUNet"
+USER_DIR="$HOME/text2glioma"
+NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
 INTERNAL_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/images"
 INTERNAL_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/labels"
 LUMIERE_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/images"
