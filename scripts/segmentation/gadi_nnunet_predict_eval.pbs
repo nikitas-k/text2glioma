@@ -10,6 +10,7 @@
 #PBS -r y
 #PBS -J 0-4
 #PBS -l ncpus=12
+#PBS -l jobfs=200GB
 #PBS -l ngpus=1
 #PBS -l mem=128GB
 #PBS -l walltime=06:00:00
@@ -32,7 +33,6 @@ export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
 export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
 
 module load python3/3.11.7
-module load cuda/12.4.1
 source ~/venvs/nnunet/bin/activate
 
 DATASET_IDS=(510 511 512 513 514)
