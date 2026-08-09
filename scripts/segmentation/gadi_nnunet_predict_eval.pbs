@@ -22,8 +22,7 @@ set -euo pipefail
 PROJ="vp06"
 USER_DIR="$HOME/text2glioma"
 NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
-INTERNAL_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/images"
-INTERNAL_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/internal_test/labels"
+DATALIST="${USER_DIR}/datalist_N1510.json"
 LUMIERE_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/images"
 LUMIERE_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/labels"
 OUT_DIR="${USER_DIR}/paper/tables/nnunet_eval"
@@ -49,19 +48,23 @@ TRAINER_DIR="${DATASET_DIR}/nnUNetTrainer__nnUNetResEncUNetLPlans__3d_fullres"
 mkdir -p "${OUT_DIR}"
 
 for split in internal lumiere; do
-    if [ "$split" = "internal" ]; then
-        IMG="${INTERNAL_IMGS}"; LBL="${INTERNAL_LBLS}"
-    else
-        IMG="${LUMIERE_IMGS}"; LBL="${LUMIERE_LBLS}"
-    fi
-
     PRED_DIR="${TRAINER_DIR}/predict_${split}"
     mkdir -p "${PRED_DIR}"
 
-    # nnU-Net expects channel-split inputs. Reuse builder helper for consistency.
     STAGED="${nnUNet_results}/staging_${split}_${DID}"
-    python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
-        --in-dir "${IMG}" --out-dir "${STAGED}"
+    STAGED_LBL="${nnUNet_results}/staging_${split}_${DID}_labels"
+
+    # Internal test = datalist "validation" split (real subjects held out from training).
+    if [ "$split" = "internal" ]; then
+        python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
+            --from-datalist "${DATALIST}" --split validation \
+            --out-dir "${STAGED}" --out-labels "${STAGED_LBL}"
+        LBL_DIR="${STAGED_LBL}"
+    else
+        python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
+            --in-dir "${LUMIERE_IMGS}" --out-dir "${STAGED}"
+        LBL_DIR="${LUMIERE_LBLS}"
+    fi
 
     nnUNetv2_predict \
         -d "$DID" -c 3d_fullres -f 0 \
@@ -72,6 +75,6 @@ for split in internal lumiere; do
 
     python3 "${USER_DIR}/scripts/segmentation/eval_lesion_wise.py" \
         --pred-dir "${PRED_DIR}" \
-        --gt-dir "${LBL}" \
+        --gt-dir "${LBL_DIR}" \
         --out-csv "${OUT_DIR}/${split}_synth${NS}.csv"
 done
