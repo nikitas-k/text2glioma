@@ -66,6 +66,7 @@ for split in internal lumiere; do
     nnUNetv2_predict \
         -d "$DID" -c 3d_fullres -f 0 \
         -p nnUNetResEncUNetLPlans \
+        -chk checkpoint_best.pth \
         -i "${STAGED}" -o "${PRED_DIR}" \
         --save_probabilities
 
