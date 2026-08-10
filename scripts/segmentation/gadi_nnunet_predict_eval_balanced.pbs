@@ -25,7 +25,7 @@ PROJ="vp06"
 USER_DIR="$HOME/text2glioma"
 NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
 DATALIST="${USER_DIR}/datalist_N1510.json"
-LUMIERE_DATALIST="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere_ingested/datalist_lumiere.json"
+LUMIERE_DATALIST="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/datalist_lumiere.json"
 OUT_DIR="${USER_DIR}/paper/tables/nnunet_eval_balanced"
 
 export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"

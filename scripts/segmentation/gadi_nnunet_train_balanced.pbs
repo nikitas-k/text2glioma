@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROJ="vp06"
-USER_DIR="$HOME/mhf/projects/text2glioma"
+USER_DIR="$HOME/text2glioma"
 NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
 
 export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"
