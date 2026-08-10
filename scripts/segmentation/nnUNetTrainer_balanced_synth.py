@@ -24,9 +24,18 @@ from __future__ import annotations
 
 import numpy as np
 
-from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D
 from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+
+# 2D dataloader is renamed/relocated across nnunetv2 versions; patch it only if
+# it's importable, since this trainer targets 3d_fullres and never touches 2D.
+try:
+    from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D as _DL2D
+except ImportError:
+    try:
+        from nnunetv2.training.dataloading.data_loader import nnUNetDataLoader as _DL2D
+    except ImportError:
+        _DL2D = None
 
 
 def _balanced_get_indices(self):
@@ -53,7 +62,8 @@ def _balanced_get_indices(self):
 
 
 nnUNetDataLoader3D.get_indices = _balanced_get_indices
-nnUNetDataLoader2D.get_indices = _balanced_get_indices
+if _DL2D is not None:
+    _DL2D.get_indices = _balanced_get_indices
 
 
 class nnUNetTrainerBalancedSynth(nnUNetTrainer):
