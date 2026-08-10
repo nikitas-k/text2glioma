@@ -32,7 +32,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 def _get_case_keys(dl) -> list[str]:
     """Recover the case-ID list from a dataloader across nnunetv2 versions."""
-    for attr in ("list_of_keys", "identifiers", "case_identifiers"):
+    for attr in ("indices", "list_of_keys", "identifiers", "case_identifiers"):
         v = getattr(dl, attr, None)
         if v is not None:
             return list(v)
