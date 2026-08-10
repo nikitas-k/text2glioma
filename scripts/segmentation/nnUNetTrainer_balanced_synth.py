@@ -30,10 +30,33 @@ import numpy as np
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
+def _get_case_keys(dl) -> list[str]:
+    """Recover the case-ID list from a dataloader across nnunetv2 versions."""
+    for attr in ("list_of_keys", "identifiers", "case_identifiers"):
+        v = getattr(dl, attr, None)
+        if v is not None:
+            return list(v)
+    data = getattr(dl, "_data", None) or getattr(dl, "data", None)
+    if data is not None:
+        if hasattr(data, "identifiers"):
+            return list(data.identifiers)
+        if hasattr(data, "keys"):
+            return list(data.keys())
+        try:
+            return list(data)
+        except TypeError:
+            pass
+    raise AttributeError(
+        f"could not recover case-ID list from {type(dl).__name__}; "
+        f"tried list_of_keys, identifiers, case_identifiers, _data, data"
+    )
+
+
 def _balanced_get_indices(self):
-    keys = self.list_of_keys
     probs = getattr(self, "_balanced_probs", None)
-    if probs is None:
+    keys = getattr(self, "_balanced_keys", None)
+    if probs is None or keys is None:
+        keys = _get_case_keys(self)
         real = np.fromiter((k.startswith("REAL_") for k in keys), dtype=bool, count=len(keys))
         synth = np.fromiter((k.startswith("SYNTH_") for k in keys), dtype=bool, count=len(keys))
         n_real = int(real.sum())
@@ -44,8 +67,9 @@ def _balanced_get_indices(self):
             w[synth] = 0.5 / n_synth
             probs = w
         else:
-            probs = False  # sentinel: uniform, do not recompute
+            probs = False
         self._balanced_probs = probs
+        self._balanced_keys = keys
     if probs is False:
         idx = np.random.choice(len(keys), size=self.batch_size, replace=True)
     else:
@@ -92,10 +116,12 @@ class nnUNetTrainerBalancedSynth(nnUNetTrainer):
 
     def on_train_start(self):
         super().on_train_start()
+        dl = self.dataloader_train
+        raw = getattr(dl, "generator", dl)
         try:
-            keys = list(self.dataloader_train.generator._data.keys())  # type: ignore[attr-defined]
+            keys = _get_case_keys(raw)
         except AttributeError:
-            keys = list(getattr(self.dataloader_train, "_data", {}).keys())
+            keys = []
         n_real = sum(1 for k in keys if k.startswith("REAL_"))
         n_synth = sum(1 for k in keys if k.startswith("SYNTH_"))
         self.print_to_log_file(f"[BalancedSynth] patched dataloaders: {_PATCHED}")
