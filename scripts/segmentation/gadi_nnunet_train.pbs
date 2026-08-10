@@ -59,9 +59,11 @@ DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
 #nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres -pl nnUNetPlannerResEncL
 
 # Real-only val fold (identical across doses) for unbiased model selection.
-# python3 "${USER_DIR}/scripts/segmentation/make_real_only_splits.py" \
-#     --nnUNet-preprocessed "$nnUNet_preprocessed" \
-#     --datasets "$DID" \
-#     --val-frac 0.2 --seed 42 --force
+if [ ! -f "${nnUNet_preprocessed}/Dataset${DID}_"*"/nnUNetResEncUNetLPlans.json" ]; then
+    nnUNetv2_plan_and_preprocess -d "$DID" --verify_dataset_integrity -c 3d_fullres -pl nnUNetPlannerResEncL
+fi
+python3 "${USER_DIR}/scripts/segmentation/make_real_only_splits.py" \
+        --nnUNet-preprocessed "$nnUNet_preprocessed" \
+        --datasets "$DID" --val-frac 0.2 --seed 42 --force
 
 nnUNetv2_train "$DID" 3d_fullres 0 --npz -p nnUNetResEncUNetLPlans

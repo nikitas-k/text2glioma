@@ -1,0 +1,87 @@
+#!/bin/bash
+# Predict + evaluate the four nnU-Net models trained with the balanced sampler,
+# on the internal held-out split and the LUMIERE OOD cohort (pre-op baseline
+# sessions only). Writes per-dose lesion-wise Dice + HD95 to
+# paper/tables/nnunet_eval_balanced/.
+#
+#     qsub scripts/segmentation/gadi_nnunet_predict_eval_balanced.pbs
+#
+#PBS -q gpuhopper
+#PBS -N t2g_nnunet_eval_bal
+#PBS -P vp06
+#PBS -r y
+#PBS -J 0-3
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=128GB
+#PBS -l walltime=06:00:00
+#PBS -l storage=scratch/vp06+gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+
+set -euo pipefail
+
+PROJ="vp06"
+USER_DIR="$HOME/text2glioma"
+NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
+DATALIST="${USER_DIR}/datalist_N1510.json"
+LUMIERE_DATALIST="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere_ingested/datalist_lumiere.json"
+OUT_DIR="${USER_DIR}/paper/tables/nnunet_eval_balanced"
+
+export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"
+export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
+export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
+
+module load python3/3.11.7
+module load cuda/12.4.1
+source ~/venvs/nnunet/bin/activate
+
+# Ensure the custom trainer is available for -tr resolution at predict time.
+NNUNET_TRAINERS_DIR=$(python3 -c 'import os, nnunetv2; print(os.path.join(os.path.dirname(nnunetv2.__file__), "training", "nnUNetTrainer", "variants", "text2glioma"))')
+mkdir -p "$NNUNET_TRAINERS_DIR"
+[ -f "$NNUNET_TRAINERS_DIR/__init__.py" ] || touch "$NNUNET_TRAINERS_DIR/__init__.py"
+cp -f "${USER_DIR}/scripts/segmentation/nnUNetTrainer_balanced_synth.py" \
+      "$NNUNET_TRAINERS_DIR/nnUNetTrainer_balanced_synth.py"
+
+DATASET_IDS=(511 512 513 514)
+N_SYNTH=(500 1000 5000 10000)
+DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
+NS="${N_SYNTH[$PBS_ARRAY_INDEX]}"
+
+DATASET_MATCHES=(${nnUNet_results}/Dataset${DID}_T2G*)
+DATASET_DIR="${DATASET_MATCHES[0]}"
+TRAINER_DIR="${DATASET_DIR}/nnUNetTrainerBalancedSynth__nnUNetResEncUNetLPlans__3d_fullres"
+
+mkdir -p "${OUT_DIR}"
+
+for split in internal lumiere; do
+    PRED_DIR="${TRAINER_DIR}/predict_${split}"
+    mkdir -p "${PRED_DIR}"
+
+    STAGED="${nnUNet_results}/staging_${split}_${DID}"
+    STAGED_LBL="${nnUNet_results}/staging_${split}_${DID}_labels"
+
+    if [ "$split" = "internal" ]; then
+        python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
+            --from-datalist "${DATALIST}" --split validation \
+            --out-dir "${STAGED}" --out-labels "${STAGED_LBL}"
+    else
+        python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
+            --from-datalist "${LUMIERE_DATALIST}" --split validation --baseline-only \
+            --out-dir "${STAGED}" --out-labels "${STAGED_LBL}"
+    fi
+    LBL_DIR="${STAGED_LBL}"
+
+    nnUNetv2_predict \
+        -d "$DID" -c 3d_fullres -f 0 \
+        -p nnUNetResEncUNetLPlans \
+        -tr nnUNetTrainerBalancedSynth \
+        -chk checkpoint_best.pth \
+        -i "${STAGED}" -o "${PRED_DIR}" \
+        --save_probabilities
+
+    python3 "${USER_DIR}/scripts/segmentation/eval_lesion_wise.py" \
+        --pred-dir "${PRED_DIR}" \
+        --gt-dir "${LBL_DIR}" \
+        --out-csv "${OUT_DIR}/${split}_synth${NS}.csv"
+done

@@ -1,0 +1,55 @@
+#!/bin/bash
+# Train four nnU-Net v2 3d_fullres models with a real-oversampling trainer that
+# keeps REAL:SYNTH batch exposure at 50:50 regardless of the synthetic dose.
+# Complements gadi_nnunet_train.pbs (which pools without reweighting).
+#
+# Array indices 0..3 map to n_synth in {500, 1000, 5000, 10000}, i.e.
+# Dataset511..514. Dataset510 (real-only) is skipped because the balanced
+# sampler collapses to uniform when there are no SYNTH_* cases.
+#
+#     qsub scripts/segmentation/gadi_nnunet_train_balanced.pbs
+#
+#PBS -q gpuhopper
+#PBS -N t2g_nnunet_train_bal
+#PBS -P vp06
+#PBS -r y
+#PBS -J 0-3
+#PBS -l ncpus=12
+#PBS -l ngpus=1
+#PBS -l mem=256GB
+#PBS -l walltime=48:00:00
+#PBS -l storage=scratch/vp06+gdata/vp06+gdata/hl36
+#PBS -l wd
+#PBS -j oe
+#PBS -l jobfs=200GB
+
+set -euo pipefail
+
+PROJ="vp06"
+USER_DIR="$HOME/mhf/projects/text2glioma"
+NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
+
+export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"
+export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
+export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
+
+module load python3/3.11.7
+source /g/data/${PROJ}/${USER}/venvs/nnunet/bin/activate
+
+# Install (or refresh) the custom trainer inside the nnunetv2 tree so -tr can find it.
+NNUNET_TRAINERS_DIR=$(python3 -c 'import os, nnunetv2; print(os.path.join(os.path.dirname(nnunetv2.__file__), "training", "nnUNetTrainer", "variants", "text2glioma"))')
+mkdir -p "$NNUNET_TRAINERS_DIR"
+[ -f "$NNUNET_TRAINERS_DIR/__init__.py" ] || touch "$NNUNET_TRAINERS_DIR/__init__.py"
+cp -f "${USER_DIR}/scripts/segmentation/nnUNetTrainer_balanced_synth.py" \
+      "$NNUNET_TRAINERS_DIR/nnUNetTrainer_balanced_synth.py"
+
+DATASET_IDS=(511 512 513 514)
+DID="${DATASET_IDS[$PBS_ARRAY_INDEX]}"
+
+#python3 "${USER_DIR}/scripts/segmentation/make_real_only_splits.py" \
+#    --nnUNet-preprocessed "$nnUNet_preprocessed" \
+#    --datasets "$DID" --val-frac 0.2 --seed 42 --force
+
+nnUNetv2_train "$DID" 3d_fullres 0 --npz \
+    -p nnUNetResEncUNetLPlans \
+    -tr nnUNetTrainerBalancedSynth
