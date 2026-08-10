@@ -24,8 +24,7 @@ PROJ="vp06"
 USER_DIR="$HOME/text2glioma"
 NNUNET_ROOT="/g/data/${PROJ}/${USER}/nnUNet"
 DATALIST="${USER_DIR}/datalist_N1510.json"
-LUMIERE_IMGS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/images"
-LUMIERE_LBLS="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/labels"
+LUMIERE_DATALIST="/g/data/${PROJ}/${USER}/text2glioma_train/data/lumiere/preprocessed/datalist_lumiere.json"
 OUT_DIR="${USER_DIR}/paper/tables/nnunet_eval"
 
 export nnUNet_raw="${NNUNET_ROOT}/nnUNet_raw"
@@ -59,12 +58,14 @@ for split in internal lumiere; do
         python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
             --from-datalist "${DATALIST}" --split validation \
             --out-dir "${STAGED}" --out-labels "${STAGED_LBL}"
-        LBL_DIR="${STAGED_LBL}"
     else
+        # LUMIERE: baseline (pre-op) session per patient only; longitudinal follow-ups
+        # are post-surgical (resection cavity, treatment change) and out of scope.
         python3 "${USER_DIR}/scripts/segmentation/stage_test_split.py" \
-            --in-dir "${LUMIERE_IMGS}" --out-dir "${STAGED}"
-        LBL_DIR="${LUMIERE_LBLS}"
+            --from-datalist "${LUMIERE_DATALIST}" --split validation --baseline-only \
+            --out-dir "${STAGED}" --out-labels "${STAGED_LBL}"
     fi
+    LBL_DIR="${STAGED_LBL}"
 
     nnUNetv2_predict \
         -d "$DID" -c 3d_fullres -f 0 \
