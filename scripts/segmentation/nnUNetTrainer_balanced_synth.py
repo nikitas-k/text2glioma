@@ -22,20 +22,12 @@ inherits the patched class from the parent process.
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
+
 import numpy as np
 
-from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-
-# 2D dataloader is renamed/relocated across nnunetv2 versions; patch it only if
-# it's importable, since this trainer targets 3d_fullres and never touches 2D.
-try:
-    from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D as _DL2D
-except ImportError:
-    try:
-        from nnunetv2.training.dataloading.data_loader import nnUNetDataLoader as _DL2D
-    except ImportError:
-        _DL2D = None
 
 
 def _balanced_get_indices(self):
@@ -61,9 +53,38 @@ def _balanced_get_indices(self):
     return [keys[i] for i in idx]
 
 
-nnUNetDataLoader3D.get_indices = _balanced_get_indices
-if _DL2D is not None:
-    _DL2D.get_indices = _balanced_get_indices
+def _patch_dataloaders() -> list[str]:
+    """Locate and patch every nnU-Net dataloader class regardless of layout.
+
+    nnunetv2 split its dataloader into ``data_loader_2d`` / ``data_loader_3d``
+    in older versions and merged them into a single ``data_loader`` (with
+    ``nnUNetDataLoader``) in newer versions. Walk the package and patch any
+    class whose name starts with ``nnUNetDataLoader``.
+    """
+    import nnunetv2.training.dataloading as pkg
+
+    patched: list[str] = []
+    for info in pkgutil.iter_modules(pkg.__path__):
+        try:
+            mod = importlib.import_module(f"nnunetv2.training.dataloading.{info.name}")
+        except ImportError:
+            continue
+        for attr in dir(mod):
+            if not attr.startswith("nnUNetDataLoader"):
+                continue
+            obj = getattr(mod, attr)
+            if isinstance(obj, type):
+                obj.get_indices = _balanced_get_indices
+                patched.append(f"{mod.__name__}.{attr}")
+    return patched
+
+
+_PATCHED = _patch_dataloaders()
+if not _PATCHED:
+    raise RuntimeError(
+        "nnUNetTrainerBalancedSynth: no nnU-Net dataloader classes found under "
+        "nnunetv2.training.dataloading; balanced sampler cannot be installed."
+    )
 
 
 class nnUNetTrainerBalancedSynth(nnUNetTrainer):
@@ -77,6 +98,7 @@ class nnUNetTrainerBalancedSynth(nnUNetTrainer):
             keys = list(getattr(self.dataloader_train, "_data", {}).keys())
         n_real = sum(1 for k in keys if k.startswith("REAL_"))
         n_synth = sum(1 for k in keys if k.startswith("SYNTH_"))
+        self.print_to_log_file(f"[BalancedSynth] patched dataloaders: {_PATCHED}")
         self.print_to_log_file(
             f"[BalancedSynth] train pool: n_real={n_real}  n_synth={n_synth}  "
             f"target REAL:SYNTH exposure = 50:50 per batch"
