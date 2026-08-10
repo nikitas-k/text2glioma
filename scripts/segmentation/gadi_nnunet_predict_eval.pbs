@@ -32,7 +32,7 @@ export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
 export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
 
 module load python3/3.11.7
-source ~/venvs/nnunet/bin/activate
+source /g/data/vp06/nk9793/venvs/nnunet/bin/activate
 
 DATASET_IDS=(510 511 512 513 514)
 N_SYNTH=(0 500 1000 5000 10000)
