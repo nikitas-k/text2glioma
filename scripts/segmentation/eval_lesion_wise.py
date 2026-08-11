@@ -1,7 +1,7 @@
 """Lesion-wise Dice + HD95 for BraTS-2024-style evaluation.
 
 Computes per-connected-component metrics on the three BraTS regions
-(WT = 1+2+3, TC = 1+3, ET = 3), with the BraTS-2024 <=50-voxel small-lesion
+(WT = 1+2+3, TC = 1+3, ET = 3, ED = 2), with the BraTS-2024 <=50-voxel small-lesion
 threshold. Ground-truth lesions below the threshold are dropped from the
 denominator; predicted false-positive components below the threshold are
 also dropped. Matched components are paired by highest IoU; unmatched GT
@@ -37,6 +37,7 @@ REGIONS = {
     "WT": (1, 2, 3),
     "TC": (1, 3),
     "ET": (3,),
+    "ED": (2,),
 }
 SMALL_LESION_VOXELS = 50
 HD95_PENALTY_MM = 374.0  # BraTS-2024 default penalty for false positives / misses
