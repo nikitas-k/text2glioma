@@ -1,12 +1,16 @@
 """Split 4-channel stacked NIfTIs into nnU-Net v2 per-modality files.
 
-Two input modes:
-  * --in-dir DIR              : stage every *.nii.gz in DIR
+Three input modes:
+  * --in-dir DIR              : stage every *.nii.gz in DIR (4-channel stacked)
   * --from-datalist FILE      : stage entries from datalist JSON under --split
                                 (default "validation") and copy matching labels
                                 to --out-labels. With --baseline-only, keep only
                                 the earliest session per subject (LUMIERE
                                 longitudinal cohort -> pre-op scan).
+  * --from-brats-dir DIR      : stage the BraTS-2023 per-subject layout
+                                (DIR/<subject>/<subject>-{t1n,t1c,t2w,t2f,seg}.nii.gz)
+                                with modality ordering T1, T1CE, T2, FLAIR to
+                                match training convention.
 """
 
 from __future__ import annotations
@@ -65,6 +69,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in-dir", type=Path)
     ap.add_argument("--from-datalist", type=Path)
+    ap.add_argument("--from-brats-dir", type=Path,
+                    help="Root of per-subject BraTS-2023 layout (BraTS-*/BraTS-*-t1n.nii.gz etc).")
     ap.add_argument("--split", default="validation",
                     help="Which datalist split to stage (default: validation).")
     ap.add_argument("--baseline-only", action="store_true",
@@ -72,12 +78,13 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True, type=Path,
                     help="Destination for per-modality NIfTIs.")
     ap.add_argument("--out-labels", type=Path,
-                    help="Destination for label copies (datalist mode only).")
+                    help="Destination for label copies (datalist / brats-dir mode).")
     ap.add_argument("--pattern", default="*.nii.gz")
     args = ap.parse_args()
 
-    if bool(args.in_dir) == bool(args.from_datalist):
-        raise SystemExit("provide exactly one of --in-dir or --from-datalist")
+    modes = sum(x is not None for x in (args.in_dir, args.from_datalist, args.from_brats_dir))
+    if modes != 1:
+        raise SystemExit("provide exactly one of --in-dir / --from-datalist / --from-brats-dir")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,6 +94,30 @@ def main() -> None:
             raise SystemExit(f"no files matching {args.pattern!r} under {args.in_dir}")
         for src in sources:
             _split_one(src, args.out_dir, src.name.split(".nii")[0])
+        return
+
+    if args.from_brats_dir is not None:
+        if args.out_labels is None:
+            raise SystemExit("--out-labels is required in --from-brats-dir mode")
+        args.out_labels.mkdir(parents=True, exist_ok=True)
+        # BraTS-2023 modality suffix -> nnU-Net channel index (training order T1/T1CE/T2/FLAIR).
+        modality_map = {"t1n": 0, "t1c": 1, "t2w": 2, "t2f": 3}
+        subjects = sorted(p for p in args.from_brats_dir.iterdir()
+                          if p.is_dir() and p.name.startswith("BraTS-"))
+        if not subjects:
+            raise SystemExit(f"no BraTS-* subject directories under {args.from_brats_dir}")
+        for subj_dir in subjects:
+            sid = subj_dir.name
+            for suffix, ch in modality_map.items():
+                src = subj_dir / f"{sid}-{suffix}.nii.gz"
+                if not src.exists():
+                    raise SystemExit(f"missing modality {src}")
+                shutil.copy(src, args.out_dir / f"{sid}_{ch:04d}.nii.gz")
+            seg = subj_dir / f"{sid}-seg.nii.gz"
+            if not seg.exists():
+                raise SystemExit(f"missing segmentation {seg}")
+            shutil.copy(seg, args.out_labels / f"{sid}.nii.gz")
+        print(f"[brats-ssa] staged {len(subjects)} subjects")
         return
 
     entries = json.loads(args.from_datalist.read_text()).get(args.split, [])

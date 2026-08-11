@@ -66,7 +66,7 @@ def _dose_curve(directory: Path, split: str, region: str) -> list[tuple[int, flo
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--split", default="internal", choices=["internal", "lumiere"])
+    ap.add_argument("--split", default="internal", choices=["internal", "lumiere", "brats_ssa"])
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     args = ap.parse_args()
 

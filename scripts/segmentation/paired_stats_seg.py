@@ -20,12 +20,10 @@ REGIONS = ["WT", "TC", "ET", "ED"]
 DOSES = [500, 1000, 5000, 10000]
 POOLED_DIR = Path("paper/tables/nnunet_eval")
 BALANCED_DIR = Path("paper/tables/nnunet_eval_balanced")
-OUT_CSV = Path("paper/tables/nnunet_paired_stats.csv")
-OUT_TEX = Path("paper/tables/nnunet_paired_stats.tex")
 
 
-def _load(directory: Path, dose: int) -> pd.DataFrame | None:
-    p = directory / f"internal_synth{dose}.csv"
+def _load(directory: Path, split: str, dose: int) -> pd.DataFrame | None:
+    p = directory / f"{split}_synth{dose}.csv"
     return pd.read_csv(p) if p.exists() else None
 
 
@@ -41,8 +39,20 @@ def _paired_test(base: pd.DataFrame, treat: pd.DataFrame, region: str) -> tuple[
 
 
 def main() -> None:
-    base = _load(POOLED_DIR, 0)
-    assert base is not None, "missing internal_synth0.csv (real-only baseline)"
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--split", default="internal", choices=["internal", "lumiere", "brats_ssa"])
+    ap.add_argument("--out-csv", type=Path, default=None)
+    ap.add_argument("--out-tex", type=Path, default=None)
+    args = ap.parse_args()
+
+    out_csv = args.out_csv or Path(f"paper/tables/nnunet_paired_stats_{args.split}.csv") \
+        if args.split != "internal" else Path("paper/tables/nnunet_paired_stats.csv")
+    out_tex = args.out_tex or Path(f"paper/tables/nnunet_paired_stats_{args.split}.tex") \
+        if args.split != "internal" else Path("paper/tables/nnunet_paired_stats.tex")
+
+    base = _load(POOLED_DIR, args.split, 0)
+    assert base is not None, f"missing {args.split}_synth0.csv (real-only baseline)"
 
     # Only test regions actually present in the baseline CSV.
     regions = [r for r in REGIONS if f"{r}_Dice" in base.columns]
@@ -50,7 +60,7 @@ def main() -> None:
     rows: list[dict] = []
     for sampler, directory in [("pooled", POOLED_DIR), ("balanced", BALANCED_DIR)]:
         for dose in DOSES:
-            treat = _load(directory, dose)
+            treat = _load(directory, args.split, dose)
             if treat is None:
                 continue
             for region in regions:
@@ -67,13 +77,18 @@ def main() -> None:
     df.loc[valid, "p_bh"] = corrected[1]
     df["sig_bh05"] = df["p_bh"] < 0.05
 
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUT_CSV, index=False)
-    print(f"[wrote] {OUT_CSV}")
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    print(f"[wrote] {out_csv}")
 
-    # Compact LaTeX: one row per (sampler,dose) with three region cells.
     n_reg = len(regions)
     n_tests = int(df["p_raw"].notna().sum())
+    n_cases = int(df["n"].dropna().iloc[0]) if not df["n"].dropna().empty else 0
+    cohort_desc = {
+        "internal": f"internal held-out cohort ($N={n_cases}$)",
+        "lumiere": f"LUMIERE baseline pre-op cohort ($N={n_cases}$)",
+        "brats_ssa": f"BraTS-Africa 2023 external cohort ($N={n_cases}$)",
+    }[args.split]
     col_spec = "ll" + "rr" * n_reg
     region_hdr = " & ".join(rf"\multicolumn{{2}}{{c}}{{{r}}}" for r in regions)
     cmid = "".join(rf"\cmidrule(lr){{{3 + 2 * i}-{4 + 2 * i}}}" for i in range(n_reg))
@@ -82,8 +97,8 @@ def main() -> None:
     lines = [
         r"\begin{table}[htbp]",
         r"\centering",
-        rf"\caption{{Paired Wilcoxon signed-rank test of per-case Dice vs. the real-only baseline (Dataset510, $N=323$) for the pooled and balanced samplers on the internal held-out cohort. $\Delta$ is the mean per-case Dice change; $p_\mathrm{{BH}}$ is Benjamini--Hochberg-corrected across all {n_tests} tests. Bold entries are significant at $p_\mathrm{{BH}}<0.05$.}}",
-        r"\label{tab:seg_paired_stats}",
+        rf"\caption{{Paired Wilcoxon signed-rank test of per-case Dice vs. the real-only baseline for the pooled and balanced samplers on the {cohort_desc}. $\Delta$ is the mean per-case Dice change; $p_\mathrm{{BH}}$ is Benjamini--Hochberg-corrected across all {n_tests} tests. Bold entries are significant at $p_\mathrm{{BH}}<0.05$.}}",
+        rf"\label{{tab:seg_paired_stats_{args.split}}}",
         rf"\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
         rf"Sampler & $n_\mathrm{{synth}}$ & {region_hdr} \\",
@@ -122,8 +137,8 @@ def main() -> None:
 
     lines[-1] = r"\bottomrule"
     lines += [r"\end{tabular}", r"\end{table}"]
-    OUT_TEX.write_text("\n".join(lines) + "\n")
-    print(f"[wrote] {OUT_TEX}")
+    out_tex.write_text("\n".join(lines) + "\n")
+    print(f"[wrote] {out_tex}")
 
     # Console summary
     print("\n=== Significant results (p_BH < 0.05) ===")

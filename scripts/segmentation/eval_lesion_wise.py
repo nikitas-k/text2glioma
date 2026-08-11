@@ -45,7 +45,7 @@ REGIONS = {
 }
 SMALL_LESION_VOXELS = 50
 HD95_PENALTY_MM = 374.0
-_HD95_POINT_CAP = 5000  # 95th percentile is stable at this cap; 20k was overkill.
+_HD95_POINT_CAP = 20000  # match legacy point cap for reproducibility with existing CSVs.
 
 
 def _region_mask(seg: np.ndarray, labels: tuple[int, ...]) -> np.ndarray:
