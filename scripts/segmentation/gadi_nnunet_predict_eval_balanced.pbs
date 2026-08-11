@@ -33,8 +33,7 @@ export nnUNet_preprocessed="${NNUNET_ROOT}/nnUNet_preprocessed"
 export nnUNet_results="${NNUNET_ROOT}/nnUNet_results"
 
 module load python3/3.11.7
-module load cuda/12.4.1
-source ~/venvs/nnunet/bin/activate
+source /g/data/${PROJ}/${USER}/venvs/nnunet/bin/activate
 
 # Ensure the custom trainer is available for -tr resolution at predict time.
 NNUNET_TRAINERS_DIR=$(python3 -c 'import os, nnunetv2; print(os.path.join(os.path.dirname(nnunetv2.__file__), "training", "nnUNetTrainer", "variants", "text2glioma"))')
