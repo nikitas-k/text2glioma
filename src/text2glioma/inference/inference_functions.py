@@ -188,7 +188,9 @@ class GenericSampler():
                texts, masks=None,
                guidance_scale_text=7.5, guidance_scale_mask=3.0,
                eta=0.0, verbose=False, 
-               rescale_intensity=False):
+               rescale_intensity=False,
+               decode_amp_dtype=None,
+               offload_diffusion_during_decode=False):
         """
         Generate samples using the diffusion model with dual classifier-free guidance.
         
@@ -259,20 +261,27 @@ class GenericSampler():
             
             # Compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents)[0]
-
-        # Free CFG-forward activations before the VAE decode allocates its own peak.
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Decode the latents to image space using stage1 model.
-        # bf16 autocast halves the decoder's peak activation footprint (VAE
-        # decode is the OOM culprit on 32 GB cards at 160x224x160).
-        if torch.cuda.is_available() and latents.device.type == "cuda":
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+        
+        # Free VRAM on 32 GB cards: UNet + text encoder are unused for the AE decode.
+        if offload_diffusion_during_decode:
+            model_dev = next(self.model.parameters()).device
+            txt_dev = next(self.text_encoder.parameters()).device
+            self.model.to("cpu")
+            self.text_encoder.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Decode the latents to image space using stage1 model
+        if decode_amp_dtype is not None:
+            with torch.amp.autocast("cuda", dtype=decode_amp_dtype):
                 images = self.stage1.model.decode(latents)
             images = images.float()
         else:
             images = self.stage1.model.decode(latents)
+        
+        if offload_diffusion_during_decode:
+            self.model.to(model_dev)
+            self.text_encoder.to(txt_dev)
         if rescale_intensity:
             images = (images - images.min()) / (images.max() - images.min())
         images = images.clamp(0, 1)

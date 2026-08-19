@@ -199,6 +199,8 @@ def cmd_generate(args):
                 guidance_scale_mask=args.guidance_scale_mask,
                 eta=0.0,
                 verbose=False,
+                decode_amp_dtype=torch.float16 if args.decode_fp16 else None,
+                offload_diffusion_during_decode=args.offload_during_decode,
             )
             out_path = out / tag / f"{pair.pair_id}.nii.gz"
             _save_4ch(images, out_path)
@@ -318,6 +320,10 @@ def build_parser():
     g.add_argument("--guidance_scale_mask", type=float, default=1.0)
     g.add_argument("--ddim_steps", type=int, default=50)
     g.add_argument("--spatial_size", type=int, nargs=3, default=[160, 224, 160])
+    g.add_argument("--decode_fp16", action="store_true",
+                   help="Decode with fp16 autocast (V100-safe; halves AE activation VRAM).")
+    g.add_argument("--offload_during_decode", action="store_true",
+                   help="Move UNet + text encoder to CPU during AE decode to free VRAM.")
     g.add_argument("--out", required=True)
     g.set_defaults(func=cmd_generate)
 
