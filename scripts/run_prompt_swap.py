@@ -84,13 +84,14 @@ def cmd_build(args):
 
     pairs = build_swap_pairs(
         datalist=data,
-        atlas_dir=args.atlas_dir,
         target=args.target,
         n_pairs=args.n_pairs,
         text_field=args.text_field,
         label_field=args.label_field,
         seed=args.seed,
         min_ordinal_gap=args.min_ordinal_gap,
+        atlas_dir=args.atlas_dir,
+        use_vasari_auto=args.use_vasari_auto,
     )
     out = Path(args.out)
     save_pairs(pairs, out / "pairs.csv")
@@ -286,7 +287,11 @@ def build_parser():
 
     b = sub.add_parser("build", help="Select swap pairs.")
     b.add_argument("--datalist", required=True)
-    b.add_argument("--atlas_dir", required=True)
+    b.add_argument("--atlas_dir", default=None,
+                   help="Only required with --use_vasari_auto.")
+    b.add_argument("--use_vasari_auto", action="store_true",
+                   help="Re-extract VASARI from the segmentation labels via "
+                        "vasari-auto instead of parsing the impression field.")
     b.add_argument(
         "--target", required=True,
         choices=list(CATEGORICAL_TARGETS) + list(ORDINAL_TARGETS),
