@@ -258,7 +258,7 @@ class GenericSampler():
             )
             
             # Compute the previous noisy sample x_t -> x_t-1
-            latents = self.scheduler.step(noise_pred, t, latents, eta=eta).prev_sample
+            latents = self.scheduler.step(noise_pred, t, latents)[0]
         
         # Decode the latents to image space using stage1 model
         images = self.stage1.model.decode(latents)
