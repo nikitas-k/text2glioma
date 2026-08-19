@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -44,6 +45,80 @@ ORDINAL_TARGETS = {
     "proportion_enh": "F5 Proportion Enhancing",
     "proportion_oedema": "F14 Proportion of Oedema",
 }
+
+
+# ---------------------------------------------------------------------------
+# Impression parsing (template-generated VASARI prompts)
+# ---------------------------------------------------------------------------
+
+_LOBE_TOKENS = (
+    "frontal", "temporal", "parietal", "occipital", "insular",
+    "thalamic", "callosal", "brainstem", "cerebellar",
+)
+_LATERALITY_RE = re.compile(r"\b(left|right|bilateral)\b", re.IGNORECASE)
+_LOBE_RE = re.compile(rf"\b({'|'.join(_LOBE_TOKENS)})\b", re.IGNORECASE)
+_ENHANCEMENT_RE = re.compile(
+    r"\b(non-enhancing|marked enhancement|moderate enhancement|mild enhancement|no enhancement)\b",
+    re.IGNORECASE,
+)
+_PROPORTION_ENH_RE = re.compile(r"(<=?\s*5%|5-33%|33-67%|67-100%)\s*enhancing", re.IGNORECASE)
+_PROPORTION_OEDEMA_RE = re.compile(
+    r"\b(no oedema|mild oedema|moderate oedema|extensive oedema)\b", re.IGNORECASE,
+)
+_PROPORTION_ENH_MAP = {"<=5%": 0, "5-33%": 1, "33-67%": 2, "67-100%": 3}
+_OEDEMA_MAP = {"no oedema": 0, "mild oedema": 1, "moderate oedema": 2, "extensive oedema": 3}
+
+
+def parse_impression_attributes(impression: str) -> Dict[str, object]:
+    """Extract canonical VASARI attributes from a text2glioma template prompt.
+
+    Returns short-key values (``laterality``, ``location``, ``enhancement``,
+    ``multifocal``, ``proportion_enh``, ``proportion_oedema``). ``location`` is
+    the first lobe token in the prompt; ``locations_all`` carries the full list
+    for richer contrast selection later. Missing attributes map to ``None``.
+    """
+    imp = (impression or "").lower()
+    out: Dict[str, object] = {}
+
+    m = _LATERALITY_RE.search(imp)
+    out["laterality"] = m.group(1).lower() if m else None
+
+    lobes = [x.lower() for x in _LOBE_RE.findall(imp)]
+    out["location"] = lobes[0] if lobes else None
+    out["locations_all"] = lobes
+
+    m = _ENHANCEMENT_RE.search(imp)
+    if m:
+        token = m.group(1).lower().replace(" enhancement", "").strip()
+        out["enhancement"] = "non-enhancing" if token in {"non-enhancing", "no"} else token
+    else:
+        out["enhancement"] = None
+
+    out["multifocal"] = ("multifocal" in imp) or ("satellite lesions" in imp)
+
+    m = _PROPORTION_ENH_RE.search(imp)
+    out["proportion_enh"] = (
+        _PROPORTION_ENH_MAP.get(re.sub(r"\s+", "", m.group(1))) if m else None
+    )
+
+    m = _PROPORTION_OEDEMA_RE.search(imp)
+    out["proportion_oedema"] = _OEDEMA_MAP.get(m.group(1).lower()) if m else None
+
+    return out
+
+
+def _extract_impression_batch(
+    subjects: Sequence[dict],
+    text_field: str = "impression",
+    label_field: str = "label",
+) -> pd.DataFrame:
+    """Parse impressions for every subject; one row per subject."""
+    rows = []
+    for s in subjects:
+        parsed = parse_impression_attributes(s.get(text_field, ""))
+        parsed["_subj"] = s.get("subject_id", Path(s[label_field]).stem)
+        rows.append(parsed)
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -114,15 +189,21 @@ def _ordinal_distance(a, b) -> float:
 
 def build_swap_pairs(
     datalist: Sequence[dict],
-    atlas_dir: str,
     target: str,
     n_pairs: int = 100,
     text_field: str = "impression",
     label_field: str = "label",
     seed: int = 42,
     min_ordinal_gap: int = 2,
+    atlas_dir: Optional[str] = None,
+    use_vasari_auto: bool = False,
 ) -> List[SwapPair]:
     """Select ``n_pairs`` maximally contrasting subject pairs on ``target``.
+
+    By default the ground-truth attribute of each subject is parsed from the
+    ``impression`` field of the datalist entry (fast; canonical short-key
+    vocabulary). Pass ``use_vasari_auto=True`` with ``atlas_dir`` to fall back
+    to re-extracting attributes from the segmentation labels.
 
     Categorical targets: pair subjects whose attribute values differ (e.g. L vs R).
     Ordinal targets: pair subjects at least ``min_ordinal_gap`` steps apart.
@@ -130,12 +211,21 @@ def build_swap_pairs(
     if target not in CATEGORICAL_TARGETS and target not in ORDINAL_TARGETS:
         raise ValueError(f"Unknown target attribute: {target}")
 
-    logger.info("Extracting VASARI for %d subjects", len(datalist))
-    v_df = _extract_vasari_batch(datalist, atlas_dir=atlas_dir, label_field=label_field)
+    if use_vasari_auto:
+        if not atlas_dir:
+            raise ValueError("use_vasari_auto=True requires atlas_dir.")
+        logger.info("Extracting VASARI via vasari-auto for %d subjects", len(datalist))
+        v_df = _extract_vasari_batch(datalist, atlas_dir=atlas_dir, label_field=label_field)
+        col = CATEGORICAL_TARGETS.get(target) or ORDINAL_TARGETS[target]
+    else:
+        logger.info("Parsing impressions for %d subjects", len(datalist))
+        v_df = _extract_impression_batch(
+            datalist, text_field=text_field, label_field=label_field,
+        )
+        col = target
 
-    col = CATEGORICAL_TARGETS.get(target) or ORDINAL_TARGETS[target]
     if col not in v_df.columns:
-        raise KeyError(f"VASARI column '{col}' not produced by vasari-auto.")
+        raise KeyError(f"Attribute column '{col}' not present in extracted table.")
 
     # Index subjects by attribute value and drop NaNs.
     v_df = v_df.dropna(subset=[col]).reset_index(drop=True)
