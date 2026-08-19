@@ -259,9 +259,20 @@ class GenericSampler():
             
             # Compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents)[0]
-        
-        # Decode the latents to image space using stage1 model
-        images = self.stage1.model.decode(latents)
+
+        # Free CFG-forward activations before the VAE decode allocates its own peak.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Decode the latents to image space using stage1 model.
+        # bf16 autocast halves the decoder's peak activation footprint (VAE
+        # decode is the OOM culprit on 32 GB cards at 160x224x160).
+        if torch.cuda.is_available() and latents.device.type == "cuda":
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                images = self.stage1.model.decode(latents)
+            images = images.float()
+        else:
+            images = self.stage1.model.decode(latents)
         if rescale_intensity:
             images = (images - images.min()) / (images.max() - images.min())
         images = images.clamp(0, 1)
