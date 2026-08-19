@@ -16,11 +16,11 @@
 model:
   name: "DiffusionModelUNet"
   base_lr: 0.00025
-  latent_channels: 3       # channels from VAE latent (must match stage1 latent_channels)
+  latent_channels: 6       # channels from VAE latent (must match stage1 latent_channels)
   params:
     spatial_dims: 3
-    in_channels: 7           # 3 latent + 4 one-hot mask channels
-    out_channels: 3           # predict noise/velocity in latent space only
+    in_channels: 10           # 6 latent + 4 one-hot mask channels
+    out_channels: 6           # predict noise/velocity in latent space only
     num_res_blocks: 2
     num_channels: [256, 512, 768]
     attention_levels: [False, True, True]
@@ -42,6 +42,7 @@ scheduler:
     beta_start: 0.0015
     beta_end: 0.0205
     prediction_type: "v_prediction"
+    clip_sample: false           # latents have std≈1, clipping to [-1,1] destroys signal
 
 conditioning:
   tokenizer: "StanfordAIMI/RadBERT"
