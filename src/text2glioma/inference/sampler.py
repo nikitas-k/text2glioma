@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true", help="Whether to print outputs sometimes (default: False).")
     parser.add_argument("--mask_field", type=str, default="label", help="Key in JSON for mask/label paths (default: label).")
     parser.add_argument("--spatial_size", type=int, nargs=3, default=[160, 224, 160], help="Full-resolution spatial size D H W for loading masks.")
+    parser.add_argument("--scale_factor", type=float, default=0.866, help="Latent whitening factor; latents / scale_factor before AE decode. Default 0.866 matches the released MaxFeat/RadBERT LDM.")
 
     return parser.parse_args()
 
@@ -147,6 +148,7 @@ def main():
         return_latents=args.return_latents,
         num_mask_classes=num_mask_classes,
         latent_channels=latent_channels,
+        scale_factor=args.scale_factor,
     )
     saver = NiftiSaver(output_dir)
 

@@ -159,7 +159,8 @@ class GenericSampler():
     def __init__(self, stage1, model, scheduler, tokenizer, 
                  text_encoder, device='cpu', cache_dir=None, 
                  return_latents=False, img2img=False,
-                 num_mask_classes=4, latent_channels=3):
+                 num_mask_classes=4, latent_channels=3,
+                 scale_factor=0.866):
         """
         stage1: the autoencoder model to decode latents to image space.
         model: the diffusion model.
@@ -169,6 +170,9 @@ class GenericSampler():
         return_latents: if True, return latents along with images.
         num_mask_classes: number of mask classes (including background).
         latent_channels: number of VAE latent channels.
+        scale_factor: latent whitening factor used at stage-2 training time;
+            latents are divided by this before AE decode. Default 0.866
+            matches the released MaxFeat/RadBERT LDM.
         """
         super().__init__()
         self.stage1 = stage1
@@ -182,6 +186,7 @@ class GenericSampler():
         self.img2img = img2img
         self.num_mask_classes = num_mask_classes
         self.latent_channels = latent_channels
+        self.scale_factor = float(scale_factor)
 
     @torch.no_grad()
     def sample(self, steps, batch_size, latent_shape, 
@@ -278,6 +283,9 @@ class GenericSampler():
             self.text_encoder.to("cpu")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+        
+        # Undo stage-2 latent whitening before decode (mirrors the training-time scaling).
+        latents = latents / self.scale_factor
         
         # Decode the latents to image space using stage1 model
         if decode_amp_dtype is not None:

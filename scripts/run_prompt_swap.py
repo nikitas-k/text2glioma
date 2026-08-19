@@ -148,6 +148,7 @@ def _load_generation_stack(args):
         device=device,
         num_mask_classes=num_mask_classes,
         latent_channels=latent_ch,
+        scale_factor=args.scale_factor,
     )
     return sampler, (latent_ch,) + latent_spatial, device
 
@@ -320,6 +321,10 @@ def build_parser():
     g.add_argument("--guidance_scale_mask", type=float, default=1.0)
     g.add_argument("--ddim_steps", type=int, default=50)
     g.add_argument("--spatial_size", type=int, nargs=3, default=[160, 224, 160])
+    g.add_argument("--scale_factor", type=float, default=0.866,
+                   help="Latent whitening factor; latents are divided by this "
+                        "before AE decode. Default 0.866 matches the released "
+                        "MaxFeat/RadBERT LDM.")
     g.add_argument("--decode_fp16", action="store_true",
                    help="Decode with fp16 autocast (V100-safe; halves AE activation VRAM).")
     g.add_argument("--offload_during_decode", action="store_true",
