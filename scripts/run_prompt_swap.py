@@ -136,8 +136,17 @@ def _load_generation_stack(args):
     stage1.to(device); model.to(device); text_encoder.to(device)
 
     latent_ch = config.get("model", {}).get("latent_channels", 3)
-    latent_spatial = tuple(config.get("sampling", {}).get("latent_shape", (28, 32, 28)))
+    mask_spatial = tuple(config.get("mask", {}).get("spatial_size", (160, 224, 160)))
+    stage1_levels = len(stage1_config["model"]["params"]["num_channels"]) - 1
+    downsample_factor = 2 ** stage1_levels
+    explicit_latent = config.get("sampling", {}).get("latent_shape")
+    if explicit_latent is not None:
+        latent_spatial = tuple(explicit_latent)
+    else:
+        latent_spatial = tuple(s // downsample_factor for s in mask_spatial)
     num_mask_classes = config.get("mask", {}).get("num_classes", 4)
+    print(f"[generate] mask spatial={mask_spatial}  AE factor={downsample_factor}  "
+          f"latent_shape=({latent_ch},)+{latent_spatial}")
 
     sampler = GenericSampler(
         stage1=stage1,
