@@ -66,9 +66,19 @@ def main():
     guidance_scale_text = args.guidance_scale_text
     guidance_scale_mask = args.guidance_scale_mask
     rescale_intensity = args.rescale_intensity
-    latent_shape = config.get("sampling", {}).get("latent_shape", (28, 32, 28))
+    stage1_config = load_config(args.stage1_config)
     latent_channels = config.get("model", {}).get("latent_channels", 3)
-    latent_shape = (latent_channels, ) + tuple(latent_shape)
+    mask_spatial = tuple(config.get("mask", {}).get("spatial_size", (160, 224, 160)))
+    stage1_levels = len(stage1_config["model"]["params"]["num_channels"]) - 1
+    downsample_factor = 2 ** stage1_levels
+    explicit_latent = config.get("sampling", {}).get("latent_shape")
+    if explicit_latent is not None:
+        latent_spatial = tuple(explicit_latent)
+    else:
+        latent_spatial = tuple(s // downsample_factor for s in mask_spatial)
+    latent_shape = (latent_channels,) + latent_spatial
+    print(f"[sample] mask spatial={mask_spatial}  AE factor={downsample_factor}  "
+          f"latent_shape={latent_shape}")
     num_mask_classes = config.get("mask", {}).get("num_classes", 4)
     text_field = args.text_field
     mask_field = args.mask_field
@@ -84,7 +94,6 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    stage1_config = load_config(args.stage1_config)
     stage1 = stage1_ify(
         get_model(
             model_type="AutoencoderKL", config=stage1_config, from_file=args.stage1_uri
