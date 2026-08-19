@@ -262,6 +262,14 @@ class GenericSampler():
             # Compute the previous noisy sample x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents)[0]
         
+        if not torch.isfinite(latents).all():
+            n = (~torch.isfinite(latents)).float().mean().item()
+            raise RuntimeError(
+                f"Diffusion produced non-finite latents ({n:.1%} bad); "
+                "typical cause is CFG too high, wrong scale_factor, or a "
+                "config/checkpoint mismatch."
+            )
+        
         # Free VRAM on 32 GB cards: UNet + text encoder are unused for the AE decode.
         if offload_diffusion_during_decode:
             model_dev = next(self.model.parameters()).device
@@ -278,6 +286,14 @@ class GenericSampler():
             images = images.float()
         else:
             images = self.stage1.model.decode(latents)
+        
+        if not torch.isfinite(images).all():
+            n = (~torch.isfinite(images)).float().mean().item()
+            raise RuntimeError(
+                f"AE decode produced non-finite images ({n:.1%} bad); "
+                "decode_amp_dtype=fp16 is a known offender for 3D AutoencoderKL "
+                "(GroupNorm variance can overflow); rerun in fp32."
+            )
         
         if offload_diffusion_during_decode:
             self.model.to(model_dev)
