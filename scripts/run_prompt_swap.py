@@ -239,22 +239,65 @@ def cmd_generate(args):
 # ---------------------------------------------------------------------------
 
 
+def _pad_or_crop_to(arr: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Center pad or crop a 3D volume to ``target_shape`` (no resampling)."""
+    out = arr
+    for axis, (cur, tgt) in enumerate(zip(out.shape, target_shape)):
+        if cur == tgt:
+            continue
+        if cur < tgt:
+            pad_total = tgt - cur
+            before = pad_total // 2
+            pad = [(0, 0)] * out.ndim
+            pad[axis] = (before, pad_total - before)
+            out = np.pad(out, pad, mode="constant", constant_values=0)
+        else:
+            crop_total = cur - tgt
+            before = crop_total // 2
+            slicer = [slice(None)] * out.ndim
+            slicer[axis] = slice(before, before + tgt)
+            out = out[tuple(slicer)]
+    return out
+
+
+def _atlas_reference(atlas_dir: str):
+    ref = nib.load(str(Path(atlas_dir) / "brainstem.nii.gz"))
+    return tuple(np.asarray(ref.dataobj).shape), ref.affine
+
+
+def _align_seg_to_atlas(seg_path: str, atlas_shape, atlas_affine, out_dir: Path) -> str:
+    nii = nib.load(seg_path)
+    arr = np.asarray(nii.dataobj)
+    if tuple(arr.shape) == tuple(atlas_shape):
+        return seg_path
+    aligned = _pad_or_crop_to(arr, atlas_shape).astype(np.int16)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / Path(seg_path).name
+    nib.save(nib.Nifti1Image(aligned, atlas_affine), str(out_path))
+    return str(out_path)
+
+
 def _extract_vasari_from_dir(
     pair_ids, seg_dir, atlas_dir, enhancing_label, nonenhancing_label, oedema_label
 ):
     """Return a DataFrame indexed by pair_id, one row per successfully-segmented pair."""
     from text2glioma.preprocessing.vasari_auto import get_vasari_features
 
-    atlas_dir = atlas_dir.rstrip("/") + "/"
+    atlas_dir_str = atlas_dir.rstrip("/") + "/"
+    atlas_shape, atlas_affine = _atlas_reference(atlas_dir)
     seg_dir = Path(seg_dir)
+    aligned_dir = seg_dir.parent / f"{seg_dir.name}_atlasspace"
     rows = {}
     for pid in pair_ids:
         candidates = list(seg_dir.glob(f"{pid}*.nii*"))
         if not candidates:
             continue
+        aligned = _align_seg_to_atlas(
+            str(candidates[0]), atlas_shape, atlas_affine, aligned_dir,
+        )
         df = get_vasari_features(
-            file=str(candidates[0]),
-            atlases=atlas_dir,
+            file=aligned,
+            atlases=atlas_dir_str,
             enhancing_label=enhancing_label,
             nonenhancing_label=nonenhancing_label,
             oedema_label=oedema_label,
