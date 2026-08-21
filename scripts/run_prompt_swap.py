@@ -278,9 +278,14 @@ def _align_seg_to_atlas(seg_path: str, atlas_shape, atlas_affine, out_dir: Path)
 
 
 def _extract_vasari_from_dir(
-    pair_ids, seg_dir, atlas_dir, enhancing_label, nonenhancing_label, oedema_label
+    pair_ids, seg_dir, atlas_dir, enhancing_label, nonenhancing_label, oedema_label,
+    min_lesion_voxels: int = 10,
 ):
-    """Return a DataFrame indexed by pair_id, one row per successfully-segmented pair."""
+    """Return a DataFrame indexed by pair_id, one row per successfully-segmented pair.
+
+    Pairs with fewer than ``min_lesion_voxels`` foreground voxels or where
+    vasari-auto raises are silently skipped and reported at the end.
+    """
     from text2glioma.preprocessing.vasari_auto import get_vasari_features
 
     atlas_dir_str = atlas_dir.rstrip("/") + "/"
@@ -288,22 +293,43 @@ def _extract_vasari_from_dir(
     seg_dir = Path(seg_dir)
     aligned_dir = seg_dir.parent / f"{seg_dir.name}_atlasspace"
     rows = {}
+    skipped_empty: list[str] = []
+    skipped_error: list[tuple[str, str]] = []
     for pid in pair_ids:
         candidates = list(seg_dir.glob(f"{pid}*.nii*"))
         if not candidates:
             continue
+        raw_arr = np.asarray(nib.load(str(candidates[0])).dataobj)
+        if int((raw_arr > 0).sum()) < min_lesion_voxels:
+            skipped_empty.append(pid)
+            continue
         aligned = _align_seg_to_atlas(
             str(candidates[0]), atlas_shape, atlas_affine, aligned_dir,
         )
-        df = get_vasari_features(
-            file=aligned,
-            atlases=atlas_dir_str,
-            enhancing_label=enhancing_label,
-            nonenhancing_label=nonenhancing_label,
-            oedema_label=oedema_label,
-            verbose=False,
-        )
+        try:
+            df = get_vasari_features(
+                file=aligned,
+                atlases=atlas_dir_str,
+                enhancing_label=enhancing_label,
+                nonenhancing_label=nonenhancing_label,
+                oedema_label=oedema_label,
+                verbose=False,
+            )
+        except (UnboundLocalError, ZeroDivisionError, ValueError, KeyError) as e:
+            skipped_error.append((pid, f"{type(e).__name__}: {e}"))
+            continue
         rows[pid] = df.iloc[0].to_dict() if isinstance(df, pd.DataFrame) else dict(df)
+
+    if skipped_empty:
+        logging.warning(
+            "vasari extraction skipped %d empty segmentations in %s: %s",
+            len(skipped_empty), seg_dir.name, skipped_empty[:10],
+        )
+    if skipped_error:
+        logging.warning(
+            "vasari extraction failed on %d cases in %s: %s",
+            len(skipped_error), seg_dir.name, skipped_error[:5],
+        )
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
